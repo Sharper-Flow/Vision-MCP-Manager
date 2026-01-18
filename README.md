@@ -12,24 +12,69 @@ Vision replaces complex multi-layer setups (Jarvis/MCPM) with a single Go binary
 - **Isolates sessions** - Process-per-session for stateful servers
 - **Allocates ports** - Each server gets a dedicated port (6276-6300) for security isolation
 
+## Installation
+
+### Quick Install (Recommended)
+
+```bash
+# Download and run the installer
+curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/trunk/scripts/install.sh | bash
+
+# Or with options
+curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/trunk/scripts/install.sh | bash -s -- --migrate
+```
+
+### From Source
+
+```bash
+git clone https://github.com/Sharper-Flow/Vision-MCP-Manager.git
+cd Vision-MCP-Manager
+make build
+sudo cp bin/vision /usr/local/bin/
+```
+
+### Systemd Service (Optional)
+
+```bash
+# User service (no sudo)
+cp scripts/vision-user.service ~/.config/systemd/user/vision.service
+systemctl --user daemon-reload
+systemctl --user enable --now vision
+
+# System service (requires sudo)
+sudo cp scripts/vision.service /etc/systemd/system/vision@.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now vision@$USER
+```
+
 ## Quick Start
 
 ```bash
-# Build
-make build
-
 # Add a server to the registry
-./bin/vision server add time --command npx --args "-y @anthropic/mcp-time"
+vision server add time --command npx --args "-y @anthropic/mcp-time"
 
 # Start the daemon
-./bin/vision daemon start
+vision daemon start
 
-# Initialize OpenCode config (global)
-./bin/vision init --global
+# Initialize OpenCode/Claude Code config (global)
+vision init --global
 
 # Or for a specific project
 cd /path/to/project
-./bin/vision init
+vision init
+```
+
+### Migrating from Jarvis/MCPM
+
+```bash
+# Preview what would be migrated
+vision migrate --dry-run
+
+# Perform migration
+vision migrate
+
+# Or use the standalone script
+./scripts/migrate-from-mcpm.sh --dry-run
 ```
 
 ## Configuration

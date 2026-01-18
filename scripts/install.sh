@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+#
+# Vision MCP Daemon Installation Script
+# https://github.com/Sharper-Flow/Vision-MCP-Manager
+#
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Defaults
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+CONFIG_DIR="${HOME}/.config/vision"
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+VERSION="${VERSION:-latest}"
+REPO="Sharper-Flow/Vision-MCP-Manager"
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+usage() {
+    cat <<EOF
+Vision MCP Daemon Installer
+
+Usage: $0 [OPTIONS]
+
+Options:
+  --system          Install system-wide (requires sudo)
+  --user            Install for current user only (default)
+  --no-service      Skip systemd service installation
+  --migrate         Migrate from Jarvis/MCPM after install
+  --version VER     Install specific version (default: latest)
+  --help            Show this help message
+
+Examples:
+  $0                    # Install for current user
+  $0 --system           # Install system-wide
+  $0 --migrate          # Install and migrate from Jarvis/MCPM
+EOF
+}
+
+detect_platform() {
+    local os arch
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    arch=$(uname -m)
+    
+    case "$arch" in
+        x86_64|amd64) arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) log_error "Unsupported architecture: $arch"; exit 1 ;;
+    esac
+    
+    case "$os" in
+        linux) os="linux" ;;
+        darwin) os="darwin" ;;
+        *) log_error "Unsupported OS: $os"; exit 1 ;;
+    esac
+    
+    echo "${os}_${arch}"
+}
+
+get_latest_version() {
+    curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | \
+        grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+}
+
+download_binary() {
+    local platform="$1"
+    local version="$2"
+    local dest="$3"
+    
+    if [[ "$version" == "latest" ]]; then
+        version=$(get_latest_version)
+        log_info "Latest version: $version"
+    fi
+    
+    local url="https://github.com/${REPO}/releases/download/${version}/vision_${platform}.tar.gz"
+    local tmpdir=$(mktemp -d)
+    
+    log_info "Downloading Vision ${version} for ${platform}..."
+    
+    if ! curl -fsSL "$url" -o "${tmpdir}/vision.tar.gz"; then
+        log_error "Failed to download from $url"
+        rm -rf "$tmpdir"
+        exit 1
+    fi
+    
+    tar -xzf "${tmpdir}/vision.tar.gz" -C "$tmpdir"
+    
+    mkdir -p "$(dirname "$dest")"
+    mv "${tmpdir}/vision" "$dest"
+    chmod +x "$dest"
+    
+    rm -rf "$tmpdir"
+    log_success "Binary installed to $dest"
+}
+
+build_from_source() {
+    local dest="$1"
+    
+    log_info "Building from source..."
+    
+    if ! command -v go &>/dev/null; then
+        log_error "Go is required to build from source. Install Go or use a pre-built release."
+        exit 1
+    fi
+    
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local project_dir="$(dirname "$script_dir")"
+    
+    cd "$project_dir"
+    
+    go build -o "$dest" ./cmd/vision
+    chmod +x "$dest"
+    
+    log_success "Built and installed to $dest"
+}
+
+install_config() {
+    local config_file="${CONFIG_DIR}/servers.yaml"
+    
+    mkdir -p "$CONFIG_DIR"
+    
+    if [[ -f "$config_file" ]]; then
+        log_warn "Config file already exists: $config_file"
+        return
+    fi
+    
+    log_info "Creating default config at $config_file"
+    
+    cat > "$config_file" <<'YAML'
+# Vision MCP Server Configuration
+# See: https://github.com/Sharper-Flow/Vision-MCP-Manager
+
+supervision:
+  shutdown_timeout: 30s
+  restart_delay: 1s
+  max_restart_delay: 5m
+  health_check_interval: 30s
+
+servers:
+  # Example: Time server
+  # time:
+  #   port: 6276
+  #   command: npx
+  #   args: ["-y", "@anthropic/mcp-time"]
+  #   autostart: true
+  
+  # Example: Context7 documentation server
+  # context7:
+  #   port: 6277
+  #   command: npx
+  #   args: ["-y", "@context7/mcp-server"]
+  #   env:
+  #     CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+  #   autostart: true
+YAML
+    
+    log_success "Created default config"
+}
+
+install_systemd_user() {
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local service_file="${script_dir}/vision-user.service"
+    
+    if [[ ! -f "$service_file" ]]; then
+        log_warn "User service file not found: $service_file"
+        return
+    fi
+    
+    mkdir -p "$SYSTEMD_USER_DIR"
+    cp "$service_file" "${SYSTEMD_USER_DIR}/vision.service"
+    
+    # Update path to binary
+    sed -i "s|%h/.local/bin/vision|${INSTALL_DIR}/vision|g" "${SYSTEMD_USER_DIR}/vision.service"
+    
+    systemctl --user daemon-reload
+    
+    log_success "Systemd user service installed"
+    log_info "To enable: systemctl --user enable vision"
+    log_info "To start:  systemctl --user start vision"
+}
+
+install_systemd_system() {
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local service_file="${script_dir}/vision.service"
+    
+    if [[ ! -f "$service_file" ]]; then
+        log_warn "System service file not found: $service_file"
+        return
+    fi
+    
+    sudo cp "$service_file" /etc/systemd/system/vision@.service
+    sudo systemctl daemon-reload
+    
+    log_success "Systemd system service installed"
+    log_info "To enable: sudo systemctl enable vision@${USER}"
+    log_info "To start:  sudo systemctl start vision@${USER}"
+}
+
+migrate_from_mcpm() {
+    log_info "Checking for Jarvis/MCPM configuration..."
+    
+    local mcpm_servers="${HOME}/.mcpm/servers.json"
+    
+    if [[ ! -f "$mcpm_servers" ]]; then
+        log_warn "No MCPM servers.json found at $mcpm_servers"
+        log_info "Skipping migration"
+        return
+    fi
+    
+    log_info "Found MCPM config. Running migration..."
+    
+    if command -v vision &>/dev/null; then
+        vision migrate --dry-run
+        
+        read -p "Proceed with migration? [y/N] " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            vision migrate
+            log_success "Migration complete"
+        else
+            log_info "Migration skipped"
+        fi
+    else
+        log_warn "Vision binary not in PATH. Run migration manually after install."
+    fi
+}
+
+main() {
+    local system_install=false
+    local skip_service=false
+    local do_migrate=false
+    local from_source=false
+    
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --system) system_install=true; shift ;;
+            --user) system_install=false; shift ;;
+            --no-service) skip_service=true; shift ;;
+            --migrate) do_migrate=true; shift ;;
+            --version) VERSION="$2"; shift 2 ;;
+            --from-source) from_source=true; shift ;;
+            --help) usage; exit 0 ;;
+            *) log_error "Unknown option: $1"; usage; exit 1 ;;
+        esac
+    done
+    
+    echo ""
+    echo "========================================"
+    echo "  Vision MCP Daemon Installer"
+    echo "========================================"
+    echo ""
+    
+    local platform=$(detect_platform)
+    log_info "Detected platform: $platform"
+    
+    # Set install directory based on mode
+    if $system_install; then
+        INSTALL_DIR="/usr/local/bin"
+        log_info "Installing system-wide to $INSTALL_DIR"
+    else
+        INSTALL_DIR="${HOME}/.local/bin"
+        log_info "Installing for user to $INSTALL_DIR"
+    fi
+    
+    # Install binary
+    if $from_source; then
+        build_from_source "${INSTALL_DIR}/vision"
+    else
+        download_binary "$platform" "$VERSION" "${INSTALL_DIR}/vision"
+    fi
+    
+    # Install default config
+    install_config
+    
+    # Install systemd service
+    if ! $skip_service; then
+        if $system_install; then
+            install_systemd_system
+        else
+            install_systemd_user
+        fi
+    fi
+    
+    # Add to PATH reminder
+    if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
+        log_warn "${INSTALL_DIR} is not in your PATH"
+        log_info "Add this to your shell profile:"
+        echo "    export PATH=\"\${PATH}:${INSTALL_DIR}\""
+    fi
+    
+    # Migration
+    if $do_migrate; then
+        migrate_from_mcpm
+    fi
+    
+    echo ""
+    log_success "Installation complete!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Edit config: $CONFIG_DIR/servers.yaml"
+    echo "  2. Start daemon: vision daemon start"
+    echo "  3. Check status: vision daemon status"
+    echo ""
+}
+
+main "$@"

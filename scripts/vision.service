@@ -1,0 +1,30 @@
+[Unit]
+Description=Vision MCP Daemon
+Documentation=https://github.com/Sharper-Flow/Vision-MCP-Manager
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/local/bin/vision daemon start --foreground
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Environment file for API keys and secrets
+EnvironmentFile=-/etc/vision/environment
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/%i/.config/vision
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vision
+
+[Install]
+WantedBy=multi-user.target
