@@ -60,3 +60,50 @@ rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
 ```
 
 This allows all development to use project-local configs.
+
+## Integration Testing
+
+### Running Integration Tests
+
+```bash
+# Run all integration tests
+go test ./internal/integration/... -v
+
+# Run a specific test
+go test ./internal/integration/... -v -run TestFullRequestFlow
+
+# Skip integration tests (short mode)
+go test ./internal/integration/... -short
+```
+
+### Test Architecture
+
+Integration tests use embedded Node.js MCP servers defined as JavaScript strings in the test file. This ensures:
+- **Reproducibility**: No external dependencies needed
+- **Speed**: Servers start immediately
+- **Control**: Tests can define custom server behavior (echo, crash, etc.)
+
+### Key Findings from Integration Testing
+
+1. **Cleanup Order Matters**: When tearing down tests, resources must be closed in this order:
+   - Port manager (stops HTTP listener)
+   - Context cancel (triggers supervisor to terminate subprocess)
+   - Wait for subprocess termination (pipes close naturally)
+   - Bridge close (readLoop exits because pipes are closed)
+
+2. **Bridge ReadLoop Blocking**: The bridge's `readLoop` blocks on `scanner.Scan()` until the underlying pipe is closed. Cancelling the context alone is not sufficient - the subprocess must terminate to close the stdout pipe.
+
+3. **Concurrent Access**: The bridge correctly handles concurrent requests through:
+   - Mutex-protected stdin writes
+   - Request ID correlation for response matching
+   - Pending request channels for async response routing
+
+### Test Coverage
+
+| Test | What it validates |
+|------|-------------------|
+| `TestBridgeWithPipes` | Bridge works with mock in-memory pipes |
+| `TestFullRequestFlow` | HTTP → Bridge → Subprocess → Response |
+| `TestConcurrentClients` | 10 simultaneous clients work correctly |
+| `TestCrashRecovery` | Supervisor restarts crashed processes |
+| `TestHealthEndpoint` | Per-server /health endpoint works |
