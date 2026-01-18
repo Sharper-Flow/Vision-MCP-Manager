@@ -7,10 +7,16 @@
 # Port allocation: 6276-6300 (Management API uses 6275)
 
 servers:
+  #############################################################################
+  # STDIO SERVERS (Most Common)
+  # Vision spawns these as subprocesses and bridges stdio <-> HTTP
+  #############################################################################
+
   # Time server - provides current time tools
   # Install: npx -y @anthropic/mcp-time (auto-installed on first run)
   time:
     port: 6276
+    transport: stdio          # Default, can be omitted
     command: npx
     args: ["-y", "@anthropic/mcp-time"]
     autostart: true
@@ -22,7 +28,7 @@ servers:
   # Requires: CONTEXT7_API_KEY environment variable
   context7:
     port: 6277
-    command: npx
+    command: npx              # transport: stdio is implied when command is set
     args: ["-y", "@upstash/context7-mcp"]
     env:
       CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
@@ -42,29 +48,57 @@ servers:
       - "--allowed-directories"
       - "${HOME}/dev"
       - "${HOME}/projects"
-    autostart: false  # Enable manually when needed
+    autostart: false          # Enable manually when needed
     restart_policy: on-failure
-
-  # PostgreSQL server - database operations
-  # Install: npx -y @anthropic/mcp-postgres
-  # Requires: DATABASE_URL environment variable
-  # postgres:
-  #   port: 6279
-  #   command: npx
-  #   args: ["-y", "@anthropic/mcp-postgres"]
-  #   env:
-  #     DATABASE_URL: "${DATABASE_URL}"
-  #   autostart: false
-  #   restart_policy: on-failure
 
   # Example: Python-based MCP server via uvx
   # my-python-server:
-  #   port: 6280
+  #   port: 6279
   #   command: uvx
   #   args: ["my-mcp-server"]
   #   env:
   #     MY_CONFIG: "/path/to/config"
   #   autostart: true
+
+  #############################################################################
+  # HTTP SERVERS (Native Streamable HTTP)
+  # Vision proxies to these - no subprocess spawning
+  #############################################################################
+
+  # Example: Remote MCP server already exposing Streamable HTTP
+  # remote-api:
+  #   port: 6280
+  #   transport: http
+  #   url: "http://internal-server:8080/mcp"
+  #   headers:                 # Optional: headers to forward
+  #     Authorization: "Bearer ${API_TOKEN}"
+  #   autostart: true          # Just means "start proxying on daemon start"
+
+  #############################################################################
+  # SSE SERVERS (Legacy - Backwards Compatibility)
+  # For older MCP servers using the deprecated SSE transport
+  #############################################################################
+
+  # Example: Legacy SSE server
+  # legacy-server:
+  #   port: 6281
+  #   transport: sse
+  #   url: "http://legacy-host:8080"
+  #   autostart: false
+
+  #############################################################################
+  # STATEFUL SERVERS (Process-per-Session)
+  # For servers where each client needs isolated state
+  #############################################################################
+
+  # Example: Stateful server that needs process isolation
+  # stateful-db:
+  #   port: 6282
+  #   command: npx
+  #   args: ["-y", "@example/stateful-mcp"]
+  #   stateful: true           # Spawn new process per session
+  #   session_timeout: 5m      # Kill idle sessions after 5 minutes
+  #   max_sessions: 10         # Limit concurrent sessions
 
 # Global supervision settings
 supervision:
