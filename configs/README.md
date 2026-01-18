@@ -9,18 +9,27 @@ These files are templates - they are NOT used directly by Vision at runtime.
 | File | Purpose | Runtime Location |
 |------|---------|------------------|
 | `servers.example.yaml` | Server registry template | `~/.config/vision/servers.yaml` |
-| `claude-code.example.json` | Claude Code client config | `~/.claude.json` (global) or `.claude/settings.json` (project) |
-| `opencode.example.json` | OpenCode client config | `~/.config/opencode/opencode.json` or `./opencode.json` |
+| `opencode.example.json` | OpenCode client config | See locations below |
+
+## OpenCode Configuration Locations
+
+OpenCode searches for `.opencode.json` in this order (first found wins):
+
+1. **Project-local**: `./.opencode.json` (current directory)
+2. **XDG Config**: `$XDG_CONFIG_HOME/opencode/.opencode.json`
+3. **Home**: `$HOME/.opencode.json`
+
+**Recommendation**: Use `$HOME/.opencode.json` for global config, `./.opencode.json` for project overrides.
 
 ## Usage
 
 ### Option 1: Use `vision init` (Recommended)
 
 ```bash
-# Generate global config (all projects)
+# Generate global config (~/.opencode.json)
 vision init --global
 
-# Generate project-specific config
+# Generate project-specific config (./.opencode.json)
 cd /path/to/project
 vision init
 
@@ -36,17 +45,39 @@ mkdir -p ~/.config/vision
 cp configs/servers.example.yaml ~/.config/vision/servers.yaml
 # Edit to add your servers and API keys
 
-# Claude Code (global)
-cp configs/claude-code.example.json ~/.claude.json
+# OpenCode (global)
+cp configs/opencode.example.json ~/.opencode.json
 
-# Claude Code (project)
-mkdir -p .claude
-cp configs/claude-code.example.json .claude/settings.json
+# OpenCode (project-local)
+cp configs/opencode.example.json ./.opencode.json
+```
+
+## MCP Server Types in OpenCode
+
+OpenCode supports two MCP transport types:
+
+| Type | Use Case | Config |
+|------|----------|--------|
+| `stdio` | Local process (direct spawn) | `command`, `args`, `env` |
+| `sse` | Remote HTTP/SSE endpoint | `url`, `headers` (optional) |
+
+**Vision uses `sse` type** because it exposes MCP servers as HTTP endpoints:
+
+```json
+{
+  "mcpServers": {
+    "time": {
+      "type": "sse",
+      "url": "http://localhost:6276/mcp"
+    }
+  }
+}
 ```
 
 ## Important Notes
 
 - **Never commit `servers.yaml`** - It may contain API keys and secrets
-- **Never commit `.claude.json` or `.claude/`** - User-specific configuration
+- **Never commit `.opencode.json`** - User-specific configuration
 - Environment variables like `${CONTEXT7_API_KEY}` are expanded at runtime
 - Port numbers in client configs must match the server registry
+- Each Vision-managed server gets a dedicated port (6276-6300)

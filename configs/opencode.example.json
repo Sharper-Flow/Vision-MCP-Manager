@@ -1,24 +1,24 @@
 {
-  "$schema": "https://opencode.ai/schema/config.json",
-  
-  "// README": "This is an example OpenCode configuration for Vision-managed MCP servers.",
-  "// Location": "Place in ~/.config/opencode/opencode.json or ./opencode.json",
-  
-  "mcp": {
+  "// README": "OpenCode configuration for Vision-managed MCP servers.",
+  "// Locations": [
+    "$HOME/.opencode.json (global)",
+    "$XDG_CONFIG_HOME/opencode/.opencode.json (global alt)",
+    "./.opencode.json (project-local)"
+  ],
+  "// Note": "Vision exposes MCP servers via HTTP/SSE, so use type 'sse' with url.",
+
+  "mcpServers": {
     "time": {
-      "type": "remote",
-      "url": "http://localhost:6276/mcp",
-      "enabled": true
+      "type": "sse",
+      "url": "http://localhost:6276/mcp"
     },
     "context7": {
-      "type": "remote",
-      "url": "http://localhost:6277/mcp",
-      "enabled": true
+      "type": "sse",
+      "url": "http://localhost:6277/mcp"
     },
     "filesystem": {
-      "type": "remote",
-      "url": "http://localhost:6278/mcp",
-      "enabled": true
+      "type": "sse",
+      "url": "http://localhost:6278/mcp"
     }
   }
 }

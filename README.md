@@ -24,7 +24,7 @@ make build
 # Start the daemon
 ./bin/vision daemon start
 
-# Initialize Claude Code config (global)
+# Initialize OpenCode config (global)
 ./bin/vision init --global
 
 # Or for a specific project
@@ -53,32 +53,37 @@ servers:
     autostart: true
 ```
 
-### Client Configuration
+### Client Configuration (OpenCode)
 
-Vision generates client configs for AI agents:
+Vision generates OpenCode configs. OpenCode searches for `.opencode.json` in:
 
-**Claude Code** (`~/.claude.json` or `.claude/settings.json`):
+1. `./.opencode.json` (project-local, highest priority)
+2. `$XDG_CONFIG_HOME/opencode/.opencode.json`
+3. `$HOME/.opencode.json` (global)
+
 ```json
 {
   "mcpServers": {
     "time": {
-      "url": "http://localhost:6276/mcp",
-      "transport": "streamable-http"
+      "type": "sse",
+      "url": "http://localhost:6276/mcp"
     },
     "context7": {
-      "url": "http://localhost:6277/mcp",
-      "transport": "streamable-http"
+      "type": "sse",
+      "url": "http://localhost:6277/mcp"
     }
   }
 }
 ```
+
+> **Note**: Vision exposes MCP servers via HTTP/SSE endpoints, so use `type: "sse"` with a `url`.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      AI Agents                              │
-│  (Claude Code, OpenCode, etc.)                              │
+│                      (OpenCode)                             │
 └─────────────────┬───────────────────────────────────────────┘
                   │ HTTP (Streamable HTTP transport)
                   ▼
@@ -117,12 +122,11 @@ vision server start <name>
 vision server stop <name>
 vision server restart <name>
 
-# Client configuration
-vision init --global                    # Configure ~/.claude.json
-vision init                             # Configure .claude/settings.json
+# Client configuration (OpenCode)
+vision init --global                    # Configure ~/.opencode.json (global)
+vision init                             # Configure ./.opencode.json (project)
 vision init --servers time,context7     # Specific servers only
 vision init --extend --servers extra    # Extend global config
-vision init --client opencode           # For OpenCode instead
 
 # Migration (from Jarvis/MCPM)
 vision migrate --dry-run   # Preview migration

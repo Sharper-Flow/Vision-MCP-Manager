@@ -43,8 +43,6 @@ dist/
 # These are created by `vision init` or manually by users
 # Templates/schemas in configs/ ARE tracked for reference
 servers.yaml
-.claude.json
-.claude/
 opencode.json
 
 # PID files (runtime)
