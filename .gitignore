@@ -41,9 +41,12 @@ dist/
 
 # Vision runtime configuration (user-specific, contains secrets)
 # These are created by `vision init` or manually by users
-# Templates/schemas in configs/ ARE tracked for reference
+# Templates in configs/ and testdata/ ARE tracked
 servers.yaml
 opencode.json
+
+# But keep testdata configs (they're test fixtures, not real configs)
+!testdata/
 
 # PID files (runtime)
 *.pid

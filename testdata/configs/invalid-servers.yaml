@@ -1,0 +1,23 @@
+# Test configuration - INVALID config for error handling tests
+# This file contains intentional errors to test validation.
+
+servers:
+  # Missing required 'command' field
+  broken-server:
+    port: 6276
+    args: ["test"]
+
+  # Invalid port (out of range)
+  bad-port:
+    port: 99999
+    command: echo
+
+  # Duplicate port (conflicts with broken-server)
+  port-conflict:
+    port: 6276
+    command: echo
+
+  # Empty command
+  empty-command:
+    port: 6278
+    command: ""

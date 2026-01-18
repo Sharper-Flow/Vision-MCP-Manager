@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "time": {
+      "type": "sse",
+      "url": "http://localhost:6276/mcp"
+    },
+    "echo": {
+      "type": "sse",
+      "url": "http://localhost:6277/mcp"
+    }
+  }
+}

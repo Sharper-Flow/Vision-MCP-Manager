@@ -1,0 +1,26 @@
+# Test configuration - valid servers for development/testing
+# This file is used by tests and manual development only.
+# It does NOT affect the machine's global Vision configuration.
+
+servers:
+  time:
+    port: 6276
+    command: npx
+    args: ["-y", "@anthropic/mcp-time"]
+    autostart: true
+    restart_policy: always
+    max_restarts: 5
+
+  echo:
+    port: 6277
+    command: echo
+    args: ["test"]
+    autostart: false
+    restart_policy: on-failure
+    max_restarts: 3
+
+supervision:
+  health_check_interval: 30s
+  shutdown_timeout: 10s
+  restart_delay: 1s
+  max_restart_delay: 60s
