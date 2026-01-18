@@ -20,8 +20,9 @@ import (
 
 // Daemon is the main Vision daemon that coordinates all components.
 type Daemon struct {
-	cfg        *config.Config
-	configPath string
+	cfg            *config.Config
+	configPath     string
+	managementPort int
 
 	supervisor  *supervisor.Supervisor
 	registry    *server.Registry
@@ -83,15 +84,16 @@ func New(cfg Config) (*Daemon, error) {
 	})
 
 	return &Daemon{
-		cfg:         visionCfg,
-		configPath:  cfg.ConfigPath,
-		supervisor:  sup,
-		registry:    reg,
-		portManager: pm,
-		apiServer:   apiSrv,
-		logger:      cfg.Logger,
-		ctx:         ctx,
-		cancel:      cancel,
+		cfg:            visionCfg,
+		configPath:     cfg.ConfigPath,
+		managementPort: cfg.ManagementPort,
+		supervisor:     sup,
+		registry:       reg,
+		portManager:    pm,
+		apiServer:      apiSrv,
+		logger:         cfg.Logger,
+		ctx:            ctx,
+		cancel:         cancel,
 	}, nil
 }
 
@@ -320,7 +322,7 @@ type DaemonStatus struct {
 func (d *Daemon) runHTTPServer() {
 	defer d.wg.Done()
 
-	addr := fmt.Sprintf(":%d", 6275) // TODO: make configurable
+	addr := fmt.Sprintf(":%d", d.managementPort)
 
 	d.httpServer = &http.Server{
 		Addr:    addr,

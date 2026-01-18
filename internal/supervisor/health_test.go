@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 // mockBridge implements BridgeProvider for testing.
 type mockBridge struct {
+	mu        sync.RWMutex
 	response  []byte
 	err       error
 	callCount atomic.Int32
@@ -20,10 +22,24 @@ type mockBridge struct {
 
 func (m *mockBridge) ForwardRequest(ctx context.Context, data []byte) ([]byte, error) {
 	m.callCount.Add(1)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if m.err != nil {
 		return nil, m.err
 	}
 	return m.response, nil
+}
+
+func (m *mockBridge) SetError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.err = err
+}
+
+func (m *mockBridge) SetResponse(response []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.response = response
 }
 
 // --- HealthChecker Tests ---
@@ -102,9 +118,9 @@ func TestHealthChecker_RecoverAfterFailure(t *testing.T) {
 	// Wait for some failures
 	time.Sleep(150 * time.Millisecond)
 
-	// Now fix the bridge
-	bridge.err = nil
-	bridge.response = []byte(`{"jsonrpc":"2.0","id":"health-check","result":{"tools":[]}}`)
+	// Now fix the bridge (use thread-safe setters)
+	bridge.SetError(nil)
+	bridge.SetResponse([]byte(`{"jsonrpc":"2.0","id":"health-check","result":{"tools":[]}}`))
 
 	// Wait for recovery
 	time.Sleep(100 * time.Millisecond)

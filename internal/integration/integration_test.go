@@ -20,6 +20,7 @@ import (
 
 	"github.com/jrede/vision/internal/bridge"
 	"github.com/jrede/vision/internal/config"
+	"github.com/jrede/vision/internal/daemon"
 	"github.com/jrede/vision/internal/mcp"
 	"github.com/jrede/vision/internal/supervisor"
 )
@@ -678,6 +679,143 @@ rl.on('line', (line) => {
   }
 });
 `
+
+// TestHotReload tests configuration hot reload.
+// When the config file is modified and Reload() is called, new servers
+// should start and removed servers should stop.
+func TestHotReload(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	// Create initial config with one server
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "servers.yaml")
+
+	initialConfig := `
+supervision:
+  shutdown_timeout: 5s
+  restart_delay: 100ms
+  max_restart_delay: 1s
+
+servers:
+  server-a:
+    command: node
+    args: ["-e", "const rl=require('readline').createInterface({input:process.stdin});rl.on('line',l=>{const r=JSON.parse(l);console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'server-a',version:'1.0.0'}}}))});"]
+    port: 6290
+    autostart: true
+`
+	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
+		t.Fatalf("failed to write initial config: %v", err)
+	}
+
+	// Create daemon (use port 16299 for management API to avoid conflicts with MCPM on 6275)
+	d, err := daemon.New(daemon.Config{
+		ConfigPath:     configPath,
+		ManagementPort: 16299, // Test-only port, outside Vision's 6276-6300 range
+		Logger:         logger,
+	})
+	if err != nil {
+		t.Fatalf("failed to create daemon: %v", err)
+	}
+
+	// Start daemon
+	if err := d.Start(); err != nil {
+		t.Fatalf("failed to start daemon: %v", err)
+	}
+	defer d.Stop(5 * time.Second)
+
+	// Wait for server-a to start
+	time.Sleep(1 * time.Second)
+
+	// Verify server-a is running
+	status := d.Status()
+	t.Logf("Initial status: %+v", status)
+
+	found := false
+	for _, srv := range status.Registry.Servers {
+		if srv.Name == "server-a" {
+			found = true
+			if srv.State != "running" {
+				t.Errorf("server-a expected running, got %s", srv.State)
+			}
+		}
+	}
+	if !found {
+		t.Error("server-a not found in registry")
+	}
+
+	// Modify config: remove server-a, add server-b and server-c
+	newConfig := `
+supervision:
+  shutdown_timeout: 5s
+  restart_delay: 100ms
+  max_restart_delay: 1s
+
+servers:
+  server-b:
+    command: node
+    args: ["-e", "const rl=require('readline').createInterface({input:process.stdin});rl.on('line',l=>{const r=JSON.parse(l);console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'server-b',version:'1.0.0'}}}))});"]
+    port: 6291
+    autostart: true
+  server-c:
+    command: node
+    args: ["-e", "const rl=require('readline').createInterface({input:process.stdin});rl.on('line',l=>{const r=JSON.parse(l);console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'server-c',version:'1.0.0'}}}))});"]
+    port: 6292
+    autostart: true
+`
+	if err := os.WriteFile(configPath, []byte(newConfig), 0644); err != nil {
+		t.Fatalf("failed to write new config: %v", err)
+	}
+
+	// Trigger reload
+	t.Log("Triggering reload...")
+	if err := d.Reload(); err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+
+	// Wait for changes to take effect
+	time.Sleep(1 * time.Second)
+
+	// Verify the new state
+	status = d.Status()
+	t.Logf("Post-reload status: %+v", status)
+
+	// server-a should be gone
+	for _, srv := range status.Registry.Servers {
+		if srv.Name == "server-a" {
+			t.Error("server-a should have been removed but still exists")
+		}
+	}
+
+	// server-b and server-c should exist and be running
+	foundB, foundC := false, false
+	for _, srv := range status.Registry.Servers {
+		switch srv.Name {
+		case "server-b":
+			foundB = true
+			if srv.State != "running" {
+				t.Errorf("server-b expected running, got %s", srv.State)
+			}
+		case "server-c":
+			foundC = true
+			if srv.State != "running" {
+				t.Errorf("server-c expected running, got %s", srv.State)
+			}
+		}
+	}
+
+	if !foundB {
+		t.Error("server-b not found after reload")
+	}
+	if !foundC {
+		t.Error("server-c not found after reload")
+	}
+
+	t.Log("Hot reload test passed!")
+}
 
 // --- Config file helpers ---
 

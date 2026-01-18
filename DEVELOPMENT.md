@@ -107,3 +107,17 @@ Integration tests use embedded Node.js MCP servers defined as JavaScript strings
 | `TestConcurrentClients` | 10 simultaneous clients work correctly |
 | `TestCrashRecovery` | Supervisor restarts crashed processes |
 | `TestHealthEndpoint` | Per-server /health endpoint works |
+| `TestHotReload` | Config file changes trigger server add/remove |
+
+### Race Detection
+
+All tests pass with the Go race detector:
+
+```bash
+go test -race ./... -count=1
+```
+
+Key concurrency fixes:
+1. **ManagedProcess I/O**: `Stdin()` and `Stdout()` are protected by a separate `ioMu` mutex to prevent races between spawn() and accessors.
+2. **HealthChecker mockBridge**: Test mock uses thread-safe setters for concurrent access during recovery tests.
+3. **Daemon management port**: Now configurable via `ManagementPort` in daemon.Config.

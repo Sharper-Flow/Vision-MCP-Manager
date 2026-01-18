@@ -37,7 +37,8 @@ type ManagedProcess struct {
 	// Suture integration
 	token suture.ServiceToken
 
-	// Process I/O
+	// Process I/O (protected by ioMu - separate from mu to avoid holding mu during I/O)
+	ioMu   sync.RWMutex
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	stderr io.ReadCloser
@@ -112,14 +113,19 @@ func (p *ManagedProcess) spawn(_ context.Context) error {
 	// Merge environment variables
 	p.cmd.Env = p.buildEnv()
 
-	// Set up pipes for stdio
+	// Set up pipes for stdio (protected by ioMu)
 	var err1, err2, err3 error
-	p.stdin, err1 = p.cmd.StdinPipe()
-	p.stdout, err2 = p.cmd.StdoutPipe()
-	p.stderr, err3 = p.cmd.StderrPipe()
+	stdin, err1 := p.cmd.StdinPipe()
+	stdout, err2 := p.cmd.StdoutPipe()
+	stderr, err3 := p.cmd.StderrPipe()
 	if err := errors.Join(err1, err2, err3); err != nil {
 		return fmt.Errorf("failed to create pipes: %w", err)
 	}
+	p.ioMu.Lock()
+	p.stdin = stdin
+	p.stdout = stdout
+	p.stderr = stderr
+	p.ioMu.Unlock()
 
 	// Start the process
 	if err := p.cmd.Start(); err != nil {
@@ -358,12 +364,16 @@ func (p *ManagedProcess) Status() ServiceStatus {
 // Stdin returns the stdin pipe for the process.
 // Used by the bridge to send MCP messages to the subprocess.
 func (p *ManagedProcess) Stdin() io.WriteCloser {
+	p.ioMu.RLock()
+	defer p.ioMu.RUnlock()
 	return p.stdin
 }
 
 // Stdout returns the stdout pipe for the process.
 // Used by the bridge to receive MCP messages from the subprocess.
 func (p *ManagedProcess) Stdout() io.ReadCloser {
+	p.ioMu.RLock()
+	defer p.ioMu.RUnlock()
 	return p.stdout
 }
 
