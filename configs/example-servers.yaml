@@ -1,0 +1,81 @@
+# Vision Server Registry
+# Location: ~/.config/vision/servers.yaml
+#
+# This file defines all MCP servers available on this machine.
+# Each server gets a dedicated port for security isolation.
+#
+# Port allocation: 6276-6300 (Management API uses 6275)
+
+servers:
+  # Time server - provides current time tools
+  # Install: npx -y @anthropic/mcp-time (auto-installed on first run)
+  time:
+    port: 6276
+    command: npx
+    args: ["-y", "@anthropic/mcp-time"]
+    autostart: true
+    restart_policy: always
+    max_restarts: 5
+
+  # Context7 - library documentation lookup
+  # Install: npx -y @upstash/context7-mcp
+  # Requires: CONTEXT7_API_KEY environment variable
+  context7:
+    port: 6277
+    command: npx
+    args: ["-y", "@upstash/context7-mcp"]
+    env:
+      CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+    autostart: true
+    restart_policy: on-failure
+    max_restarts: 3
+
+  # Filesystem server - file operations
+  # Install: npx -y @anthropic/mcp-filesystem
+  # Note: Requires allowed_directories configuration
+  filesystem:
+    port: 6278
+    command: npx
+    args:
+      - "-y"
+      - "@anthropic/mcp-filesystem"
+      - "--allowed-directories"
+      - "${HOME}/dev"
+      - "${HOME}/projects"
+    autostart: false  # Enable manually when needed
+    restart_policy: on-failure
+
+  # PostgreSQL server - database operations
+  # Install: npx -y @anthropic/mcp-postgres
+  # Requires: DATABASE_URL environment variable
+  # postgres:
+  #   port: 6279
+  #   command: npx
+  #   args: ["-y", "@anthropic/mcp-postgres"]
+  #   env:
+  #     DATABASE_URL: "${DATABASE_URL}"
+  #   autostart: false
+  #   restart_policy: on-failure
+
+  # Example: Python-based MCP server via uvx
+  # my-python-server:
+  #   port: 6280
+  #   command: uvx
+  #   args: ["my-mcp-server"]
+  #   env:
+  #     MY_CONFIG: "/path/to/config"
+  #   autostart: true
+
+# Global supervision settings
+supervision:
+  # How often to check server health
+  health_check_interval: 30s
+  
+  # Time to wait for graceful shutdown
+  shutdown_timeout: 10s
+  
+  # Time to wait before restarting a crashed server
+  restart_delay: 1s
+  
+  # Maximum restart delay (for exponential backoff)
+  max_restart_delay: 60s

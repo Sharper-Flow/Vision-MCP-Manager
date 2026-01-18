@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/schema/config.json",
+  
+  "// README": "This is an example OpenCode configuration for Vision-managed MCP servers.",
+  "// Location": "Place in ~/.config/opencode/opencode.json or ./opencode.json",
+  
+  "mcp": {
+    "time": {
+      "type": "remote",
+      "url": "http://localhost:6276/mcp",
+      "enabled": true
+    },
+    "context7": {
+      "type": "remote",
+      "url": "http://localhost:6277/mcp",
+      "enabled": true
+    },
+    "filesystem": {
+      "type": "remote",
+      "url": "http://localhost:6278/mcp",
+      "enabled": true
+    }
+  }
+}
