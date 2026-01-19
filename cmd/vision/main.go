@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -60,12 +59,17 @@ It provides:
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
 
 	// Add commands
+	// Core daemon lifecycle commands (keep)
 	rootCmd.AddCommand(versionCmd())
 	rootCmd.AddCommand(daemonCmd())
-	rootCmd.AddCommand(serverCmd())
-	rootCmd.AddCommand(configCmd())
 	rootCmd.AddCommand(healthCmd())
-	rootCmd.AddCommand(initCmd())
+
+	// Config debugging commands (keep for operators)
+	rootCmd.AddCommand(configCmd())
+
+	// NOTE: Server management commands (server, init) have been removed.
+	// Use the Admin MCP tools (vision_list, vision_add, vision_remove, etc.)
+	// through the OpenCode plugin or direct MCP calls to port 6275.
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -255,173 +259,10 @@ func reloadDaemon() error {
 	return nil
 }
 
-// --- Server Commands ---
-
-func serverCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     "server",
-		Short:   "Server management commands",
-		Aliases: []string{"s"},
-	}
-
-	// server list
-	listCmd := &cobra.Command{
-		Use:     "list",
-		Short:   "List all servers",
-		Aliases: []string{"ls"},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return listServers()
-		},
-	}
-
-	// server info
-	infoCmd := &cobra.Command{
-		Use:   "info [name]",
-		Short: "Show server details",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return showServerInfo(args[0])
-		},
-	}
-
-	// server start
-	startCmd := &cobra.Command{
-		Use:   "start [name]",
-		Short: "Start a server",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return serverAction(args[0], "start")
-		},
-	}
-
-	// server stop
-	stopCmd := &cobra.Command{
-		Use:   "stop [name]",
-		Short: "Stop a server",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return serverAction(args[0], "stop")
-		},
-	}
-
-	// server restart
-	restartCmd := &cobra.Command{
-		Use:   "restart [name]",
-		Short: "Restart a server",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return serverAction(args[0], "restart")
-		},
-	}
-
-	cmd.AddCommand(listCmd, infoCmd, startCmd, stopCmd, restartCmd)
-	return cmd
-}
-
-func listServers() error {
-	resp, err := http.Get(daemonAddr + "/api/v1/servers")
-	if err != nil {
-		return fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Success bool                     `json:"success"`
-		Data    []map[string]interface{} `json:"data"`
-		Error   string                   `json:"error"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return fmt.Errorf("API error: %s", result.Error)
-	}
-
-	if jsonOutput {
-		json.NewEncoder(os.Stdout).Encode(result.Data)
-		return nil
-	}
-
-	if len(result.Data) == 0 {
-		fmt.Println("No servers registered")
-		return nil
-	}
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tSTATE\tPORT\tTRANSPORT\tPID")
-	for _, srv := range result.Data {
-		fmt.Fprintf(w, "%s\t%s\t%v\t%s\t%v\n",
-			srv["name"],
-			srv["state"],
-			srv["port"],
-			srv["transport"],
-			srv["pid"],
-		)
-	}
-	w.Flush()
-
-	return nil
-}
-
-func showServerInfo(name string) error {
-	resp, err := http.Get(daemonAddr + "/api/v1/servers/" + name)
-	if err != nil {
-		return fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Success bool                   `json:"success"`
-		Data    map[string]interface{} `json:"data"`
-		Error   string                 `json:"error"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return fmt.Errorf("API error: %s", result.Error)
-	}
-
-	if jsonOutput {
-		json.NewEncoder(os.Stdout).Encode(result.Data)
-		return nil
-	}
-
-	fmt.Printf("Server: %s\n", name)
-	for k, v := range result.Data {
-		fmt.Printf("  %s: %v\n", k, v)
-	}
-
-	return nil
-}
-
-func serverAction(name, action string) error {
-	resp, err := http.Post(daemonAddr+"/api/v1/servers/"+name+"/"+action, "application/json", nil)
-	if err != nil {
-		return fmt.Errorf("failed to connect to daemon: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Success bool   `json:"success"`
-		Error   string `json:"error"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	if !result.Success {
-		return fmt.Errorf("API error: %s", result.Error)
-	}
-
-	fmt.Printf("Server %s: %s successful\n", name, action)
-	return nil
-}
+// NOTE: Server commands (serverCmd, listServers, showServerInfo, serverAction)
+// have been removed. Server management is now handled via Admin MCP tools.
+// Use vision_list, vision_add, vision_remove, etc. through the OpenCode plugin
+// or direct MCP calls to port 6275.
 
 // --- Config Commands ---
 
@@ -582,125 +423,6 @@ func checkHealth() error {
 	return nil
 }
 
-// --- Init Command ---
-
-func initCmd() *cobra.Command {
-	var (
-		global  bool
-		servers []string
-		client  string
-		dryRun  bool
-	)
-
-	cmd := &cobra.Command{
-		Use:   "init",
-		Short: "Initialize client configuration for a project",
-		Long: `Initialize client configuration (e.g., .claude/settings.json) for a project.
-
-By default, creates project-local configuration. Use --global for user-wide config.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return initClientConfig(global, servers, client, dryRun)
-		},
-	}
-
-	cmd.Flags().BoolVar(&global, "global", false, "Create global (user-wide) configuration")
-	cmd.Flags().StringSliceVar(&servers, "servers", nil, "Servers to include (default: all)")
-	cmd.Flags().StringVar(&client, "client", "claude-code", "Client format: claude-code, opencode")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview configuration without writing")
-
-	return cmd
-}
-
-func initClientConfig(global bool, servers []string, client string, dryRun bool) error {
-	// Load Vision config to get server list
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("failed to load Vision config: %w", err)
-	}
-
-	// Filter servers if specified
-	selectedServers := make(map[string]*config.ServerConfig)
-	if len(servers) == 0 {
-		selectedServers = cfg.Servers
-	} else {
-		for _, name := range servers {
-			if srv, ok := cfg.Servers[name]; ok {
-				selectedServers[name] = srv
-			} else {
-				return fmt.Errorf("server not found: %s", name)
-			}
-		}
-	}
-
-	// Generate client config
-	var output map[string]interface{}
-	switch client {
-	case "claude-code":
-		mcpServers := make(map[string]interface{})
-		for name, srv := range selectedServers {
-			mcpServers[name] = map[string]interface{}{
-				"type": "streamable-http",
-				"url":  fmt.Sprintf("http://localhost:%d/mcp", srv.Port),
-			}
-		}
-		output = map[string]interface{}{
-			"mcpServers": mcpServers,
-		}
-
-	case "opencode":
-		mcpServers := make(map[string]interface{})
-		for name, srv := range selectedServers {
-			mcpServers[name] = map[string]interface{}{
-				"type": "sse",
-				"url":  fmt.Sprintf("http://localhost:%d/mcp", srv.Port),
-			}
-		}
-		output = map[string]interface{}{
-			"mcp": mcpServers,
-		}
-
-	default:
-		return fmt.Errorf("unknown client: %s", client)
-	}
-
-	// Format output
-	data, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	if dryRun {
-		fmt.Println(string(data))
-		return nil
-	}
-
-	// Determine output path
-	var outputPath string
-	switch client {
-	case "claude-code":
-		if global {
-			outputPath = os.ExpandEnv("$HOME/.config/Claude/Claude.json")
-		} else {
-			outputPath = ".claude/settings.json"
-		}
-	case "opencode":
-		if global {
-			outputPath = os.ExpandEnv("$HOME/.opencode.json")
-		} else {
-			outputPath = ".opencode.json"
-		}
-	}
-
-	// Create parent directory if needed
-	if dir := outputPath[:len(outputPath)-len("/"+outputPath)]; dir != "" {
-		os.MkdirAll(dir, 0755)
-	}
-
-	// Write file
-	if err := os.WriteFile(outputPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
-	}
-
-	fmt.Printf("Created %s configuration: %s\n", client, outputPath)
-	return nil
-}
+// NOTE: Init command (initCmd, initClientConfig) has been removed.
+// Client configuration generation is now handled via Admin MCP tool vision_init.
+// Use the OpenCode plugin or direct MCP calls to port 6275.
