@@ -167,7 +167,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	// Write response
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleMethod dispatches to the appropriate method handler.
@@ -199,7 +199,7 @@ func (s *Server) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(info)
+	_ = json.NewEncoder(w).Encode(info)
 }
 
 // handleCORS handles OPTIONS /mcp - CORS preflight.
@@ -220,7 +220,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !running {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"})
 		return
 	}
 
@@ -245,12 +245,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if len(errors) > 0 {
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"status": "degraded",
 			"errors": errors,
 		})
 	} else {
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	}
 }
 
@@ -258,7 +258,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // writeError writes a JSON-RPC error response.
@@ -266,5 +266,5 @@ func (s *Server) writeError(w http.ResponseWriter, id interface{}, code int, mes
 	resp := bridge.NewErrorResponse(id, bridge.NewError(code, message))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK) // JSON-RPC errors use 200
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }

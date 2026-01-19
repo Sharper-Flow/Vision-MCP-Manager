@@ -198,7 +198,7 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 			p.logger.Warn("process did not terminate gracefully, sending SIGKILL",
 				slog.Duration("timeout", timeout),
 			)
-			p.forceKill()
+			_ = p.forceKill()
 			<-done
 		}
 

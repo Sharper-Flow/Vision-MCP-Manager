@@ -1,0 +1,22 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+issues:
+  exclude-rules:
+    # Exclude errcheck in test files - tests often ignore errors intentionally
+    - path: _test\.go
+      linters:
+        - errcheck
+    # Exclude unused in test files - test helpers may be unused
+    - path: _test\.go
+      linters:
+        - unused

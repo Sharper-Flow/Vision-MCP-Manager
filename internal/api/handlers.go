@@ -33,7 +33,7 @@ func NewHandlers(registry *server.Registry, cfg *config.Config) *Handlers {
 func (h *Handlers) HealthzHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // ReadyHandler returns 200 OK if the service is ready to accept traffic.
@@ -44,11 +44,11 @@ func (h *Handlers) ReadyHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if h.registry == nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": "registry not initialized"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "not ready", "reason": "registry not initialized"})
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
 }
 
 // HealthResponse is the detailed health status response.
@@ -78,7 +78,7 @@ func (h *Handlers) HealthHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // --- Server Management API ---
@@ -93,13 +93,13 @@ type APIResponse struct {
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(APIResponse{Success: status < 400, Data: data})
+	_ = json.NewEncoder(w).Encode(APIResponse{Success: status < 400, Data: data})
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(APIResponse{Success: false, Error: message})
+	_ = json.NewEncoder(w).Encode(APIResponse{Success: false, Error: message})
 }
 
 // ListServersHandler returns all registered servers.

@@ -85,7 +85,7 @@ func versionCmd() *cobra.Command {
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
 			if jsonOutput {
-				json.NewEncoder(os.Stdout).Encode(map[string]string{
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]string{
 					"version": version,
 					"commit":  commit,
 					"built":   buildTime,
@@ -158,7 +158,7 @@ func runDaemon() error {
 	// Check PID file
 	pidFile := daemon.NewPIDFile("")
 	pidFile.AcquireOrFail()
-	defer pidFile.Release()
+	defer func() { _ = pidFile.Release() }()
 
 	// Create daemon
 	d, err := daemon.New(daemon.Config{
@@ -212,7 +212,7 @@ func showDaemonStatus() error {
 	running, pid := pidFile.IsRunning()
 
 	if jsonOutput {
-		json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
 			"running": running,
 			"pid":     pid,
 		})
@@ -310,7 +310,7 @@ func showConfig() error {
 	}
 
 	if jsonOutput {
-		json.NewEncoder(os.Stdout).Encode(cfg)
+		_ = json.NewEncoder(os.Stdout).Encode(cfg)
 		return nil
 	}
 
@@ -405,7 +405,7 @@ func checkHealth() error {
 	}
 
 	if jsonOutput {
-		json.NewEncoder(os.Stdout).Encode(health)
+		_ = json.NewEncoder(os.Stdout).Encode(health)
 		return nil
 	}
 

@@ -78,7 +78,7 @@ func (s *Supervisor) RemoveServer(name string) error {
 	}
 
 	// Remove from suture (this will stop it)
-	s.Supervisor.Remove(proc.token)
+	_ = s.Supervisor.Remove(proc.token)
 	delete(s.services, name)
 
 	s.logger.Info("removed server", slog.String("name", name))

@@ -88,7 +88,7 @@ func (h *Handler) handleMCPRequest(w http.ResponseWriter, r *http.Request) {
 	// Return response
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Write(resp)
+	_, _ = w.Write(resp)
 }
 
 // handleMCPInfo handles GET /mcp - server information.
@@ -110,7 +110,7 @@ func (h *Handler) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	json.NewEncoder(w).Encode(info)
+	_ = json.NewEncoder(w).Encode(info)
 }
 
 // writeJSONRPCError writes a JSON-RPC error response.
@@ -118,7 +118,7 @@ func (h *Handler) writeJSONRPCError(w http.ResponseWriter, id interface{}, code 
 	resp := bridge.NewErrorResponse(id, bridge.NewError(code, message))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK) // JSON-RPC errors still use 200
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // MCPServerInfo contains information about an MCP server endpoint.
@@ -177,7 +177,7 @@ func (pm *PortManager) Add(name string, port int, b *bridge.StdioHTTPBridge) err
 	// Add health endpoint for each MCP port
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"server": name,
 			"status": "ok",
 			"stats":  b.Stats(),

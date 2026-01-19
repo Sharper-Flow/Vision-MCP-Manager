@@ -666,30 +666,6 @@ func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCal
 	return jsonToolResult(response)
 }
 
-// getServerStatus returns the status of a server (from runtime registry).
-func (s *Server) getServerStatus(name string) string {
-	if s.registry == nil {
-		return "not configured"
-	}
-
-	srv := s.registry.Get(name)
-	if srv == nil {
-		return "not configured"
-	}
-
-	if srv.IsRunning() {
-		status := srv.Status()
-		return fmt.Sprintf("running on port %d", status.Port)
-	}
-
-	status := srv.Status()
-	if status.Port > 0 {
-		return fmt.Sprintf("configured (port %d, stopped)", status.Port)
-	}
-
-	return "configured (stopped)"
-}
-
 // InitResponse is the response for vision_init.
 type InitResponse struct {
 	Success    bool     `json:"success"`
@@ -810,7 +786,7 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		response.Error = &errMsg
 		// Try to restore backup if we made one
 		if response.BackedUp {
-			os.Rename(response.BackupPath, params.Path)
+			_ = os.Rename(response.BackupPath, params.Path)
 			response.BackedUp = false
 			response.BackupPath = ""
 		}
@@ -865,53 +841,4 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 	}
 
 	return jsonToolResult(response)
-}
-
-// --- Helpers ---
-
-// getStateIcon returns a status icon for a server state.
-func getStateIcon(state string) string {
-	switch state {
-	case "running":
-		return "[OK]"
-	case "starting":
-		return "[..]"
-	case "stopped":
-		return "[--]"
-	case "stopping":
-		return "[..]"
-	case "failed", "crashed":
-		return "[!!]"
-	default:
-		return "[??]"
-	}
-}
-
-// containsIgnoreCase checks if haystack contains needle (case-insensitive).
-func containsIgnoreCase(haystack, needle string) bool {
-	return len(haystack) >= len(needle) &&
-		(haystack == needle ||
-			len(needle) > 0 && containsLower(toLower(haystack), toLower(needle)))
-}
-
-func containsLower(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-func toLower(s string) string {
-	b := make([]byte, len(s))
-	for i := range s {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			b[i] = c + 32
-		} else {
-			b[i] = c
-		}
-	}
-	return string(b)
 }

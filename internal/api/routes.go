@@ -3,7 +3,6 @@ package api
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/jrede/vision/internal/config"
 	"github.com/jrede/vision/internal/server"
@@ -122,20 +121,4 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) ListenAndServe(addr string) error {
 	s.logger.Info("starting management API server", slog.String("addr", addr))
 	return http.ListenAndServe(addr, s.mux)
-}
-
-// --- Utility for parsing path parameters (Go 1.22+ style) ---
-
-// extractPathParam extracts a named parameter from a URL path.
-// This is a fallback for older Go versions; prefer PathValue in Go 1.22+.
-func extractPathParam(path, prefix, suffix string) string {
-	path = strings.TrimPrefix(path, prefix)
-	if suffix != "" {
-		if idx := strings.Index(path, suffix); idx >= 0 {
-			path = path[:idx]
-		}
-	}
-	// Remove trailing slash
-	path = strings.TrimSuffix(path, "/")
-	return path
 }
