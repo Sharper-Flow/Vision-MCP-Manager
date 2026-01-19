@@ -291,7 +291,7 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 
 	for _, srv := range servers {
 		status := srv.Status()
-		icon := stateIcon(string(status.State))
+		icon := getStateIcon(string(status.State))
 		output += fmt.Sprintf("%s %s (port %d)\n", icon, status.Name, status.Port)
 		output += fmt.Sprintf("   State: %s\n", status.State)
 		if status.Uptime > 0 {
@@ -345,6 +345,10 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 
 			// Get updated status
 			srv = s.registry.Get(params.Name)
+			if srv == nil {
+				// Server was removed between start and status check (race condition)
+				return nil, fmt.Errorf("server disappeared after start: %s", params.Name)
+			}
 			status := srv.Status()
 
 			output := fmt.Sprintf("Server started: %s\n", params.Name)
@@ -561,16 +565,39 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		params.Path = ".opencode.json"
 	}
 
+	// Parse optional servers filter (comma-separated)
+	var serverFilter map[string]bool
+	if params.Servers != "" {
+		serverFilter = make(map[string]bool)
+		for _, name := range strings.Split(params.Servers, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				serverFilter[name] = true
+			}
+		}
+	}
+
 	// Get running servers
 	servers := s.registry.List()
 	var running []*server.ManagedServer
 	for _, srv := range servers {
 		if srv.IsRunning() {
+			// Apply filter if specified
+			if serverFilter != nil && !serverFilter[srv.Name] {
+				continue
+			}
 			running = append(running, srv)
 		}
 	}
 
 	if len(running) == 0 {
+		if serverFilter != nil {
+			return &ToolCallResult{
+				Content: []ToolContent{
+					{Type: "text", Text: "No running servers matching filter to generate config for"},
+				},
+			}, nil
+		}
 		return &ToolCallResult{
 			Content: []ToolContent{
 				{Type: "text", Text: "No running servers to generate config for"},
@@ -649,8 +676,8 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 
 // --- Helpers ---
 
-// stateIcon returns an emoji for a server state.
-func stateIcon(state string) string {
+// getStateIcon returns a status icon for a server state.
+func getStateIcon(state string) string {
 	switch state {
 	case "running":
 		return "[OK]"
