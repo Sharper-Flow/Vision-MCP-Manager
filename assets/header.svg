@@ -1,14 +1,14 @@
 <svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <!-- Blur filter for the glow effect -->
-    <filter id="blur-glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur1"/>
+    <!-- Blur filters - 5x blurrier -->
+    <filter id="blur-glow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="40" result="blur1"/>
     </filter>
-    <filter id="blur-medium" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur2"/>
+    <filter id="blur-medium" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="20" result="blur2"/>
     </filter>
-    <filter id="blur-subtle" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="blur3"/>
+    <filter id="blur-subtle" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="10" result="blur3"/>
     </filter>
     
     <!-- Geist Mono approximation using system monospace -->
@@ -31,7 +31,7 @@
     y="340" 
     class="vision-text"
     font-size="140"
-    fill="rgba(255,255,255,0.15)"
+    fill="rgba(255,255,255,0.2)"
     text-anchor="middle"
     filter="url(#blur-glow)">
     Vision
@@ -43,7 +43,7 @@
     y="340" 
     class="vision-text"
     font-size="140"
-    fill="rgba(255,255,255,0.25)"
+    fill="rgba(255,255,255,0.3)"
     text-anchor="middle"
     filter="url(#blur-medium)">
     Vision
@@ -55,20 +55,9 @@
     y="340" 
     class="vision-text"
     font-size="140"
-    fill="rgba(255,255,255,0.4)"
+    fill="rgba(255,255,255,0.5)"
     text-anchor="middle"
     filter="url(#blur-subtle)">
-    Vision
-  </text>
-  
-  <!-- Sharp text on top (slightly transparent for blend) -->
-  <text 
-    x="640" 
-    y="340" 
-    class="vision-text"
-    font-size="140"
-    fill="rgba(255,255,255,0.9)"
-    text-anchor="middle">
     Vision
   </text>
   
