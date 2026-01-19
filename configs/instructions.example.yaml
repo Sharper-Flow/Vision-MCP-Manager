@@ -1,0 +1,158 @@
+# Vision Tool Guidance Configuration
+# Copy to ~/.config/vision/instructions.yaml and customize
+#
+# This file provides AI agents with guidance on which tools to use for different tasks.
+# The vision_guidance tool returns this information to help agents make better tool choices.
+
+# Global guidance that applies to all tool selection decisions
+global_guidance: |
+  When selecting tools for a task, prefer purpose-built tools over general-purpose ones.
+  For web searches, use Kagi. For documentation, use Context7. For code examples, use grep.app.
+  Only use browser automation tools (like Playwright) for actual browser automation tasks,
+  not for general web browsing or research.
+
+# Server-level guidance (applies to all tools from that MCP server)
+servers:
+  # Kagi - Web search and summarization
+  kagi:
+    priority: high
+    guidance: |
+      Kagi is the preferred tool for web searches and research.
+      Use kagi_search_fetch for finding current information, news, and general web queries.
+      Use kagi_summarizer for summarizing web pages and documents.
+    prefer_for:
+      - web search
+      - research
+      - current information
+      - news lookup
+      - finding articles
+    avoid_for:
+      - code documentation (use context7)
+      - code examples (use grep.app)
+    examples:
+      - "Search for recent AI developments: kagi_search_fetch queries=['recent AI breakthroughs 2024']"
+      - "Summarize a webpage: kagi_summarizer url='https://example.com/article'"
+
+  # Context7 - Library and framework documentation
+  context7:
+    priority: high
+    guidance: |
+      Context7 is the preferred tool for programming library and framework documentation.
+      First use resolve-library-id to find the correct library ID, then query-docs for specific questions.
+      Best for API references, usage patterns, and official documentation.
+    prefer_for:
+      - library documentation
+      - API reference
+      - framework docs
+      - package documentation
+      - programming questions about specific libraries
+    avoid_for:
+      - general web search
+      - current events
+      - non-programming topics
+    examples:
+      - "Find React docs: resolve-library-id libraryName='react' query='hooks'"
+      - "Query Next.js routing: query-docs libraryId='/vercel/next.js' query='app router'"
+
+  # grep.app - Code search across GitHub
+  grep-app:
+    priority: high
+    guidance: |
+      grep.app searches public code on GitHub for real-world usage examples.
+      Use searchCode to find how others implement specific patterns or use APIs.
+      Great for finding examples when documentation is unclear.
+    prefer_for:
+      - code examples
+      - implementation patterns
+      - real-world usage
+      - finding how APIs are used in practice
+    avoid_for:
+      - documentation (use context7)
+      - web search (use kagi)
+    examples:
+      - "Find TypeScript examples: searchCode query='useEffect cleanup' langFilter='TypeScript'"
+      - "Search specific repo: searchCode query='authentication' repoFilter='facebook/react'"
+
+  # Firecrawl - Web scraping and extraction
+  firecrawl:
+    priority: medium
+    guidance: |
+      Firecrawl is for structured web scraping and data extraction.
+      Use firecrawl_scrape for single pages, firecrawl_search for finding content.
+      Prefer Kagi for simple searches; use Firecrawl when you need to extract structured data.
+    prefer_for:
+      - web scraping
+      - structured data extraction
+      - crawling websites
+      - extracting specific content from pages
+    avoid_for:
+      - simple web searches (use kagi)
+      - documentation lookup (use context7)
+
+  # Playwright - Browser automation (if configured)
+  playwright:
+    priority: low
+    guidance: |
+      Playwright is for browser automation, E2E testing, and interactive web tasks.
+      DO NOT use for general web browsing, research, or fetching content.
+      Only use when you need to interact with a page (click, fill forms, etc.).
+    prefer_for:
+      - browser automation
+      - E2E testing
+      - filling out forms
+      - clicking buttons
+      - interactive web tasks
+      - screenshots of rendered pages
+    avoid_for:
+      - web search (use kagi)
+      - fetching page content (use firecrawl or fetch)
+      - research (use kagi)
+      - documentation (use context7)
+    examples:
+      - "Only use for automation: 'Click the login button and fill the form'"
+      - "NOT for: 'Search the web for information about X'"
+
+  # arXiv - Academic paper search
+  arxiv-mcp:
+    priority: medium
+    guidance: |
+      Use for searching and reading academic papers from arXiv.
+      Best for AI/ML research, computer science papers, and academic references.
+    prefer_for:
+      - academic papers
+      - research papers
+      - AI/ML publications
+      - scientific literature
+    avoid_for:
+      - general web content
+      - non-academic information
+
+  # Fetch - Simple HTTP fetching
+  fetch-mcp:
+    priority: medium
+    guidance: |
+      Simple HTTP fetching for when you know the exact URL.
+      Use fetch_markdown for readable content, fetch_json for API responses.
+      Prefer firecrawl_scrape for complex pages or when you need better parsing.
+    prefer_for:
+      - fetching known URLs
+      - simple API requests
+      - getting raw content
+    avoid_for:
+      - web search (use kagi)
+      - complex web pages (use firecrawl)
+
+# Tool-level guidance (for specific tools across any server)
+tools:
+  # Override guidance for specific tools if needed
+  mcp_webfetch:
+    priority: medium
+    guidance: |
+      Basic URL fetching. Use for simple page retrieval when you have a specific URL.
+      For better parsing and structured extraction, prefer firecrawl_scrape.
+    prefer_for:
+      - simple URL fetching
+      - quick content retrieval
+    avoid_for:
+      - complex pages
+      - structured extraction

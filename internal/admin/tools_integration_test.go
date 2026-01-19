@@ -12,6 +12,7 @@ import (
 
 	"github.com/jrede/vision/internal/admin"
 	"github.com/jrede/vision/internal/bridge"
+	"github.com/jrede/vision/internal/config"
 )
 
 // Helper to call an MCP tool - returns result or nil if RPC error
@@ -475,6 +476,197 @@ func TestTools_ConcurrentCalls(t *testing.T) {
 
 	for err := range errors {
 		t.Errorf("concurrent call error: %v", err)
+	}
+}
+
+// TestTools_VisionGuidance tests the vision_guidance tool
+func TestTools_VisionGuidance(t *testing.T) {
+	// Create instructions for testing
+	instructions := &config.Instructions{
+		GlobalGuidance: "Test global guidance",
+		Servers: map[string]*config.ServerInstructions{
+			"kagi": {
+				Priority:  "high",
+				Guidance:  "Use for web search",
+				PreferFor: []string{"web search", "research"},
+				AvoidFor:  []string{"documentation"},
+			},
+			"playwright": {
+				Priority:  "low",
+				Guidance:  "Only for browser automation",
+				PreferFor: []string{"browser automation"},
+				AvoidFor:  []string{"web search", "research"},
+			},
+		},
+		Tools: map[string]*config.ToolInstructions{
+			"custom_tool": {
+				Priority: "medium",
+				Guidance: "Custom tool guidance",
+			},
+		},
+	}
+
+	srv := admin.NewServer(admin.Config{
+		Port:         16301,
+		Instructions: instructions,
+	})
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer srv.Stop(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	t.Run("get all guidance", func(t *testing.T) {
+		result, rpcErr := callTool(t, 16301, "vision_guidance", map[string]interface{}{})
+		if rpcErr != nil {
+			t.Fatalf("RPC error: %v", rpcErr)
+		}
+
+		var response struct {
+			Success        bool   `json:"success"`
+			GlobalGuidance string `json:"global_guidance"`
+			Servers        []struct {
+				Name     string `json:"name"`
+				Priority string `json:"priority"`
+			} `json:"servers"`
+			Tools []struct {
+				Name     string `json:"name"`
+				Priority string `json:"priority"`
+			} `json:"tools"`
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &response); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+
+		if !response.Success {
+			t.Error("expected success = true")
+		}
+		if response.GlobalGuidance != "Test global guidance" {
+			t.Errorf("global_guidance = %q, want %q", response.GlobalGuidance, "Test global guidance")
+		}
+		// Servers should be sorted by priority (high first)
+		if len(response.Servers) != 2 {
+			t.Errorf("servers count = %d, want 2", len(response.Servers))
+		} else if response.Servers[0].Name != "kagi" {
+			t.Errorf("first server = %q, want %q (high priority)", response.Servers[0].Name, "kagi")
+		}
+		if len(response.Tools) != 1 {
+			t.Errorf("tools count = %d, want 1", len(response.Tools))
+		}
+	})
+
+	t.Run("get specific server guidance", func(t *testing.T) {
+		result, rpcErr := callTool(t, 16301, "vision_guidance", map[string]interface{}{
+			"server": "kagi",
+		})
+		if rpcErr != nil {
+			t.Fatalf("RPC error: %v", rpcErr)
+		}
+
+		var response struct {
+			Success bool `json:"success"`
+			Servers []struct {
+				Name     string   `json:"name"`
+				Priority string   `json:"priority"`
+				Guidance string   `json:"guidance"`
+				AvoidFor []string `json:"avoid_for"`
+			} `json:"servers"`
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &response); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+
+		if len(response.Servers) != 1 {
+			t.Fatalf("servers count = %d, want 1", len(response.Servers))
+		}
+		if response.Servers[0].Name != "kagi" {
+			t.Errorf("server name = %q, want %q", response.Servers[0].Name, "kagi")
+		}
+		if response.Servers[0].Guidance != "Use for web search" {
+			t.Errorf("guidance = %q, want %q", response.Servers[0].Guidance, "Use for web search")
+		}
+	})
+
+	t.Run("filter by context", func(t *testing.T) {
+		result, rpcErr := callTool(t, 16301, "vision_guidance", map[string]interface{}{
+			"context": "web search",
+		})
+		if rpcErr != nil {
+			t.Fatalf("RPC error: %v", rpcErr)
+		}
+
+		var response struct {
+			Success bool   `json:"success"`
+			Context string `json:"context"`
+			Servers []struct {
+				Name string `json:"name"`
+			} `json:"servers"`
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &response); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+
+		if response.Context != "web search" {
+			t.Errorf("context = %q, want %q", response.Context, "web search")
+		}
+		// Both servers mention "web search" (kagi in prefer_for, playwright in avoid_for)
+		if len(response.Servers) < 1 {
+			t.Error("expected at least 1 server matching 'web search' context")
+		}
+	})
+
+	t.Run("nonexistent server", func(t *testing.T) {
+		result, rpcErr := callTool(t, 16301, "vision_guidance", map[string]interface{}{
+			"server": "nonexistent",
+		})
+		if rpcErr != nil {
+			t.Fatalf("RPC error: %v", rpcErr)
+		}
+
+		var response struct {
+			Success bool    `json:"success"`
+			Error   *string `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &response); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+
+		if response.Error == nil {
+			t.Error("expected error for nonexistent server")
+		}
+	})
+}
+
+// TestTools_VisionGuidance_NoInstructions tests behavior with no instructions
+func TestTools_VisionGuidance_NoInstructions(t *testing.T) {
+	srv := admin.NewServer(admin.Config{Port: 16302})
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer srv.Stop(ctx)
+	time.Sleep(50 * time.Millisecond)
+
+	result, rpcErr := callTool(t, 16302, "vision_guidance", map[string]interface{}{})
+	if rpcErr != nil {
+		t.Fatalf("RPC error: %v", rpcErr)
+	}
+
+	var response struct {
+		Success        bool   `json:"success"`
+		GlobalGuidance string `json:"global_guidance"`
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &response); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if !response.Success {
+		t.Error("expected success = true")
+	}
+	// Should have helpful message about no instructions
+	if response.GlobalGuidance == "" {
+		t.Error("expected global_guidance to have helpful message")
 	}
 }
 

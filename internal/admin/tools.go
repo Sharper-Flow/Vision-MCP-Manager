@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jrede/vision/internal/bridge"
+	"github.com/jrede/vision/internal/config"
 	"github.com/jrede/vision/internal/server"
 )
 
@@ -121,6 +122,23 @@ func (s *Server) getTools() []Tool {
 			InputSchema: InputSchema{
 				Type:       "object",
 				Properties: map[string]Property{},
+			},
+		},
+		{
+			Name:        "vision_guidance",
+			Description: "Get tool selection guidance and priorities for MCP servers. Use this to understand which tools to prefer for different tasks (e.g., use Kagi for web search, Context7 for docs, avoid Playwright for general browsing).",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]Property{
+					"context": {
+						Type:        "string",
+						Description: "Optional task context to get relevant guidance (e.g., 'web search', 'documentation lookup', 'browser automation')",
+					},
+					"server": {
+						Type:        "string",
+						Description: "Optional server name to get specific guidance for",
+					},
+				},
 			},
 		},
 	}
@@ -267,7 +285,7 @@ func (s *Server) handleToolsCall(ctx context.Context, req *bridge.Request) *brid
 // isValidTool checks if a tool name is valid.
 func (s *Server) isValidTool(name string) bool {
 	switch name {
-	case "vision_list", "vision_add", "vision_remove", "vision_search", "vision_init", "vision_status":
+	case "vision_list", "vision_add", "vision_remove", "vision_search", "vision_init", "vision_status", "vision_guidance":
 		return true
 	default:
 		return false
@@ -310,6 +328,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		return s.toolInit(ctx, args)
 	case "vision_status":
 		return s.toolStatus(ctx, args)
+	case "vision_guidance":
+		return s.toolGuidance(ctx, args)
 	default:
 		// Should never reach here due to isValidTool check
 		return nil, fmt.Errorf("unknown tool: %s", name)
@@ -841,4 +861,193 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 	}
 
 	return jsonToolResult(response)
+}
+
+// --- Guidance Tool ---
+
+// GuidanceEntry represents guidance for a single server or tool.
+type GuidanceEntry struct {
+	Name      string   `json:"name"`
+	Priority  string   `json:"priority,omitempty"`
+	Guidance  string   `json:"guidance,omitempty"`
+	PreferFor []string `json:"prefer_for,omitempty"`
+	AvoidFor  []string `json:"avoid_for,omitempty"`
+	Examples  []string `json:"examples,omitempty"`
+}
+
+// GuidanceResponse is the response for vision_guidance.
+type GuidanceResponse struct {
+	Success        bool            `json:"success"`
+	GlobalGuidance string          `json:"global_guidance,omitempty"`
+	Servers        []GuidanceEntry `json:"servers,omitempty"`
+	Tools          []GuidanceEntry `json:"tools,omitempty"`
+	Context        string          `json:"context,omitempty"`
+	Error          *string         `json:"error,omitempty"`
+}
+
+// toolGuidance implements vision_guidance.
+// Returns tool selection guidance and priorities for MCP servers.
+func (s *Server) toolGuidance(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
+	var params struct {
+		Context string `json:"context"`
+		Server  string `json:"server"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, NewValidationError("invalid arguments: " + err.Error())
+	}
+
+	response := GuidanceResponse{
+		Success: true,
+		Context: params.Context,
+	}
+
+	// Check if instructions are available
+	if s.instructions == nil || !s.instructions.HasInstructions() {
+		// Return helpful message if no instructions configured
+		msg := "No tool guidance configured. Create ~/.config/vision/instructions.yaml to provide tool selection hints."
+		response.GlobalGuidance = msg
+		return jsonToolResult(response)
+	}
+
+	// Add global guidance
+	response.GlobalGuidance = s.instructions.GlobalGuidance
+
+	// If specific server requested, return only that server's guidance
+	if params.Server != "" {
+		serverInst := s.instructions.GetServerInstructions(params.Server)
+		if serverInst == nil {
+			errMsg := fmt.Sprintf("No guidance found for server '%s'", params.Server)
+			response.Error = &errMsg
+			return jsonToolResult(response)
+		}
+		response.Servers = []GuidanceEntry{
+			serverInstructionsToEntry(params.Server, serverInst),
+		}
+		return jsonToolResult(response)
+	}
+
+	// Filter by context if provided
+	contextLower := strings.ToLower(params.Context)
+
+	// Collect server guidance
+	for _, name := range s.instructions.ServerNames() {
+		inst := s.instructions.GetServerInstructions(name)
+		if inst == nil {
+			continue
+		}
+
+		// If context provided, filter to relevant entries
+		if contextLower != "" && !isRelevantToContext(inst, contextLower) {
+			continue
+		}
+
+		response.Servers = append(response.Servers, serverInstructionsToEntry(name, inst))
+	}
+
+	// Collect tool guidance
+	for _, name := range s.instructions.ToolNames() {
+		inst := s.instructions.GetToolInstructions(name)
+		if inst == nil {
+			continue
+		}
+
+		// If context provided, filter to relevant entries
+		if contextLower != "" && !isToolRelevantToContext(inst, contextLower) {
+			continue
+		}
+
+		response.Tools = append(response.Tools, toolInstructionsToEntry(name, inst))
+	}
+
+	// Sort by priority (high first)
+	sortGuidanceByPriority(response.Servers)
+	sortGuidanceByPriority(response.Tools)
+
+	return jsonToolResult(response)
+}
+
+// serverInstructionsToEntry converts ServerInstructions to GuidanceEntry.
+func serverInstructionsToEntry(name string, inst *config.ServerInstructions) GuidanceEntry {
+	return GuidanceEntry{
+		Name:      name,
+		Priority:  inst.Priority,
+		Guidance:  inst.Guidance,
+		PreferFor: inst.PreferFor,
+		AvoidFor:  inst.AvoidFor,
+		Examples:  inst.Examples,
+	}
+}
+
+// toolInstructionsToEntry converts ToolInstructions to GuidanceEntry.
+func toolInstructionsToEntry(name string, inst *config.ToolInstructions) GuidanceEntry {
+	return GuidanceEntry{
+		Name:      name,
+		Priority:  inst.Priority,
+		Guidance:  inst.Guidance,
+		PreferFor: inst.PreferFor,
+		AvoidFor:  inst.AvoidFor,
+		Examples:  inst.Examples,
+	}
+}
+
+// isRelevantToContext checks if server instructions are relevant to the given context.
+func isRelevantToContext(inst *config.ServerInstructions, context string) bool {
+	// Check prefer_for
+	for _, pref := range inst.PreferFor {
+		if strings.Contains(strings.ToLower(pref), context) {
+			return true
+		}
+	}
+	// Check avoid_for (still relevant to show what NOT to use)
+	for _, avoid := range inst.AvoidFor {
+		if strings.Contains(strings.ToLower(avoid), context) {
+			return true
+		}
+	}
+	// Check guidance text
+	if strings.Contains(strings.ToLower(inst.Guidance), context) {
+		return true
+	}
+	return false
+}
+
+// isToolRelevantToContext checks if tool instructions are relevant to the given context.
+func isToolRelevantToContext(inst *config.ToolInstructions, context string) bool {
+	// Check prefer_for
+	for _, pref := range inst.PreferFor {
+		if strings.Contains(strings.ToLower(pref), context) {
+			return true
+		}
+	}
+	// Check avoid_for (still relevant to show what NOT to use)
+	for _, avoid := range inst.AvoidFor {
+		if strings.Contains(strings.ToLower(avoid), context) {
+			return true
+		}
+	}
+	// Check guidance text
+	if strings.Contains(strings.ToLower(inst.Guidance), context) {
+		return true
+	}
+	return false
+}
+
+// sortGuidanceByPriority sorts guidance entries by priority (high > medium > low > empty).
+func sortGuidanceByPriority(entries []GuidanceEntry) {
+	priorityOrder := map[string]int{
+		"high":   0,
+		"medium": 1,
+		"low":    2,
+		"":       3,
+	}
+
+	for i := 0; i < len(entries)-1; i++ {
+		for j := i + 1; j < len(entries); j++ {
+			pi := priorityOrder[entries[i].Priority]
+			pj := priorityOrder[entries[j].Priority]
+			if pi > pj || (pi == pj && entries[i].Name > entries[j].Name) {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
 }

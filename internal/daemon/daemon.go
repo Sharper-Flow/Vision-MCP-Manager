@@ -67,6 +67,21 @@ func New(cfg Config) (*Daemon, error) {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
+	// Load instructions (optional - won't fail if file doesn't exist)
+	instructions, err := config.LoadInstructions("")
+	if err != nil {
+		cfg.Logger.Warn("failed to load instructions", slog.String("error", err.Error()))
+		instructions = &config.Instructions{
+			Servers: make(map[string]*config.ServerInstructions),
+			Tools:   make(map[string]*config.ToolInstructions),
+		}
+	} else if instructions.HasInstructions() {
+		cfg.Logger.Info("loaded tool guidance instructions",
+			slog.Int("servers", len(instructions.Servers)),
+			slog.Int("tools", len(instructions.Tools)),
+		)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Create supervisor
@@ -88,9 +103,10 @@ func New(cfg Config) (*Daemon, error) {
 
 	// Create Admin MCP server (primary management interface)
 	adminSrv := admin.NewServer(admin.Config{
-		Registry: reg,
-		Port:     admin.DefaultPort, // 6275
-		Logger:   cfg.Logger,
+		Registry:     reg,
+		Instructions: instructions,
+		Port:         admin.DefaultPort, // 6275
+		Logger:       cfg.Logger,
 	})
 
 	return &Daemon{

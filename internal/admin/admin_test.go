@@ -180,6 +180,7 @@ func TestServer_ToolsList(t *testing.T) {
 		"vision_search",
 		"vision_init",
 		"vision_status",
+		"vision_guidance",
 	}
 
 	if len(result.Tools) != len(expectedTools) {
