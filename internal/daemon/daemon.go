@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jrede/vision/internal/admin"
 	"github.com/jrede/vision/internal/api"
 	"github.com/jrede/vision/internal/config"
 	"github.com/jrede/vision/internal/mcp"
@@ -28,6 +29,7 @@ type Daemon struct {
 	registry    *server.Registry
 	portManager *mcp.PortManager
 	apiServer   *api.Server
+	adminServer *admin.Server // Admin MCP server on port 6275
 	httpServer  *http.Server
 
 	logger *slog.Logger
@@ -75,12 +77,19 @@ func New(cfg Config) (*Daemon, error) {
 	// Create port manager for MCP HTTP endpoints
 	pm := mcp.NewPortManager(cfg.Logger)
 
-	// Create API server
+	// Create API server (REST, for backward compatibility - will be deprecated)
 	apiSrv := api.NewServer(api.ServerConfig{
 		Registry:       reg,
 		Config:         visionCfg,
 		Logger:         cfg.Logger,
 		AllowedOrigins: []string{"*"},
+	})
+
+	// Create Admin MCP server (primary management interface)
+	adminSrv := admin.NewServer(admin.Config{
+		Registry: reg,
+		Port:     admin.DefaultPort, // 6275
+		Logger:   cfg.Logger,
 	})
 
 	return &Daemon{
@@ -91,6 +100,7 @@ func New(cfg Config) (*Daemon, error) {
 		registry:       reg,
 		portManager:    pm,
 		apiServer:      apiSrv,
+		adminServer:    adminSrv,
 		logger:         cfg.Logger,
 		ctx:            ctx,
 		cancel:         cancel,
@@ -122,7 +132,15 @@ func (d *Daemon) Start() error {
 		d.logger.Warn("some servers failed to start", slog.String("error", err.Error()))
 	}
 
-	// Start management HTTP server
+	// Start Admin MCP server (port 6275)
+	if d.adminServer != nil {
+		if err := d.adminServer.Start(d.ctx); err != nil {
+			d.logger.Error("failed to start admin MCP server", slog.String("error", err.Error()))
+		}
+	}
+
+	// Start management HTTP server (REST API - for backward compatibility)
+	// Note: In future, this will be removed in favor of Admin MCP
 	d.wg.Add(1)
 	go d.runHTTPServer()
 
@@ -149,7 +167,14 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Stop HTTP server first
+	// Stop Admin MCP server
+	if d.adminServer != nil {
+		if err := d.adminServer.Stop(ctx); err != nil {
+			d.logger.Warn("admin MCP server shutdown error", slog.String("error", err.Error()))
+		}
+	}
+
+	// Stop HTTP server (REST API)
 	if d.httpServer != nil {
 		if err := d.httpServer.Shutdown(ctx); err != nil {
 			d.logger.Warn("HTTP server shutdown error", slog.String("error", err.Error()))
