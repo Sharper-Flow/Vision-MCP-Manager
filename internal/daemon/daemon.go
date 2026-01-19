@@ -13,6 +13,7 @@ import (
 
 	"github.com/jrede/vision/internal/admin"
 	"github.com/jrede/vision/internal/api"
+	"github.com/jrede/vision/internal/bridge"
 	"github.com/jrede/vision/internal/config"
 	"github.com/jrede/vision/internal/mcp"
 	"github.com/jrede/vision/internal/server"
@@ -137,6 +138,14 @@ func (d *Daemon) Start() error {
 		if err := d.adminServer.Start(d.ctx); err != nil {
 			d.logger.Error("failed to start admin MCP server", slog.String("error", err.Error()))
 		}
+	}
+
+	// Give servers a moment to initialize their stdio pipes
+	time.Sleep(500 * time.Millisecond)
+
+	// Set up HTTP proxies for stdio servers
+	if err := d.setupHTTPProxies(); err != nil {
+		d.logger.Warn("some HTTP proxies failed to start", slog.String("error", err.Error()))
 	}
 
 	// Start management HTTP server (REST API - for backward compatibility)
@@ -341,6 +350,74 @@ type DaemonStatus struct {
 	Running    bool                  `json:"running"`
 	ConfigPath string                `json:"config_path"`
 	Registry   server.RegistryStatus `json:"registry"`
+}
+
+// setupHTTPProxies creates HTTP bridges for all running stdio servers.
+// Each stdio server gets an HTTP endpoint on its configured port.
+func (d *Daemon) setupHTTPProxies() error {
+	var errs []error
+
+	for _, srv := range d.registry.List() {
+		// Skip servers that aren't running
+		if srv.State != server.StateRunning {
+			continue
+		}
+
+		// Skip HTTP transport servers (they don't need a bridge)
+		if srv.Config.InferTransport() != config.TransportStdio {
+			d.logger.Debug("skipping non-stdio server",
+				slog.String("server", srv.Name),
+				slog.String("transport", string(srv.Config.InferTransport())),
+			)
+			continue
+		}
+
+		// Get the managed process
+		proc := srv.Process
+		if proc == nil {
+			d.logger.Warn("no process for running server",
+				slog.String("server", srv.Name),
+			)
+			continue
+		}
+
+		// Get stdin/stdout pipes
+		stdin := proc.Stdin()
+		stdout := proc.Stdout()
+		if stdin == nil || stdout == nil {
+			d.logger.Warn("missing stdio pipes for server",
+				slog.String("server", srv.Name),
+			)
+			continue
+		}
+
+		// Create the bridge
+		b := bridge.NewStdioHTTPBridge(stdin, stdout, &bridge.BridgeOptions{
+			Logger: d.logger.With(slog.String("server", srv.Name)),
+		})
+		b.Start()
+
+		// Add to port manager (starts HTTP listener on the server's port)
+		if err := d.portManager.Add(srv.Name, srv.Config.Port, b); err != nil {
+			d.logger.Warn("failed to add HTTP proxy",
+				slog.String("server", srv.Name),
+				slog.Int("port", srv.Config.Port),
+				slog.String("error", err.Error()),
+			)
+			errs = append(errs, err)
+			continue
+		}
+
+		d.logger.Info("HTTP proxy started",
+			slog.String("server", srv.Name),
+			slog.Int("port", srv.Config.Port),
+		)
+	}
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
 }
 
 // runHTTPServer runs the management HTTP server.

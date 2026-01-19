@@ -83,49 +83,123 @@ vision migrate
 
 ```yaml
 servers:
-  time:
+  context7:
     port: 6276
     command: npx
-    args: ["-y", "@anthropic/mcp-time"]
-    autostart: true
-    
-  context7:
-    port: 6277
-    command: npx
-    args: ["-y", "@upstash/context7-mcp"]
+    args: ["-y", "@upstash/context7-mcp@latest"]
     env:
       CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
     autostart: true
+
+  kagimcp:
+    port: 6279
+    command: uvx
+    args: ["kagimcp"]
+    env:
+      KAGI_API_KEY: "${KAGI_API_KEY}"
+    autostart: true
+
+  firecrawl:
+    port: 6281
+    command: npx
+    args: ["-y", "firecrawl-mcp"]
+    env:
+      FIRECRAWL_API_KEY: "${FIRECRAWL_API_KEY}"
+    autostart: true
+
+  time:
+    port: 6282
+    command: uvx
+    args: ["mcp-server-time", "--local-timezone=America/New_York"]
+    autostart: true
+```
+
+### Environment Variables (`~/.config/vision/env`)
+
+Store API keys and secrets separately from the server config:
+
+```bash
+CONTEXT7_API_KEY=your-key-here
+KAGI_API_KEY=your-key-here
+FIRECRAWL_API_KEY=your-key-here
 ```
 
 ### Client Configuration (OpenCode)
 
-Vision generates OpenCode configs. OpenCode searches for `.opencode.json` in:
+Vision generates OpenCode configs. OpenCode searches for config in:
 
 1. `./.opencode.json` (project-local, highest priority)
-2. `$XDG_CONFIG_HOME/opencode/.opencode.json`
+2. `$XDG_CONFIG_HOME/opencode/opencode.json`
 3. `$HOME/.opencode.json` (global)
 
 ```json
 {
-  "mcpServers": {
-    "time": {
-      "type": "sse",
-      "url": "http://localhost:6276/mcp"
-    },
+  "mcp": {
     "context7": {
-      "type": "sse",
-      "url": "http://localhost:6277/mcp"
+      "type": "remote",
+      "url": "http://localhost:6276/mcp",
+      "enabled": true
+    },
+    "kagimcp": {
+      "type": "remote",
+      "url": "http://localhost:6279/mcp",
+      "enabled": true
+    },
+    "firecrawl": {
+      "type": "remote",
+      "url": "http://localhost:6281/mcp",
+      "enabled": true
+    },
+    "time": {
+      "type": "remote",
+      "url": "http://localhost:6282/mcp",
+      "enabled": true
     }
   }
 }
 ```
 
-> **Note**: Vision exposes MCP servers via HTTP/SSE endpoints, so use `type: "sse"` with a `url`.
+> **Note**: Vision exposes MCP servers via HTTP endpoints. Use `type: "remote"` with a `url` pointing to the server's allocated port.
 
 ## Architecture
 
 ```
+┌─────────────────────────────────────────────────────────────┐
+│                      AI Agents                              │
+│              (OpenCode, Claude Code, etc.)                  │
+└─────────────────┬───────────────────────────────────────────┘
+                  │ HTTP POST /mcp (JSON-RPC 2.0)
+                  ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Vision Daemon                             │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │            Admin MCP Server (:6275)                 │   │
+│  │   vision_list, vision_status, vision_add, ...       │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │         stdio-to-HTTP Bridge (PortManager)          │   │
+│  │   :6276/mcp    :6279/mcp    :6280/mcp    ...        │   │
+│  └────────┬────────────┬────────────┬──────────────────┘   │
+│           │            │            │                      │
+│  ┌────────▼────────────▼────────────▼──────────────────┐   │
+│  │           Process Supervisor (suture)               │   │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐              │   │
+│  │  │context7 │  │ kagimcp │  │firecrawl│  ...         │   │
+│  │  │ (stdio) │  │ (stdio) │  │ (stdio) │              │   │
+│  │  └─────────┘  └─────────┘  └─────────┘              │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### How the Bridge Works
+
+1. **Subprocess Management**: Vision spawns MCP servers as subprocesses with stdio pipes
+2. **HTTP Exposure**: Each server gets a dedicated HTTP port (6276+)
+3. **Request Routing**: HTTP POST to `/mcp` is forwarded to the subprocess via stdin
+4. **Response Handling**: JSON-RPC responses from stdout are returned to the HTTP client
+5. **Health Checks**: Each port exposes `/health` for monitoring
 ┌─────────────────────────────────────────────────────────────┐
 │                      AI Agents                              │
 │                      (OpenCode)                             │
