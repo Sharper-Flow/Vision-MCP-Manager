@@ -1,9 +1,15 @@
-# Vision
+<p align="center">
+  <img src="assets/header.svg" alt="Vision" width="100%">
+</p>
 
-**Unified MCP Server Management for AI Agents**
+<p align="center">
+  <strong>Unified MCP Server Management for AI Agents</strong>
+</p>
 
-[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)](https://go.dev/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go" alt="Go Version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"></a>
+</p>
 
 Vision is a Go-native daemon that centralizes [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server management for AI coding agents like Claude Code, OpenCode, and Cursor. It replaces fragmented multi-tool setups with a single binary that handles process supervision, stdio-to-HTTP bridging, and configuration generation.
 
