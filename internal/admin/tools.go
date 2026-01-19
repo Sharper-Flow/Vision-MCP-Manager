@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/jrede/vision/internal/bridge"
@@ -310,11 +311,9 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 }
 
 // toolAdd implements vision_add.
+// If the server is already in the runtime registry, it starts it.
+// If not, it looks up the server in the catalog and returns install instructions.
 func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
-	if s.registry == nil {
-		return nil, fmt.Errorf("registry not initialized")
-	}
-
 	var params struct {
 		Name  string `json:"name"`
 		Start *bool  `json:"start"`
@@ -333,28 +332,84 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 		shouldStart = *params.Start
 	}
 
-	// Check if server exists in registry
-	srv := s.registry.Get(params.Name)
-	if srv == nil {
-		return nil, fmt.Errorf("server not found in registry: %s", params.Name)
-	}
+	// Check if server exists in runtime registry
+	if s.registry != nil {
+		srv := s.registry.Get(params.Name)
+		if srv != nil {
+			// Server already configured - just start it
+			if shouldStart {
+				if err := s.registry.Start(params.Name); err != nil {
+					return nil, fmt.Errorf("failed to start server: %w", err)
+				}
+			}
 
-	// Start if requested
-	if shouldStart {
-		if err := s.registry.Start(params.Name); err != nil {
-			return nil, fmt.Errorf("failed to start server: %w", err)
+			// Get updated status
+			srv = s.registry.Get(params.Name)
+			status := srv.Status()
+
+			output := fmt.Sprintf("Server started: %s\n", params.Name)
+			output += fmt.Sprintf("Port: %d\n", status.Port)
+			output += fmt.Sprintf("State: %s\n", status.State)
+			if shouldStart && srv.IsRunning() {
+				output += fmt.Sprintf("Endpoint: http://localhost:%d/mcp\n", status.Port)
+			}
+
+			return &ToolCallResult{
+				Content: []ToolContent{
+					{Type: "text", Text: output},
+				},
+			}, nil
 		}
 	}
 
-	// Get updated status
-	srv = s.registry.Get(params.Name)
-	status := srv.Status()
+	// Server not in runtime registry - check catalog for install instructions
+	if s.catalog == nil {
+		return nil, fmt.Errorf("server not found: %s (no catalog available)", params.Name)
+	}
 
-	output := fmt.Sprintf("Server added: %s\n", params.Name)
-	output += fmt.Sprintf("Port: %d\n", status.Port)
-	output += fmt.Sprintf("State: %s\n", status.State)
-	if shouldStart {
-		output += fmt.Sprintf("Endpoint: http://localhost:%d/mcp\n", status.Port)
+	entry := s.catalog.Get(params.Name)
+	if entry == nil {
+		return nil, fmt.Errorf("server not found in catalog: %s", params.Name)
+	}
+
+	// Return install instructions from catalog
+	output := fmt.Sprintf("Server '%s' is not configured.\n\n", params.Name)
+	output += fmt.Sprintf("**%s**\n", entry.Description)
+	output += "\nTo add this server, add the following to your ~/.config/vision/servers.yaml:\n\n"
+	output += "```yaml\nservers:\n"
+	output += fmt.Sprintf("  %s:\n", entry.Name)
+	output += "    port: <choose a port 6276-6300>\n"
+	if entry.Command != "" {
+		output += fmt.Sprintf("    command: %s\n", entry.Command)
+		if len(entry.Args) > 0 {
+			output += "    args:\n"
+			for _, arg := range entry.Args {
+				output += fmt.Sprintf("      - \"%s\"\n", arg)
+			}
+		}
+	}
+	if entry.URL != "" {
+		output += fmt.Sprintf("    url: %s\n", entry.URL)
+		output += fmt.Sprintf("    transport: %s\n", entry.GetTransport())
+	}
+	if len(entry.EnvVars) > 0 {
+		output += "    env:\n"
+		for _, env := range entry.EnvVars {
+			output += fmt.Sprintf("      %s: \"${%s}\"\n", env, env)
+		}
+	}
+	output += "    autostart: true\n"
+	output += "```\n"
+
+	if len(entry.EnvVars) > 0 {
+		output += "\n**Required environment variables:**\n"
+		for _, env := range entry.EnvVars {
+			output += fmt.Sprintf("- `%s`\n", env)
+		}
+	}
+
+	if entry.Source != "" {
+		output += fmt.Sprintf("\n**Source:** %s\n", entry.Source)
 	}
 
 	return &ToolCallResult{
@@ -407,9 +462,10 @@ func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCal
 }
 
 // toolSearch implements vision_search.
+// Searches the catalog for available MCP servers by name, description, or capability.
 func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
-	if s.registry == nil {
-		return nil, fmt.Errorf("registry not initialized")
+	if s.catalog == nil {
+		return nil, fmt.Errorf("catalog not initialized")
 	}
 
 	var params struct {
@@ -420,48 +476,40 @@ func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCal
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// For now, just list all servers (search will be enhanced in Phase 15)
-	// TODO: Add capability-based search when registry enhancement is done
-	servers := s.registry.List()
+	// Search the catalog
+	results := s.catalog.Search(params.Query, params.Capability)
 
-	if len(servers) == 0 {
+	if len(results) == 0 {
+		msg := "No servers found"
+		if params.Query != "" {
+			msg = fmt.Sprintf("No servers matching query: %s", params.Query)
+		}
+		if params.Capability != "" {
+			msg = fmt.Sprintf("No servers with capability: %s", params.Capability)
+		}
 		return &ToolCallResult{
 			Content: []ToolContent{
-				{Type: "text", Text: "No servers found in registry"},
+				{Type: "text", Text: msg},
 			},
 		}, nil
 	}
 
-	// Basic name matching if query provided
-	var matches []*server.ManagedServer
-	if params.Query != "" {
-		for _, srv := range servers {
-			if containsIgnoreCase(srv.Name, params.Query) {
-				matches = append(matches, srv)
-			}
-		}
-	} else {
-		matches = servers
-	}
+	// Build output showing catalog entries with install status
+	output := fmt.Sprintf("Found %d server(s):\n\n", len(results))
 
-	if len(matches) == 0 {
-		return &ToolCallResult{
-			Content: []ToolContent{
-				{Type: "text", Text: fmt.Sprintf("No servers matching query: %s", params.Query)},
-			},
-		}, nil
-	}
+	for _, entry := range results {
+		// Check if server is configured/running in the registry
+		status := s.getServerStatus(entry.Name)
 
-	output := fmt.Sprintf("Found %d server(s):\n\n", len(matches))
-	for _, srv := range matches {
-		status := srv.Status()
-		installed := "not configured"
-		if srv.IsRunning() {
-			installed = fmt.Sprintf("running on port %d", status.Port)
-		} else if status.Port > 0 {
-			installed = fmt.Sprintf("configured (port %d)", status.Port)
+		output += fmt.Sprintf("**%s** - %s\n", entry.Name, entry.Description)
+		output += fmt.Sprintf("   Status: %s\n", status)
+		if len(entry.Capabilities) > 0 {
+			output += fmt.Sprintf("   Capabilities: %s\n", strings.Join(entry.Capabilities, ", "))
 		}
-		output += fmt.Sprintf("- %s: %s\n", srv.Name, installed)
+		if len(entry.EnvVars) > 0 {
+			output += fmt.Sprintf("   Required env: %s\n", strings.Join(entry.EnvVars, ", "))
+		}
+		output += "\n"
 	}
 
 	return &ToolCallResult{
@@ -469,6 +517,30 @@ func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCal
 			{Type: "text", Text: output},
 		},
 	}, nil
+}
+
+// getServerStatus returns the status of a server (from runtime registry).
+func (s *Server) getServerStatus(name string) string {
+	if s.registry == nil {
+		return "not configured"
+	}
+
+	srv := s.registry.Get(name)
+	if srv == nil {
+		return "not configured"
+	}
+
+	if srv.IsRunning() {
+		status := srv.Status()
+		return fmt.Sprintf("running on port %d", status.Port)
+	}
+
+	status := srv.Status()
+	if status.Port > 0 {
+		return fmt.Sprintf("configured (port %d, stopped)", status.Port)
+	}
+
+	return "configured (stopped)"
 }
 
 // toolInit implements vision_init.

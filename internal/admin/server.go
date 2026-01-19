@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jrede/vision/internal/bridge"
+	"github.com/jrede/vision/internal/catalog"
 	"github.com/jrede/vision/internal/server"
 )
 
@@ -22,6 +23,7 @@ const DefaultPort = 6275
 // Server is the Admin MCP server that provides management tools.
 type Server struct {
 	registry  *server.Registry
+	catalog   *catalog.Catalog
 	port      int
 	logger    *slog.Logger
 	httpSrv   *http.Server
@@ -34,6 +36,7 @@ type Server struct {
 // Config configures the Admin MCP server.
 type Config struct {
 	Registry *server.Registry
+	Catalog  *catalog.Catalog
 	Port     int
 	Logger   *slog.Logger
 }
@@ -46,9 +49,15 @@ func NewServer(cfg Config) *Server {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	// Use default catalog if none provided
+	cat := cfg.Catalog
+	if cat == nil {
+		cat = catalog.Default()
+	}
 
 	return &Server{
 		registry: cfg.Registry,
+		catalog:  cat,
 		port:     cfg.Port,
 		logger:   cfg.Logger,
 	}
