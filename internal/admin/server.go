@@ -82,7 +82,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
-	addr := fmt.Sprintf(":%d", s.port)
+	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	s.httpSrv = &http.Server{
 		Addr:    addr,
 		Handler: mux,
@@ -211,31 +211,47 @@ func (s *Server) handleCORS(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealth handles GET /health - detailed health status.
+// Returns {"status": "ok"} when healthy, {"status": "degraded", "errors": [...]} when servers have errors.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	running := s.running
-	started := s.startedAt
 	s.mu.RUnlock()
 
-	status := "healthy"
 	if !running {
-		status = "unhealthy"
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"})
+		return
 	}
 
-	var registryStatus interface{}
+	// Check registry for failed servers
+	var errors []string
 	if s.registry != nil {
-		registryStatus = s.registry.Status()
-	}
-
-	resp := map[string]interface{}{
-		"status":   status,
-		"uptime":   time.Since(started).Round(time.Second).String(),
-		"port":     s.port,
-		"registry": registryStatus,
+		regStatus := s.registry.Status()
+		if regStatus.FailedServers > 0 {
+			// Get error details from failed servers
+			for _, srv := range s.registry.List() {
+				status := srv.Status()
+				if status.State == "failed" || status.State == "crashed" {
+					if status.LastError != "" {
+						errors = append(errors, fmt.Sprintf("%s: %s", status.Name, status.LastError))
+					} else {
+						errors = append(errors, fmt.Sprintf("%s: failed", status.Name))
+					}
+				}
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if len(errors) > 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "degraded",
+			"errors": errors,
+		})
+	} else {
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
 }
 
 // handleHealthz handles GET /healthz - liveness probe.

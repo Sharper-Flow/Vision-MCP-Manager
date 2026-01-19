@@ -340,13 +340,12 @@ func TestServer_UnknownTool(t *testing.T) {
 		t.Fatalf("Decode error = %v", err)
 	}
 
-	// Unknown tool should return isError in result, not JSON-RPC error
-	var result admin.ToolCallResult
-	if err := json.Unmarshal(rpcResp.Result, &result); err != nil {
-		t.Fatalf("Unmarshal result error = %v", err)
+	// Unknown tool should return JSON-RPC error -32601 (method not found) per MCP spec
+	if rpcResp.Error == nil {
+		t.Fatal("expected JSON-RPC error for unknown tool")
 	}
 
-	if !result.IsError {
-		t.Error("expected IsError = true for unknown tool")
+	if rpcResp.Error.Code != bridge.CodeMethodNotFound {
+		t.Errorf("expected error code %d, got %d", bridge.CodeMethodNotFound, rpcResp.Error.Code)
 	}
 }

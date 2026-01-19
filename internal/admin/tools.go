@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -224,10 +225,25 @@ func (s *Server) handleToolsCall(ctx context.Context, req *bridge.Request) *brid
 		))
 	}
 
+	// Check if tool exists - return JSON-RPC error for unknown tools per MCP spec
+	if !s.isValidTool(params.Name) {
+		return bridge.NewErrorResponse(req.ID, bridge.NewError(
+			bridge.CodeMethodNotFound,
+			fmt.Sprintf("Unknown tool: %s", params.Name),
+		))
+	}
+
 	// Dispatch to tool handler
 	result, err := s.callTool(ctx, params.Name, params.Arguments)
 	if err != nil {
-		// Return error as tool result (not JSON-RPC error)
+		// Check if this is a validation error (invalid params)
+		if isValidationError(err) {
+			return bridge.NewErrorResponse(req.ID, bridge.NewError(
+				bridge.CodeInvalidParams,
+				err.Error(),
+			))
+		}
+		// Return other errors as tool result (business logic errors)
 		errorResult := ToolCallResult{
 			IsError: true,
 			Content: []ToolContent{
@@ -248,7 +264,38 @@ func (s *Server) handleToolsCall(ctx context.Context, req *bridge.Request) *brid
 	return resp
 }
 
+// isValidTool checks if a tool name is valid.
+func (s *Server) isValidTool(name string) bool {
+	switch name {
+	case "vision_list", "vision_add", "vision_remove", "vision_search", "vision_init", "vision_status":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidationError is returned for invalid tool arguments.
+type ValidationError struct {
+	msg string
+}
+
+func (e *ValidationError) Error() string {
+	return e.msg
+}
+
+// NewValidationError creates a new validation error.
+func NewValidationError(msg string) error {
+	return &ValidationError{msg: msg}
+}
+
+// isValidationError checks if an error is a validation error.
+func isValidationError(err error) bool {
+	_, ok := err.(*ValidationError)
+	return ok
+}
+
 // callTool dispatches to the appropriate tool handler.
+// Note: Tool name validation is done in handleToolsCall before this is called.
 func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage) (*ToolCallResult, error) {
 	switch name {
 	case "vision_list":
@@ -264,11 +311,27 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 	case "vision_status":
 		return s.toolStatus(ctx, args)
 	default:
+		// Should never reach here due to isValidTool check
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
 }
 
 // --- Tool Implementations ---
+
+// ListServerEntry represents a server in the vision_list response.
+type ListServerEntry struct {
+	Name   string  `json:"name"`
+	Status string  `json:"status"`
+	Port   *int    `json:"port"`
+	PID    *int    `json:"pid"`
+	Uptime *string `json:"uptime"`
+	Error  *string `json:"error"`
+}
+
+// ListResponse is the response for vision_list.
+type ListResponse struct {
+	Servers []ListServerEntry `json:"servers"`
+}
 
 // toolList implements vision_list.
 func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
@@ -277,53 +340,95 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 	}
 
 	servers := s.registry.List()
-	if len(servers) == 0 {
-		return &ToolCallResult{
-			Content: []ToolContent{
-				{Type: "text", Text: "No servers registered"},
-			},
-		}, nil
+	response := ListResponse{
+		Servers: make([]ListServerEntry, 0, len(servers)),
 	}
-
-	// Build formatted output
-	var output string
-	output += fmt.Sprintf("Registered servers: %d\n\n", len(servers))
 
 	for _, srv := range servers {
 		status := srv.Status()
-		icon := getStateIcon(string(status.State))
-		output += fmt.Sprintf("%s %s (port %d)\n", icon, status.Name, status.Port)
-		output += fmt.Sprintf("   State: %s\n", status.State)
+		info := ListServerEntry{
+			Name:   status.Name,
+			Status: mapStateToStatus(string(status.State)),
+		}
+
+		// Set port if available
+		if status.Port > 0 {
+			port := status.Port
+			info.Port = &port
+		}
+
+		// Set PID if running
+		if status.PID > 0 {
+			pid := status.PID
+			info.PID = &pid
+		}
+
+		// Set uptime if running
 		if status.Uptime > 0 {
-			output += fmt.Sprintf("   Uptime: %s\n", status.Uptime.Round(time.Second))
+			uptime := status.Uptime.Round(time.Second).String()
+			info.Uptime = &uptime
 		}
+
+		// Set error if present
 		if status.LastError != "" {
-			output += fmt.Sprintf("   Error: %s\n", status.LastError)
+			errStr := status.LastError
+			info.Error = &errStr
 		}
-		output += "\n"
+
+		response.Servers = append(response.Servers, info)
+	}
+
+	// Serialize to JSON
+	jsonBytes, err := json.Marshal(response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize response: %w", err)
 	}
 
 	return &ToolCallResult{
 		Content: []ToolContent{
-			{Type: "text", Text: output},
+			{Type: "text", Text: string(jsonBytes)},
 		},
 	}, nil
 }
 
+// mapStateToStatus maps internal state names to spec status values.
+func mapStateToStatus(state string) string {
+	switch state {
+	case "running":
+		return "running"
+	case "starting":
+		return "starting"
+	case "stopped", "stopping":
+		return "stopped"
+	case "failed", "crashed":
+		return "error"
+	default:
+		return "stopped"
+	}
+}
+
+// AddResponse is the response for vision_add.
+type AddResponse struct {
+	Success bool    `json:"success"`
+	Name    string  `json:"name"`
+	Status  string  `json:"status,omitempty"`
+	Port    *int    `json:"port,omitempty"`
+	Error   *string `json:"error,omitempty"`
+}
+
 // toolAdd implements vision_add.
-// If the server is already in the runtime registry, it starts it.
-// If not, it looks up the server in the catalog and returns install instructions.
+// Adds a server from the catalog and optionally starts it.
 func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
 	var params struct {
 		Name  string `json:"name"`
 		Start *bool  `json:"start"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
+		return nil, NewValidationError("invalid arguments: " + err.Error())
 	}
 
 	if params.Name == "" {
-		return nil, fmt.Errorf("name is required")
+		return nil, NewValidationError("name is required")
 	}
 
 	// Default start to true
@@ -332,137 +437,185 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 		shouldStart = *params.Start
 	}
 
-	// Check if server exists in runtime registry
+	// Check if server is already configured in runtime registry
 	if s.registry != nil {
 		srv := s.registry.Get(params.Name)
 		if srv != nil {
-			// Server already configured - just start it
-			if shouldStart {
+			// Server already configured
+			if !srv.IsRunning() && shouldStart {
+				// Start the stopped server
 				if err := s.registry.Start(params.Name); err != nil {
-					return nil, fmt.Errorf("failed to start server: %w", err)
+					errMsg := fmt.Sprintf("Failed to start server: %s", err.Error())
+					response := AddResponse{
+						Success: false,
+						Name:    params.Name,
+						Error:   &errMsg,
+					}
+					return jsonToolResult(response)
 				}
+				// Refresh status
+				srv = s.registry.Get(params.Name)
 			}
 
-			// Get updated status
-			srv = s.registry.Get(params.Name)
-			if srv == nil {
-				// Server was removed between start and status check (race condition)
-				return nil, fmt.Errorf("server disappeared after start: %s", params.Name)
+			if srv != nil {
+				status := srv.Status()
+				port := status.Port
+				response := AddResponse{
+					Success: true,
+					Name:    params.Name,
+					Status:  mapStateToStatus(string(status.State)),
+					Port:    &port,
+				}
+				if status.LastError != "" {
+					response.Error = &status.LastError
+				}
+				return jsonToolResult(response)
 			}
-			status := srv.Status()
 
-			output := fmt.Sprintf("Server started: %s\n", params.Name)
-			output += fmt.Sprintf("Port: %d\n", status.Port)
-			output += fmt.Sprintf("State: %s\n", status.State)
-			if shouldStart && srv.IsRunning() {
-				output += fmt.Sprintf("Endpoint: http://localhost:%d/mcp\n", status.Port)
+			// Shouldn't happen, but handle it
+			errMsg := fmt.Sprintf("Server '%s' is already configured", params.Name)
+			response := AddResponse{
+				Success: false,
+				Name:    params.Name,
+				Error:   &errMsg,
 			}
-
-			return &ToolCallResult{
-				Content: []ToolContent{
-					{Type: "text", Text: output},
-				},
-			}, nil
+			return jsonToolResult(response)
 		}
 	}
 
-	// Server not in runtime registry - check catalog for install instructions
+	// Check if server exists in catalog
 	if s.catalog == nil {
-		return nil, fmt.Errorf("server not found: %s (no catalog available)", params.Name)
+		errMsg := fmt.Sprintf("Server '%s' not found in registry", params.Name)
+		response := AddResponse{
+			Success: false,
+			Name:    params.Name,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
 	}
 
 	entry := s.catalog.Get(params.Name)
 	if entry == nil {
-		return nil, fmt.Errorf("server not found in catalog: %s", params.Name)
-	}
-
-	// Return install instructions from catalog
-	output := fmt.Sprintf("Server '%s' is not configured.\n\n", params.Name)
-	output += fmt.Sprintf("**%s**\n", entry.Description)
-	output += "\nTo add this server, add the following to your ~/.config/vision/servers.yaml:\n\n"
-	output += "```yaml\nservers:\n"
-	output += fmt.Sprintf("  %s:\n", entry.Name)
-	output += "    port: <choose a port 6276-6300>\n"
-	if entry.Command != "" {
-		output += fmt.Sprintf("    command: %s\n", entry.Command)
-		if len(entry.Args) > 0 {
-			output += "    args:\n"
-			for _, arg := range entry.Args {
-				output += fmt.Sprintf("      - \"%s\"\n", arg)
-			}
+		errMsg := fmt.Sprintf("Server '%s' not found in registry", params.Name)
+		response := AddResponse{
+			Success: false,
+			Name:    params.Name,
+			Error:   &errMsg,
 		}
-	}
-	if entry.URL != "" {
-		output += fmt.Sprintf("    url: %s\n", entry.URL)
-		output += fmt.Sprintf("    transport: %s\n", entry.GetTransport())
-	}
-	if len(entry.EnvVars) > 0 {
-		output += "    env:\n"
-		for _, env := range entry.EnvVars {
-			output += fmt.Sprintf("      %s: \"${%s}\"\n", env, env)
-		}
-	}
-	output += "    autostart: true\n"
-	output += "```\n"
-
-	if len(entry.EnvVars) > 0 {
-		output += "\n**Required environment variables:**\n"
-		for _, env := range entry.EnvVars {
-			output += fmt.Sprintf("- `%s`\n", env)
-		}
+		return jsonToolResult(response)
 	}
 
-	if entry.Source != "" {
-		output += fmt.Sprintf("\n**Source:** %s\n", entry.Source)
+	// TODO: In future, we could auto-add the server to configuration here.
+	// For now, the server must be pre-configured in servers.yaml.
+	// Return success=false with instructions.
+	errMsg := fmt.Sprintf("Server '%s' found in catalog but not configured. Add to ~/.config/vision/servers.yaml to use.", params.Name)
+	response := AddResponse{
+		Success: false,
+		Name:    params.Name,
+		Error:   &errMsg,
 	}
+	return jsonToolResult(response)
+}
 
+// jsonToolResult creates a ToolCallResult with JSON content.
+func jsonToolResult(v interface{}) (*ToolCallResult, error) {
+	jsonBytes, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize response: %w", err)
+	}
 	return &ToolCallResult{
 		Content: []ToolContent{
-			{Type: "text", Text: output},
+			{Type: "text", Text: string(jsonBytes)},
 		},
 	}, nil
 }
 
+// RemoveResponse is the response for vision_remove.
+type RemoveResponse struct {
+	Success bool    `json:"success"`
+	Name    string  `json:"name"`
+	Error   *string `json:"error,omitempty"`
+}
+
 // toolRemove implements vision_remove.
 func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
-	if s.registry == nil {
-		return nil, fmt.Errorf("registry not initialized")
-	}
-
 	var params struct {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
+		return nil, NewValidationError("invalid arguments: " + err.Error())
 	}
 
 	if params.Name == "" {
-		return nil, fmt.Errorf("name is required")
+		return nil, NewValidationError("name is required")
+	}
+
+	if s.registry == nil {
+		errMsg := "Registry not initialized"
+		response := RemoveResponse{
+			Success: false,
+			Name:    params.Name,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
 	}
 
 	// Get server first to check existence
 	srv := s.registry.Get(params.Name)
 	if srv == nil {
-		return nil, fmt.Errorf("server not found: %s", params.Name)
+		errMsg := fmt.Sprintf("Server '%s' is not configured", params.Name)
+		response := RemoveResponse{
+			Success: false,
+			Name:    params.Name,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
 	}
 
 	// Stop if running
 	if srv.IsRunning() {
 		if err := s.registry.Stop(params.Name); err != nil {
-			return nil, fmt.Errorf("failed to stop server: %w", err)
+			errMsg := fmt.Sprintf("Failed to stop server: %s", err.Error())
+			response := RemoveResponse{
+				Success: false,
+				Name:    params.Name,
+				Error:   &errMsg,
+			}
+			return jsonToolResult(response)
 		}
 	}
 
 	// Remove from registry
 	if err := s.registry.Remove(params.Name); err != nil {
-		return nil, fmt.Errorf("failed to remove server: %w", err)
+		errMsg := fmt.Sprintf("Failed to remove server: %s", err.Error())
+		response := RemoveResponse{
+			Success: false,
+			Name:    params.Name,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
 	}
 
-	return &ToolCallResult{
-		Content: []ToolContent{
-			{Type: "text", Text: fmt.Sprintf("Server removed: %s", params.Name)},
-		},
-	}, nil
+	response := RemoveResponse{
+		Success: true,
+		Name:    params.Name,
+	}
+	return jsonToolResult(response)
+}
+
+// SearchResultEntry represents a server in search results.
+type SearchResultEntry struct {
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Capabilities []string `json:"capabilities"`
+	Installed    bool     `json:"installed"`
+}
+
+// SearchResponse is the response for vision_search.
+type SearchResponse struct {
+	Success bool                `json:"success"`
+	Results []SearchResultEntry `json:"results"`
+	Error   *string             `json:"error,omitempty"`
 }
 
 // toolSearch implements vision_search.
@@ -477,50 +630,40 @@ func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCal
 		Capability string `json:"capability"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
+		return nil, NewValidationError("invalid arguments: " + err.Error())
+	}
+
+	// Validate: query is required per spec
+	if params.Query == "" && params.Capability == "" {
+		return nil, NewValidationError("query is required")
 	}
 
 	// Search the catalog
 	results := s.catalog.Search(params.Query, params.Capability)
 
-	if len(results) == 0 {
-		msg := "No servers found"
-		if params.Query != "" {
-			msg = fmt.Sprintf("No servers matching query: %s", params.Query)
-		}
-		if params.Capability != "" {
-			msg = fmt.Sprintf("No servers with capability: %s", params.Capability)
-		}
-		return &ToolCallResult{
-			Content: []ToolContent{
-				{Type: "text", Text: msg},
-			},
-		}, nil
+	// Build response
+	response := SearchResponse{
+		Success: true,
+		Results: make([]SearchResultEntry, 0, len(results)),
 	}
-
-	// Build output showing catalog entries with install status
-	output := fmt.Sprintf("Found %d server(s):\n\n", len(results))
 
 	for _, entry := range results {
-		// Check if server is configured/running in the registry
-		status := s.getServerStatus(entry.Name)
+		// Check if server is configured in the registry
+		installed := false
+		if s.registry != nil {
+			srv := s.registry.Get(entry.Name)
+			installed = srv != nil
+		}
 
-		output += fmt.Sprintf("**%s** - %s\n", entry.Name, entry.Description)
-		output += fmt.Sprintf("   Status: %s\n", status)
-		if len(entry.Capabilities) > 0 {
-			output += fmt.Sprintf("   Capabilities: %s\n", strings.Join(entry.Capabilities, ", "))
-		}
-		if len(entry.EnvVars) > 0 {
-			output += fmt.Sprintf("   Required env: %s\n", strings.Join(entry.EnvVars, ", "))
-		}
-		output += "\n"
+		response.Results = append(response.Results, SearchResultEntry{
+			Name:         entry.Name,
+			Description:  entry.Description,
+			Capabilities: entry.Capabilities,
+			Installed:    installed,
+		})
 	}
 
-	return &ToolCallResult{
-		Content: []ToolContent{
-			{Type: "text", Text: output},
-		},
-	}, nil
+	return jsonToolResult(response)
 }
 
 // getServerStatus returns the status of a server (from runtime registry).
@@ -547,6 +690,16 @@ func (s *Server) getServerStatus(name string) string {
 	return "configured (stopped)"
 }
 
+// InitResponse is the response for vision_init.
+type InitResponse struct {
+	Success    bool     `json:"success"`
+	Path       string   `json:"path"`
+	Servers    []string `json:"servers"`
+	BackedUp   bool     `json:"backed_up,omitempty"`
+	BackupPath string   `json:"backup_path,omitempty"`
+	Error      *string  `json:"error,omitempty"`
+}
+
 // toolInit implements vision_init.
 func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
 	if s.registry == nil {
@@ -554,22 +707,22 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	}
 
 	var params struct {
-		Path    string `json:"path"`
-		Servers string `json:"servers"`
+		Path    string   `json:"path"`
+		Servers []string `json:"servers"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
-		return nil, fmt.Errorf("invalid arguments: %w", err)
+		return nil, NewValidationError("invalid arguments: " + err.Error())
 	}
 
 	if params.Path == "" {
 		params.Path = ".opencode.json"
 	}
 
-	// Parse optional servers filter (comma-separated)
+	// Build servers filter from array
 	var serverFilter map[string]bool
-	if params.Servers != "" {
+	if len(params.Servers) > 0 {
 		serverFilter = make(map[string]bool)
-		for _, name := range strings.Split(params.Servers, ",") {
+		for _, name := range params.Servers {
 			name = strings.TrimSpace(name)
 			if name != "" {
 				serverFilter[name] = true
@@ -591,27 +744,29 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	}
 
 	if len(running) == 0 {
+		var errMsg string
 		if serverFilter != nil {
-			return &ToolCallResult{
-				Content: []ToolContent{
-					{Type: "text", Text: "No running servers matching filter to generate config for"},
-				},
-			}, nil
+			errMsg = "No running servers matching filter"
+		} else {
+			errMsg = "No running servers to generate config for"
 		}
-		return &ToolCallResult{
-			Content: []ToolContent{
-				{Type: "text", Text: "No running servers to generate config for"},
-			},
-		}, nil
+		response := InitResponse{
+			Success: false,
+			Path:    params.Path,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
 	}
 
 	// Build MCP servers config
 	mcpServers := make(map[string]map[string]string)
+	serverNames := make([]string, 0, len(running))
 	for _, srv := range running {
 		status := srv.Status()
 		mcpServers[srv.Name] = map[string]string{
 			"url": fmt.Sprintf("http://localhost:%d/mcp", status.Port),
 		}
+		serverNames = append(serverNames, srv.Name)
 	}
 
 	config := map[string]interface{}{
@@ -620,22 +775,64 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 
 	configJSON, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate config: %w", err)
+		errMsg := fmt.Sprintf("Failed to generate config: %s", err.Error())
+		response := InitResponse{
+			Success: false,
+			Path:    params.Path,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
 	}
 
-	// Note: In production, we'd write this to the file
-	// For now, just return the config content
-	output := fmt.Sprintf("Generated configuration for %d server(s):\n\n", len(running))
-	output += fmt.Sprintf("Path: %s\n\n", params.Path)
-	output += "```json\n"
-	output += string(configJSON)
-	output += "\n```\n"
+	response := InitResponse{
+		Success: true,
+		Path:    params.Path,
+		Servers: serverNames,
+	}
 
-	return &ToolCallResult{
-		Content: []ToolContent{
-			{Type: "text", Text: output},
-		},
-	}, nil
+	// Check if file exists and create backup
+	if _, err := os.Stat(params.Path); err == nil {
+		backupPath := params.Path + ".backup"
+		if err := os.Rename(params.Path, backupPath); err != nil {
+			errMsg := fmt.Sprintf("Failed to create backup: %s", err.Error())
+			response.Success = false
+			response.Error = &errMsg
+			return jsonToolResult(response)
+		}
+		response.BackedUp = true
+		response.BackupPath = backupPath
+	}
+
+	// Write the new config file
+	if err := os.WriteFile(params.Path, configJSON, 0644); err != nil {
+		errMsg := fmt.Sprintf("Permission denied: %s", err.Error())
+		response.Success = false
+		response.Error = &errMsg
+		// Try to restore backup if we made one
+		if response.BackedUp {
+			os.Rename(response.BackupPath, params.Path)
+			response.BackedUp = false
+			response.BackupPath = ""
+		}
+		return jsonToolResult(response)
+	}
+
+	return jsonToolResult(response)
+}
+
+// StatusServers is the server counts in StatusResponse.
+type StatusServers struct {
+	Running int `json:"running"`
+	Stopped int `json:"stopped"`
+	Error   int `json:"error"`
+}
+
+// StatusResponse is the response for vision_status.
+type StatusResponse struct {
+	Healthy  bool          `json:"healthy"`
+	Uptime   string        `json:"uptime"`
+	Servers  StatusServers `json:"servers"`
+	MemoryMB float64       `json:"memory_mb"`
 }
 
 // toolStatus implements vision_status.
@@ -653,25 +850,21 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 		registryStatus = s.registry.Status()
 	}
 
-	output := "Vision Daemon Status\n"
-	output += "====================\n\n"
-	output += fmt.Sprintf("Uptime: %s\n", uptime.Round(time.Second))
-	output += fmt.Sprintf("Memory: %.1f MB (alloc) / %.1f MB (sys)\n",
-		float64(memStats.Alloc)/1024/1024,
-		float64(memStats.Sys)/1024/1024,
-	)
-	output += fmt.Sprintf("Goroutines: %d\n\n", runtime.NumGoroutine())
-	output += "Servers:\n"
-	output += fmt.Sprintf("  Total: %d\n", registryStatus.TotalServers)
-	output += fmt.Sprintf("  Running: %d\n", registryStatus.RunningServers)
-	output += fmt.Sprintf("  Stopped: %d\n", registryStatus.StoppedServers)
-	output += fmt.Sprintf("  Failed: %d\n", registryStatus.FailedServers)
+	// Healthy if no failed servers
+	healthy := registryStatus.FailedServers == 0
 
-	return &ToolCallResult{
-		Content: []ToolContent{
-			{Type: "text", Text: output},
+	response := StatusResponse{
+		Healthy: healthy,
+		Uptime:  uptime.Round(time.Second).String(),
+		Servers: StatusServers{
+			Running: registryStatus.RunningServers,
+			Stopped: registryStatus.StoppedServers,
+			Error:   registryStatus.FailedServers,
 		},
-	}, nil
+		MemoryMB: float64(memStats.Alloc) / 1024 / 1024,
+	}
+
+	return jsonToolResult(response)
 }
 
 // --- Helpers ---

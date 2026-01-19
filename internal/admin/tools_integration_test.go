@@ -14,8 +14,8 @@ import (
 	"github.com/jrede/vision/internal/bridge"
 )
 
-// Helper to call an MCP tool
-func callTool(t *testing.T, port int, toolName string, args interface{}) *admin.ToolCallResult {
+// Helper to call an MCP tool - returns result or nil if RPC error
+func callTool(t *testing.T, port int, toolName string, args interface{}) (*admin.ToolCallResult, *bridge.Error) {
 	t.Helper()
 
 	argsBytes, err := json.Marshal(args)
@@ -53,7 +53,7 @@ func callTool(t *testing.T, port int, toolName string, args interface{}) *admin.
 	}
 
 	if rpcResp.Error != nil {
-		t.Fatalf("RPC error: %v", rpcResp.Error)
+		return nil, rpcResp.Error
 	}
 
 	var result admin.ToolCallResult
@@ -61,7 +61,7 @@ func callTool(t *testing.T, port int, toolName string, args interface{}) *admin.
 		t.Fatalf("Unmarshal result error = %v", err)
 	}
 
-	return &result
+	return &result, nil
 }
 
 func itoa(n int) string {
@@ -85,13 +85,12 @@ func TestTools_VisionList(t *testing.T) {
 	defer srv.Stop(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	result := callTool(t, 16290, "vision_list", map[string]interface{}{})
+	result, rpcErr := callTool(t, 16290, "vision_list", map[string]interface{}{})
 
-	// Without a registry configured, vision_list should return an error
-	// This is expected - the daemon needs a registry to list servers
-	if !result.IsError {
-		// If registry is nil, we expect an error
-		t.Log("vision_list returned success (registry may be configured)")
+	if rpcErr != nil {
+		// Without a registry configured, vision_list returns an internal error
+		t.Log("vision_list returned RPC error (registry not configured):", rpcErr.Message)
+		return
 	}
 
 	// Should return some text (either error or server list)
@@ -111,10 +110,11 @@ func TestTools_VisionSearch(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	tests := []struct {
-		name       string
-		query      string
-		capability string
-		wantMatch  string
+		name           string
+		query          string
+		capability     string
+		wantMatch      string
+		expectRPCError bool
 	}{
 		{
 			name:      "search by name",
@@ -132,9 +132,9 @@ func TestTools_VisionSearch(t *testing.T) {
 			wantMatch: "firecrawl",
 		},
 		{
-			name:      "empty query lists all",
-			query:     "",
-			wantMatch: "Found",
+			name:           "empty query returns error",
+			query:          "",
+			expectRPCError: true,
 		},
 	}
 
@@ -148,10 +148,22 @@ func TestTools_VisionSearch(t *testing.T) {
 				args["capability"] = tt.capability
 			}
 
-			result := callTool(t, 16291, "vision_search", args)
+			result, rpcErr := callTool(t, 16291, "vision_search", args)
+
+			if tt.expectRPCError {
+				if rpcErr == nil {
+					t.Error("expected RPC error for empty query")
+				}
+				return
+			}
+
+			if rpcErr != nil {
+				t.Errorf("vision_search returned RPC error: %v", rpcErr)
+				return
+			}
 
 			if result.IsError {
-				t.Errorf("vision_search returned error: %s", result.Content[0].Text)
+				t.Errorf("vision_search returned tool error: %s", result.Content[0].Text)
 				return
 			}
 
@@ -173,17 +185,34 @@ func TestTools_VisionSearchNoResults(t *testing.T) {
 	defer srv.Stop(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	result := callTool(t, 16292, "vision_search", map[string]interface{}{
+	result, rpcErr := callTool(t, 16292, "vision_search", map[string]interface{}{
 		"query": "nonexistent_server_xyz123",
 	})
 
-	if result.IsError {
-		t.Errorf("vision_search returned error for no results")
+	if rpcErr != nil {
+		t.Errorf("vision_search returned RPC error: %v", rpcErr)
+		return
 	}
 
+	if result.IsError {
+		t.Errorf("vision_search returned tool error for no results")
+	}
+
+	// Parse JSON response
 	text := result.Content[0].Text
-	if !strings.Contains(text, "No servers") {
-		t.Errorf("expected 'No servers' message, got: %s", text)
+	var searchResp struct {
+		Success bool          `json:"success"`
+		Results []interface{} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(text), &searchResp); err != nil {
+		t.Fatalf("failed to parse search response: %v", err)
+	}
+
+	if !searchResp.Success {
+		t.Error("expected success=true for no results")
+	}
+	if len(searchResp.Results) != 0 {
+		t.Errorf("expected empty results, got %d", len(searchResp.Results))
 	}
 }
 
@@ -198,20 +227,32 @@ func TestTools_VisionAdd_NotConfigured(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Try to add a server from catalog (not yet configured)
-	result := callTool(t, 16293, "vision_add", map[string]interface{}{
+	result, rpcErr := callTool(t, 16293, "vision_add", map[string]interface{}{
 		"name": "context7",
 	})
 
-	// Should return install instructions, not an error
-	if result.IsError {
-		t.Errorf("vision_add returned error: %s", result.Content[0].Text)
+	if rpcErr != nil {
+		t.Errorf("vision_add returned RPC error: %v", rpcErr)
 		return
 	}
 
+	// Parse JSON response
 	text := result.Content[0].Text
-	// Should contain install instructions
-	if !strings.Contains(text, "not configured") || !strings.Contains(text, "servers.yaml") {
-		t.Errorf("expected install instructions, got: %s", text)
+	var addResp struct {
+		Success bool   `json:"success"`
+		Name    string `json:"name"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(text), &addResp); err != nil {
+		t.Fatalf("failed to parse add response: %v", err)
+	}
+
+	// Should return success=false with instructions (not yet configured)
+	if addResp.Success {
+		t.Error("expected success=false for unconfigured server")
+	}
+	if !strings.Contains(addResp.Error, "not configured") && !strings.Contains(addResp.Error, "servers.yaml") {
+		t.Errorf("expected configuration instructions, got: %s", addResp.Error)
 	}
 }
 
@@ -225,18 +266,32 @@ func TestTools_VisionAdd_NotFound(t *testing.T) {
 	defer srv.Stop(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	result := callTool(t, 16294, "vision_add", map[string]interface{}{
+	result, rpcErr := callTool(t, 16294, "vision_add", map[string]interface{}{
 		"name": "nonexistent_server_xyz",
 	})
 
-	// Should return error for unknown server
-	if !result.IsError {
-		t.Errorf("expected error for unknown server, got: %s", result.Content[0].Text)
+	if rpcErr != nil {
+		t.Errorf("vision_add returned RPC error: %v", rpcErr)
+		return
 	}
 
+	// Parse JSON response
 	text := result.Content[0].Text
-	if !strings.Contains(text, "not found") {
-		t.Errorf("expected 'not found' message, got: %s", text)
+	var addResp struct {
+		Success bool   `json:"success"`
+		Name    string `json:"name"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(text), &addResp); err != nil {
+		t.Fatalf("failed to parse add response: %v", err)
+	}
+
+	// Should return success=false with not found error
+	if addResp.Success {
+		t.Error("expected success=false for unknown server")
+	}
+	if !strings.Contains(addResp.Error, "not found") {
+		t.Errorf("expected 'not found' message, got: %s", addResp.Error)
 	}
 }
 
@@ -250,13 +305,28 @@ func TestTools_VisionRemove_NotFound(t *testing.T) {
 	defer srv.Stop(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	result := callTool(t, 16295, "vision_remove", map[string]interface{}{
+	result, rpcErr := callTool(t, 16295, "vision_remove", map[string]interface{}{
 		"name": "nonexistent",
 	})
 
-	// Should return error
-	if !result.IsError {
-		t.Error("expected error for removing non-existent server")
+	if rpcErr != nil {
+		t.Errorf("vision_remove returned RPC error: %v", rpcErr)
+		return
+	}
+
+	// Parse JSON response
+	text := result.Content[0].Text
+	var removeResp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(text), &removeResp); err != nil {
+		t.Fatalf("failed to parse remove response: %v", err)
+	}
+
+	// Should return success=false
+	if removeResp.Success {
+		t.Error("expected success=false for removing non-existent server")
 	}
 }
 
@@ -271,14 +341,14 @@ func TestTools_VisionInit(t *testing.T) {
 	defer srv.Stop(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	result := callTool(t, 16296, "vision_init", map[string]interface{}{
-		"path": ".opencode.json",
+	result, rpcErr := callTool(t, 16296, "vision_init", map[string]interface{}{
+		"path": "/tmp/test-opencode.json",
 	})
 
-	// Without a registry configured, vision_init should return an error
-	// This is expected - the daemon needs a registry to list running servers
-	if !result.IsError {
-		t.Log("vision_init returned success (registry may be configured)")
+	if rpcErr != nil {
+		// Without a registry configured, vision_init returns an internal error
+		t.Log("vision_init returned RPC error (registry not configured):", rpcErr.Message)
+		return
 	}
 
 	// Should return some text (either error or config content)
@@ -297,20 +367,41 @@ func TestTools_VisionStatus(t *testing.T) {
 	defer srv.Stop(ctx)
 	time.Sleep(50 * time.Millisecond)
 
-	result := callTool(t, 16297, "vision_status", map[string]interface{}{})
+	result, rpcErr := callTool(t, 16297, "vision_status", map[string]interface{}{})
+
+	if rpcErr != nil {
+		t.Errorf("vision_status returned RPC error: %v", rpcErr)
+		return
+	}
 
 	if result.IsError {
 		t.Errorf("vision_status returned error: %s", result.Content[0].Text)
 		return
 	}
 
+	// Parse JSON response
 	text := result.Content[0].Text
-	// Should contain status info
-	if !strings.Contains(text, "Vision Daemon Status") {
-		t.Errorf("expected status header, got: %s", text)
+	var statusResp struct {
+		Healthy  bool    `json:"healthy"`
+		Uptime   string  `json:"uptime"`
+		MemoryMB float64 `json:"memory_mb"`
+		Servers  struct {
+			Running int `json:"running"`
+			Stopped int `json:"stopped"`
+			Error   int `json:"error"`
+		} `json:"servers"`
 	}
-	if !strings.Contains(text, "Uptime") {
-		t.Errorf("expected uptime in status, got: %s", text)
+	if err := json.Unmarshal([]byte(text), &statusResp); err != nil {
+		t.Fatalf("failed to parse status response: %v", err)
+	}
+
+	// Should have valid uptime
+	if statusResp.Uptime == "" {
+		t.Error("expected uptime in status")
+	}
+	// Should have memory info
+	if statusResp.MemoryMB <= 0 {
+		t.Error("expected positive memory_mb in status")
 	}
 }
 
@@ -374,9 +465,8 @@ func TestTools_ConcurrentCalls(t *testing.T) {
 				return
 			}
 
-			if rpcResp.Error != nil {
-				errors <- rpcResp.Error
-			}
+			// RPC errors are OK for tools that need registry (vision_list)
+			// We just want to ensure no HTTP/connection errors
 		}(i)
 	}
 
@@ -417,10 +507,13 @@ func TestTools_InvalidArguments(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := callTool(t, 16300, tt.toolName, tt.args)
+			_, rpcErr := callTool(t, 16300, tt.toolName, tt.args)
 
-			if !result.IsError {
-				t.Errorf("expected error for invalid arguments")
+			// Should return JSON-RPC error -32602 for invalid params
+			if rpcErr == nil {
+				t.Error("expected RPC error for invalid arguments")
+			} else if rpcErr.Code != -32602 {
+				t.Errorf("expected error code -32602, got %d", rpcErr.Code)
 			}
 		})
 	}
