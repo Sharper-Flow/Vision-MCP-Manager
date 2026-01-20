@@ -349,6 +349,8 @@ func (e *StartupTimeoutError) Error() string {
 // --- Metrics Tracking ---
 
 // Metrics tracks request statistics for an MCP server.
+// Uses a ring buffer for response times to avoid memory allocations
+// and provide O(1) insertions with bounded memory usage.
 type Metrics struct {
 	mu sync.RWMutex
 
@@ -356,9 +358,10 @@ type Metrics struct {
 	requestCount int64
 	errorCount   int64
 
-	// Response times (in nanoseconds)
-	responseTimes []int64
-	maxSamples    int
+	// Response times ring buffer (in nanoseconds)
+	responseTimes [1000]int64 // Fixed-size ring buffer
+	head          int         // Next write position
+	count         int         // Number of samples (max 1000)
 
 	// Uptime tracking
 	startTime time.Time
@@ -367,9 +370,7 @@ type Metrics struct {
 // NewMetrics creates a new metrics tracker.
 func NewMetrics() *Metrics {
 	return &Metrics{
-		responseTimes: make([]int64, 0, 1000),
-		maxSamples:    1000,
-		startTime:     time.Now(),
+		startTime: time.Now(),
 	}
 }
 
@@ -383,13 +384,12 @@ func (m *Metrics) RecordRequest(duration time.Duration, isError bool) {
 		m.errorCount++
 	}
 
-	// Add response time sample
-	if len(m.responseTimes) >= m.maxSamples {
-		// Shift to make room (simple sliding window)
-		copy(m.responseTimes, m.responseTimes[1:])
-		m.responseTimes = m.responseTimes[:m.maxSamples-1]
+	// Add response time to ring buffer (O(1), no allocations)
+	m.responseTimes[m.head] = duration.Nanoseconds()
+	m.head = (m.head + 1) % len(m.responseTimes)
+	if m.count < len(m.responseTimes) {
+		m.count++
 	}
-	m.responseTimes = append(m.responseTimes, duration.Nanoseconds())
 }
 
 // Snapshot returns current metrics.
@@ -403,7 +403,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		Uptime:       time.Since(m.startTime),
 	}
 
-	if len(m.responseTimes) > 0 {
+	if m.count > 0 {
 		snap.AvgResponseTime = m.calculateAvg()
 		snap.P95ResponseTime = m.calculateP95()
 	}
@@ -413,27 +413,27 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 
 // calculateAvg calculates average response time.
 func (m *Metrics) calculateAvg() time.Duration {
-	if len(m.responseTimes) == 0 {
+	if m.count == 0 {
 		return 0
 	}
 
 	var sum int64
-	for _, t := range m.responseTimes {
-		sum += t
+	for i := 0; i < m.count; i++ {
+		sum += m.responseTimes[i]
 	}
-	return time.Duration(sum / int64(len(m.responseTimes)))
+	return time.Duration(sum / int64(m.count))
 }
 
 // calculateP95 calculates 95th percentile response time.
 // Note: This is an approximation - proper implementation would use sorted data
 func (m *Metrics) calculateP95() time.Duration {
-	if len(m.responseTimes) == 0 {
+	if m.count == 0 {
 		return 0
 	}
 
 	// Simple approach: sort a copy and get 95th percentile
-	sorted := make([]int64, len(m.responseTimes))
-	copy(sorted, m.responseTimes)
+	sorted := make([]int64, m.count)
+	copy(sorted, m.responseTimes[:m.count])
 
 	// Insertion sort (good enough for 1000 samples)
 	for i := 1; i < len(sorted); i++ {
@@ -461,7 +461,8 @@ func (m *Metrics) Reset() {
 
 	m.requestCount = 0
 	m.errorCount = 0
-	m.responseTimes = m.responseTimes[:0]
+	m.head = 0
+	m.count = 0
 	m.startTime = time.Now()
 }
 

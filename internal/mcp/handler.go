@@ -137,6 +137,7 @@ type MCPServerInfo struct {
 type PortManager struct {
 	listeners map[string]*ServerListener
 	mu        sync.RWMutex
+	wg        sync.WaitGroup // Tracks active listener goroutines for clean shutdown
 	logger    *slog.Logger
 }
 
@@ -198,8 +199,10 @@ func (pm *PortManager) Add(name string, port int, b *bridge.StdioHTTPBridge) err
 	}
 	pm.listeners[name] = listener
 
-	// Start listener in background
+	// Start listener in background with WaitGroup tracking
+	pm.wg.Add(1)
 	go func() {
+		defer pm.wg.Done()
 		pm.logger.Info("starting MCP listener",
 			slog.String("server", name),
 			slog.String("addr", addr),
@@ -256,11 +259,9 @@ func (pm *PortManager) List() []*ServerListener {
 	return result
 }
 
-// Close shuts down all listeners.
+// Close shuts down all listeners and waits for goroutines to exit.
 func (pm *PortManager) Close() error {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
 	for name, listener := range pm.listeners {
 		if err := listener.Server.Close(); err != nil {
 			pm.logger.Warn("error closing server",
@@ -270,6 +271,10 @@ func (pm *PortManager) Close() error {
 		}
 	}
 	pm.listeners = make(map[string]*ServerListener)
+	pm.mu.Unlock()
+
+	// Wait for all listener goroutines to exit
+	pm.wg.Wait()
 	return nil
 }
 

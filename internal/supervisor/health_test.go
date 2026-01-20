@@ -365,24 +365,31 @@ func TestMetrics_Uptime(t *testing.T) {
 	}
 }
 
-func TestMetrics_SlidingWindow(t *testing.T) {
-	m := &Metrics{
-		responseTimes: make([]int64, 0, 10),
-		maxSamples:    10,
-		startTime:     time.Now(),
-	}
+func TestMetrics_RingBuffer(t *testing.T) {
+	m := NewMetrics()
 
-	// Add more than maxSamples
-	for i := 0; i < 15; i++ {
+	// Add more than buffer size (1000)
+	for i := 0; i < 1500; i++ {
 		m.RecordRequest(time.Duration(i)*time.Millisecond, false)
 	}
 
 	m.mu.RLock()
-	sampleCount := len(m.responseTimes)
+	sampleCount := m.count
 	m.mu.RUnlock()
 
-	if sampleCount > 10 {
-		t.Errorf("expected max 10 samples, got %d", sampleCount)
+	// Ring buffer should cap at 1000
+	if sampleCount != 1000 {
+		t.Errorf("expected 1000 samples (ring buffer cap), got %d", sampleCount)
+	}
+
+	// Verify ring buffer wraps correctly - head should have wrapped
+	m.mu.RLock()
+	head := m.head
+	m.mu.RUnlock()
+
+	expectedHead := 1500 % 1000 // Should be 500
+	if head != expectedHead {
+		t.Errorf("expected head at %d, got %d", expectedHead, head)
 	}
 }
 
