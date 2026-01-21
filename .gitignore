@@ -50,3 +50,6 @@ opencode.json
 
 # PID files (runtime)
 *.pid
+
+# Local logs (generated at runtime)
+logs/
