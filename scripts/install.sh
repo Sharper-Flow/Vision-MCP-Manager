@@ -35,6 +35,7 @@ Options:
   --user            Install for current user only (default)
   --no-service      Skip systemd service installation
   --migrate         Migrate from Jarvis/MCPM after install
+  --opencode        Configure OpenCode to use Vision MCP servers
   --version VER     Install specific version (default: latest)
   --help            Show this help message
 
@@ -42,6 +43,7 @@ Examples:
   $0                    # Install for current user
   $0 --system           # Install system-wide
   $0 --migrate          # Install and migrate from Jarvis/MCPM
+  $0 --opencode         # Install and configure OpenCode integration
 EOF
 }
 
@@ -233,11 +235,65 @@ migrate_from_mcpm() {
     fi
 }
 
+configure_opencode() {
+    log_info "Configuring OpenCode integration..."
+    
+    local opencode_config="${HOME}/.config/opencode/opencode.json"
+    local opencode_dir="${HOME}/.config/opencode"
+    
+    # Create directory if needed
+    mkdir -p "$opencode_dir"
+    
+    # Check if config exists
+    if [[ -f "$opencode_config" ]]; then
+        # Config exists - check if jq is available for merging
+        if command -v jq &>/dev/null; then
+            log_info "Merging Vision MCP servers into existing OpenCode config..."
+            
+            # Create temp file with Vision MCP config
+            local vision_mcp='{
+                "vision": {"type": "remote", "url": "http://localhost:6275/mcp", "enabled": true}
+            }'
+            
+            # Merge into existing config
+            local tmp_config=$(mktemp)
+            jq --argjson vision "$vision_mcp" '.mcp = (.mcp // {}) + $vision' "$opencode_config" > "$tmp_config"
+            mv "$tmp_config" "$opencode_config"
+            
+            log_success "Added Vision admin server to OpenCode config"
+            log_info "Note: Add individual servers (context7, kagimcp, etc.) based on your servers.yaml"
+        else
+            log_warn "jq not found - cannot merge config automatically"
+            log_info "Add the following to your OpenCode config manually:"
+            echo '    "vision": {"type": "remote", "url": "http://localhost:6275/mcp", "enabled": true}'
+        fi
+    else
+        # Create new config with Vision
+        log_info "Creating new OpenCode config with Vision..."
+        cat > "$opencode_config" <<'JSON'
+{
+  "mcp": {
+    "vision": {
+      "type": "remote",
+      "url": "http://localhost:6275/mcp",
+      "enabled": true
+    }
+  }
+}
+JSON
+        log_success "Created OpenCode config with Vision admin server"
+    fi
+    
+    log_info "Vision admin tools available: vision_list, vision_add, vision_remove, vision_status"
+    log_info "Use vision_list to see available MCP servers and their ports"
+}
+
 main() {
     local system_install=false
     local skip_service=false
     local do_migrate=false
     local from_source=false
+    local configure_oc=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -245,6 +301,7 @@ main() {
             --user) system_install=false; shift ;;
             --no-service) skip_service=true; shift ;;
             --migrate) do_migrate=true; shift ;;
+            --opencode) configure_oc=true; shift ;;
             --version) VERSION="$2"; shift 2 ;;
             --from-source) from_source=true; shift ;;
             --help) usage; exit 0 ;;
@@ -299,6 +356,11 @@ main() {
     # Migration
     if $do_migrate; then
         migrate_from_mcpm
+    fi
+    
+    # OpenCode configuration
+    if $configure_oc; then
+        configure_opencode
     fi
     
     echo ""

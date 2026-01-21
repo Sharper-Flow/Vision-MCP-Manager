@@ -289,7 +289,41 @@ Vision exposes its own management interface as MCP tools on port 6275. This allo
 | `vision_status` | Daemon health, uptime, and memory stats |
 | `vision_guidance` | Tool selection recommendations |
 
-To use these tools, add Vision's admin server to your client config:
+### OpenCode Integration
+
+Add Vision and its managed servers to your OpenCode config (`~/.config/opencode/opencode.json`):
+
+```json
+{
+  "mcp": {
+    "vision": {
+      "type": "remote",
+      "url": "http://localhost:6275/mcp",
+      "enabled": true
+    },
+    "context7": {
+      "type": "remote",
+      "url": "http://localhost:6276/mcp",
+      "enabled": true
+    },
+    "kagimcp": {
+      "type": "remote",
+      "url": "http://localhost:6279/mcp",
+      "enabled": true
+    }
+  }
+}
+```
+
+Or use the install script with `--opencode` to auto-configure:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/trunk/scripts/install.sh | bash -s -- --opencode
+```
+
+### Claude Code Integration
+
+Add Vision to your Claude Code config (`~/.config/claude-code/config.json`):
 
 ```json
 {

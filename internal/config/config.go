@@ -17,6 +17,8 @@ const (
 	DefaultConfigDir = ".config/vision"
 	// DefaultConfigFile is the default filename
 	DefaultConfigFile = "servers.yaml"
+	// DefaultEnvFile is the default environment file
+	DefaultEnvFile = "env"
 )
 
 var (
@@ -39,12 +41,80 @@ func DefaultConfigPath() string {
 	return filepath.Join(home, DefaultConfigDir, DefaultConfigFile)
 }
 
+// DefaultEnvPath returns the default env file path: ~/.config/vision/env
+func DefaultEnvPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return DefaultEnvFile
+	}
+	return filepath.Join(home, DefaultConfigDir, DefaultEnvFile)
+}
+
+// LoadEnvFile loads environment variables from the given file into os.Environ.
+// If path is empty, it uses DefaultEnvPath().
+// The file format is KEY=VALUE, one per line. Lines starting with # are comments.
+// Returns nil if the file doesn't exist (env file is optional).
+func LoadEnvFile(path string) error {
+	if path == "" {
+		path = DefaultEnvPath()
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Env file is optional
+			return nil
+		}
+		return fmt.Errorf("config: read env file: %w", err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse KEY=VALUE
+		idx := strings.Index(line, "=")
+		if idx == -1 {
+			continue
+		}
+
+		key := strings.TrimSpace(line[:idx])
+		value := strings.TrimSpace(line[idx+1:])
+
+		// Remove surrounding quotes if present
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') ||
+				(value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+
+		// Only set if not already in environment or if existing value is empty
+		if existing, exists := os.LookupEnv(key); !exists || existing == "" {
+			os.Setenv(key, value)
+		}
+	}
+
+	return nil
+}
+
 // Load reads and parses a config file from the given path.
 // If path is empty, it uses DefaultConfigPath().
 // Environment variables in the format ${VAR} or ${VAR:-default} are expanded.
+// The env file (~/.config/vision/env) is loaded first if it exists.
 func Load(path string) (*Config, error) {
 	if path == "" {
 		path = DefaultConfigPath()
+	}
+
+	// Load env file first (optional, won't fail if missing)
+	if err := LoadEnvFile(""); err != nil {
+		return nil, fmt.Errorf("config: load env file: %w", err)
 	}
 
 	data, err := os.ReadFile(path)
