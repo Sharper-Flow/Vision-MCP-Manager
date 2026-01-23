@@ -476,3 +476,119 @@ func TestRegistry_StartAllStopAll(t *testing.T) {
 		t.Errorf("RunningServers after StopAll = %d, want 0", status.RunningServers)
 	}
 }
+
+func TestRegistry_EventHandler_StartStop(t *testing.T) {
+	reg, sup := newTestRegistry()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.Serve(ctx)
+
+	// Track events
+	events := make(chan ServerEvent, 10)
+	reg.SetEventHandler(func(event ServerEvent) {
+		events <- event
+	})
+
+	cfg := &config.ServerConfig{
+		Port:    6279,
+		Command: "sleep",
+		Args:    []string{"10"},
+	}
+
+	reg.Add("test-events", cfg)
+
+	// Start should fire EventServerStarted
+	if err := reg.Start("test-events"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	select {
+	case event := <-events:
+		if event.Type != EventServerStarted {
+			t.Errorf("Event type = %v, want EventServerStarted", event.Type)
+		}
+		if event.Name != "test-events" {
+			t.Errorf("Event name = %q, want %q", event.Name, "test-events")
+		}
+		if event.Server == nil {
+			t.Error("Event.Server is nil")
+		}
+	case <-time.After(1 * time.Second):
+		t.Error("Timeout waiting for EventServerStarted")
+	}
+
+	// Stop should fire EventServerStopped
+	if err := reg.Stop("test-events"); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	select {
+	case event := <-events:
+		if event.Type != EventServerStopped {
+			t.Errorf("Event type = %v, want EventServerStopped", event.Type)
+		}
+		if event.Name != "test-events" {
+			t.Errorf("Event name = %q, want %q", event.Name, "test-events")
+		}
+	case <-time.After(1 * time.Second):
+		t.Error("Timeout waiting for EventServerStopped")
+	}
+}
+
+func TestRegistry_EventHandler_Nil(t *testing.T) {
+	reg, sup := newTestRegistry()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.Serve(ctx)
+
+	// No event handler set - should not panic
+	cfg := &config.ServerConfig{
+		Port:    6280,
+		Command: "sleep",
+		Args:    []string{"1"},
+	}
+
+	reg.Add("test-nil-handler", cfg)
+
+	// These should not panic with nil handler
+	if err := reg.Start("test-nil-handler"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+	if err := reg.Stop("test-nil-handler"); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+}
+
+func TestRegistry_EventHandler_Replace(t *testing.T) {
+	reg, _ := newTestRegistry()
+
+	events1 := make(chan string, 1)
+	events2 := make(chan string, 1)
+
+	// Set first handler
+	reg.SetEventHandler(func(event ServerEvent) {
+		events1 <- "handler1"
+	})
+
+	// Replace with second handler
+	reg.SetEventHandler(func(event ServerEvent) {
+		events2 <- "handler2"
+	})
+
+	// Fire an event manually via fireEvent (testing internal behavior)
+	reg.fireEvent(ServerEvent{Type: EventServerStarted, Name: "test"})
+
+	// Only handler2 should receive the event
+	select {
+	case <-events1:
+		t.Error("Handler1 should not receive events after replacement")
+	case msg := <-events2:
+		if msg != "handler2" {
+			t.Errorf("Received %q, want %q", msg, "handler2")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Error("Timeout waiting for handler2")
+	}
+}

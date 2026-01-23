@@ -96,7 +96,7 @@ func New(cfg Config) (*Daemon, error) {
 		Logger:       cfg.Logger,
 	})
 
-	return &Daemon{
+	d := &Daemon{
 		cfg:         visionCfg,
 		configPath:  cfg.ConfigPath,
 		supervisor:  sup,
@@ -106,7 +106,12 @@ func New(cfg Config) (*Daemon, error) {
 		logger:      cfg.Logger,
 		ctx:         ctx,
 		cancel:      cancel,
-	}, nil
+	}
+
+	// Register event handler for dynamic server lifecycle management
+	reg.SetEventHandler(d.handleServerEvent)
+
+	return d, nil
 }
 
 // Start starts the daemon.
@@ -349,79 +354,119 @@ func (d *Daemon) setupHTTPProxies() error {
 	var errs []error
 
 	for _, srv := range d.registry.List() {
-		// Skip servers that aren't running
-		if srv.State != server.StateRunning {
-			continue
-		}
-
-		// Skip HTTP transport servers (they don't need a bridge)
-		if srv.Config.InferTransport() != config.TransportStdio {
-			d.logger.Debug("skipping non-stdio server",
-				slog.String("server", srv.Name),
-				slog.String("transport", string(srv.Config.InferTransport())),
-			)
-			continue
-		}
-
-		// Get the managed process
-		proc := srv.Process
-		if proc == nil {
-			d.logger.Warn("no process for running server",
-				slog.String("server", srv.Name),
-			)
-			continue
-		}
-
-		// Get stdin/stdout pipes
-		stdin := proc.Stdin()
-		stdout := proc.Stdout()
-		if stdin == nil || stdout == nil {
-			d.logger.Warn("missing stdio pipes for server",
-				slog.String("server", srv.Name),
-			)
-			continue
-		}
-
-		// Create the bridge
-		b := bridge.NewStdioHTTPBridge(stdin, stdout, &bridge.BridgeOptions{
-			Logger: d.logger.With(slog.String("server", srv.Name)),
-		})
-		b.Start()
-
-		// Initialize MCP session (required by fastmcp-based servers like kagimcp)
-		initCtx, initCancel := context.WithTimeout(d.ctx, 10*time.Second)
-		if err := b.Initialize(initCtx); err != nil {
-			initCancel()
-			d.logger.Warn("MCP initialization failed",
-				slog.String("server", srv.Name),
-				slog.String("error", err.Error()),
-			)
-			// Continue anyway - older servers may not need initialization
-		} else {
-			initCancel()
-		}
-
-		// Add to port manager (starts HTTP listener on the server's port)
-		if err := d.portManager.Add(srv.Name, srv.Config.Port, b); err != nil {
-			d.logger.Warn("failed to add HTTP proxy",
-				slog.String("server", srv.Name),
-				slog.Int("port", srv.Config.Port),
-				slog.String("error", err.Error()),
-			)
+		if err := d.setupProxyForServer(srv); err != nil {
 			errs = append(errs, err)
-			continue
 		}
-
-		d.logger.Info("HTTP proxy started",
-			slog.String("server", srv.Name),
-			slog.Int("port", srv.Config.Port),
-		)
 	}
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// handleServerEvent processes server lifecycle events from the registry.
+// This is called asynchronously when servers start or stop.
+func (d *Daemon) handleServerEvent(event server.ServerEvent) {
+	switch event.Type {
+	case server.EventServerStarted:
+		// Small delay to ensure stdio pipes are ready
+		time.Sleep(100 * time.Millisecond)
+		if err := d.setupProxyForServer(event.Server); err != nil {
+			d.logger.Warn("failed to setup proxy for server",
+				slog.String("server", event.Name),
+				slog.String("error", err.Error()),
+			)
+		}
+	case server.EventServerStopped:
+		d.teardownProxyForServer(event.Name)
+	}
+}
+
+// setupProxyForServer creates an HTTP bridge for a single server.
+// This is extracted from setupHTTPProxies to support dynamic server addition.
+func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
+	if srv == nil {
+		return errors.New("server is nil")
+	}
+
+	// Skip servers that aren't running
+	if srv.State != server.StateRunning {
+		return nil
+	}
+
+	// Skip HTTP transport servers (they don't need a bridge)
+	if srv.Config.InferTransport() != config.TransportStdio {
+		d.logger.Debug("skipping non-stdio server",
+			slog.String("server", srv.Name),
+			slog.String("transport", string(srv.Config.InferTransport())),
+		)
+		return nil
+	}
+
+	// Check if proxy already exists
+	if d.portManager.Get(srv.Name) != nil {
+		d.logger.Debug("proxy already exists for server",
+			slog.String("server", srv.Name),
+		)
+		return nil
+	}
+
+	// Get the managed process
+	proc := srv.Process
+	if proc == nil {
+		return fmt.Errorf("no process for running server %s", srv.Name)
+	}
+
+	// Get stdin/stdout pipes
+	stdin := proc.Stdin()
+	stdout := proc.Stdout()
+	if stdin == nil || stdout == nil {
+		return fmt.Errorf("missing stdio pipes for server %s", srv.Name)
+	}
+
+	// Create the bridge
+	b := bridge.NewStdioHTTPBridge(stdin, stdout, &bridge.BridgeOptions{
+		Logger: d.logger.With(slog.String("server", srv.Name)),
+	})
+	b.Start()
+
+	// Initialize MCP session (required by fastmcp-based servers like kagimcp)
+	initCtx, initCancel := context.WithTimeout(d.ctx, 10*time.Second)
+	defer initCancel()
+	if err := b.Initialize(initCtx); err != nil {
+		d.logger.Warn("MCP initialization failed",
+			slog.String("server", srv.Name),
+			slog.String("error", err.Error()),
+		)
+		// Continue anyway - older servers may not need initialization
+	}
+
+	// Add to port manager (starts HTTP listener on the server's port)
+	if err := d.portManager.Add(srv.Name, srv.Config.Port, b); err != nil {
+		return fmt.Errorf("failed to add HTTP proxy: %w", err)
+	}
+
+	d.logger.Info("HTTP proxy started",
+		slog.String("server", srv.Name),
+		slog.Int("port", srv.Config.Port),
+	)
+
+	return nil
+}
+
+// teardownProxyForServer removes the HTTP proxy for a server.
+func (d *Daemon) teardownProxyForServer(name string) {
+	if err := d.portManager.Remove(name); err != nil {
+		d.logger.Debug("failed to remove proxy for server",
+			slog.String("server", name),
+			slog.String("error", err.Error()),
+		)
+	} else {
+		d.logger.Info("HTTP proxy removed",
+			slog.String("server", name),
+		)
+	}
 }
 
 // Registry returns the server registry.

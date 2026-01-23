@@ -23,14 +23,37 @@ var (
 	ErrServerNotRunning = errors.New("server is not running")
 )
 
+// ServerEventType indicates the type of server lifecycle event.
+type ServerEventType int
+
+const (
+	// EventServerStarted fires when a server has successfully started.
+	EventServerStarted ServerEventType = iota
+	// EventServerStopped fires when a server has been stopped.
+	EventServerStopped
+)
+
+// ServerEvent contains information about a server lifecycle change.
+// Events are fired asynchronously after the corresponding operation completes.
+type ServerEvent struct {
+	Type   ServerEventType
+	Name   string
+	Server *ManagedServer
+}
+
+// ServerEventHandler is called when server lifecycle events occur.
+// Handlers should be non-blocking and not call back into the registry.
+type ServerEventHandler func(event ServerEvent)
+
 // Registry manages MCP server configurations and their lifecycle.
 // It provides a thread-safe interface for adding, removing, starting,
 // and stopping servers.
 type Registry struct {
-	supervisor *supervisor.Supervisor
-	servers    map[string]*ManagedServer
-	mu         sync.RWMutex
-	logger     *slog.Logger
+	supervisor   *supervisor.Supervisor
+	servers      map[string]*ManagedServer
+	mu           sync.RWMutex
+	logger       *slog.Logger
+	eventHandler ServerEventHandler
 }
 
 // NewRegistry creates a new server registry with the given supervisor.
@@ -42,6 +65,29 @@ func NewRegistry(sup *supervisor.Supervisor, logger *slog.Logger) *Registry {
 		supervisor: sup,
 		servers:    make(map[string]*ManagedServer),
 		logger:     logger,
+	}
+}
+
+// SetEventHandler registers a callback for server lifecycle events.
+// Only one handler can be registered at a time; subsequent calls replace
+// the previous handler. Pass nil to unregister the current handler.
+// The handler is called asynchronously after state changes complete.
+func (r *Registry) SetEventHandler(handler ServerEventHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.eventHandler = handler
+}
+
+// fireEvent sends an event to the registered handler, if any.
+// This is called outside of locks to avoid deadlocks.
+func (r *Registry) fireEvent(event ServerEvent) {
+	r.mu.RLock()
+	handler := r.eventHandler
+	r.mu.RUnlock()
+
+	if handler != nil {
+		// Fire asynchronously to prevent blocking and deadlocks
+		go handler(event)
 	}
 }
 
@@ -178,6 +224,13 @@ func (r *Registry) Start(name string) error {
 		slog.Int("port", srv.Config.Port),
 	)
 
+	// Fire event after successful start (outside lock)
+	r.fireEvent(ServerEvent{
+		Type:   EventServerStarted,
+		Name:   name,
+		Server: srv,
+	})
+
 	return nil
 }
 
@@ -216,6 +269,13 @@ func (r *Registry) Stop(name string) error {
 	r.logger.Info("server stopped",
 		slog.String("name", name),
 	)
+
+	// Fire event after successful stop (outside lock)
+	r.fireEvent(ServerEvent{
+		Type:   EventServerStopped,
+		Name:   name,
+		Server: srv,
+	})
 
 	return nil
 }
