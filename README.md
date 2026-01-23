@@ -92,15 +92,15 @@ Vision maintains a central registry of MCP servers at `~/.config/vision/servers.
 ```yaml
 servers:
   # Context7 - Library documentation lookup
+  # Get a free API key at https://context7.com/dashboard
   context7:
     port: 6276
     command: npx
-    args: ["-y", "@upstash/context7-mcp@latest"]
-    env:
-      CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+    args: ["-y", "@upstash/context7-mcp@latest", "--api-key", "your-api-key-here"]
     autostart: true
 
-  # Kagi - Web search and summarization (official: kagisearch/kagimcp)
+  # Kagi - Web search and summarization
+  # Get an API key at https://kagi.com/settings?p=api
   kagi:
     port: 6284
     command: uvx
@@ -115,7 +115,7 @@ servers:
     command: npx
     args: ["-y", "firecrawl-mcp"]
     env:
-      FIRECRAWL_API_KEY: "${FIRECRAWL_API_KEY}"
+      FIRECRAWL_API_KEY: "your-firecrawl-api-key-here"
     autostart: true
 
   # Time - Timezone and scheduling utilities
@@ -129,11 +129,15 @@ servers:
 Each server entry specifies:
 - **port** — Dedicated HTTP port (6276-6300 range)
 - **command** — Executable (`npx`, `uvx`, or direct binary path)
-- **args** — Command-line arguments
-- **env** — Environment variables (API keys, configuration)
+- **args** — Command-line arguments (including API keys via `--api-key` flags)
+- **env** — Environment variables for servers that read from env
 - **autostart** — Whether to start with the daemon
 
-> **Note:** Since `~/.config/vision/servers.yaml` is a local config file that's never committed to git, you can safely put API keys directly in the `env` section. Environment variable expansion (`${VAR}`) is also supported for values already in your shell environment.
+> **Best Practice: Hardcode API Keys**
+>
+> Put API keys directly in `servers.yaml`. This file is local (`~/.config/vision/`) and never committed to git. Hardcoding keys is more reliable than environment variable expansion (`${VAR}`), which can fail depending on how the daemon is launched.
+>
+> Check each MCP server's documentation for how it accepts API keys—some use `--api-key` args (like Context7), others read from environment variables (like Kagi).
 
 ### Client Configuration
 

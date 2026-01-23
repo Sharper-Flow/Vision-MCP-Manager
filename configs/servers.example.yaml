@@ -25,13 +25,12 @@ servers:
 
   # Context7 - library documentation lookup
   # Install: npx -y @upstash/context7-mcp
-  # Requires: CONTEXT7_API_KEY environment variable
+  # Get a free API key at https://context7.com/dashboard
+  # Best practice: Put API key directly here (this file is local, never committed)
   context7:
     port: 6277
     command: npx              # transport: stdio is implied when command is set
-    args: ["-y", "@upstash/context7-mcp"]
-    env:
-      CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+    args: ["-y", "@upstash/context7-mcp", "--api-key", "your-api-key-here"]
     autostart: true
     restart_policy: on-failure
     max_restarts: 3

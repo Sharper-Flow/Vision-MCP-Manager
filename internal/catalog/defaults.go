@@ -16,8 +16,8 @@ func Default() *Catalog {
 			"api-reference",
 		},
 		Command: "npx",
-		Args:    []string{"-y", "@upstash/context7-mcp"},
-		EnvVars: []string{"CONTEXT7_API_KEY"},
+		Args:    []string{"-y", "@upstash/context7-mcp", "--api-key", "YOUR_API_KEY"},
+		EnvVars: []string{"CONTEXT7_API_KEY"}, // Documents required key; user replaces YOUR_API_KEY in servers.yaml
 		Source:  "https://github.com/upstash/context7",
 	})
 

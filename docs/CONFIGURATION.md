@@ -117,13 +117,13 @@ servers:
   context7:
     port: 6277
     command: npx
-    args: ["-y", "@upstash/context7-mcp"]
-    env:
-      CONTEXT7_API_KEY: "your-context7-api-key"
+    args: ["-y", "@upstash/context7-mcp", "--api-key", "your-api-key-here"]
     autostart: true
 ```
 
-> **Note:** Since `servers.yaml` is a local config file that's never committed to git, you can safely put API keys directly in the config.
+> **Best Practice:** Put API keys directly in `servers.yaml`. This file is local to your machine (`~/.config/vision/servers.yaml`) and is never committed to version control. Hardcoding keys avoids environment variable resolution issues and ensures the daemon always has access to credentials regardless of how it was started.
+>
+> Environment variable expansion (`${CONTEXT7_API_KEY}`) is supported but not recommended—keys may fail to resolve depending on how the daemon is launched.
 
 #### Native HTTP server (proxy mode)
 
