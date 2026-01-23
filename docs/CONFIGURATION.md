@@ -39,9 +39,9 @@ servers:
       - "-y"
       - "@anthropic/mcp-time"
     
-    # Environment variables (supports ${VAR} expansion)
+    # Environment variables passed to the server process
     env:
-      API_KEY: "${MY_API_KEY}"
+      API_KEY: "your-api-key-here"
       DEBUG: "true"
     
     # For http/sse transport: server URL
@@ -110,7 +110,7 @@ servers:
     autostart: true
 ```
 
-#### Server with environment variables
+#### Server with API key
 
 ```yaml
 servers:
@@ -119,9 +119,11 @@ servers:
     command: npx
     args: ["-y", "@upstash/context7-mcp"]
     env:
-      CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+      CONTEXT7_API_KEY: "your-context7-api-key"
     autostart: true
 ```
+
+> **Note:** Since `servers.yaml` is a local config file that's never committed to git, you can safely put API keys directly in the config.
 
 #### Native HTTP server (proxy mode)
 
@@ -194,21 +196,20 @@ Generate with: `vision init --client opencode`
 
 ## Environment Variable Expansion
 
-Vision supports environment variable expansion in configuration values:
+Vision supports environment variable expansion for values already set in your shell environment:
 
 ```yaml
 servers:
   my-server:
     env:
-      # Simple expansion
+      # Expand from shell environment
       API_KEY: "${MY_API_KEY}"
       
-      # With default value
+      # With default value if not set
       DEBUG: "${DEBUG:-false}"
-      
-      # Nested expansion
-      URL: "https://${HOST}:${PORT:-8080}/api"
 ```
+
+However, the simplest approach is to put API keys directly in the config file since `~/.config/vision/servers.yaml` is never committed to version control.
 
 ## Validation
 

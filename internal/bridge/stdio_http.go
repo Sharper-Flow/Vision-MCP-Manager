@@ -104,6 +104,64 @@ func (b *StdioHTTPBridge) Start() {
 	go b.readLoop()
 }
 
+// Initialize performs the MCP protocol handshake with the server.
+// This must be called after Start() and before forwarding any requests.
+// Modern MCP servers (especially fastmcp-based ones) require this handshake:
+// 1. Client sends "initialize" request
+// 2. Server responds with capabilities
+// 3. Client sends "notifications/initialized" notification
+func (b *StdioHTTPBridge) Initialize(ctx context.Context) error {
+	// Build initialize request params
+	params := map[string]interface{}{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]interface{}{},
+		"clientInfo": map[string]interface{}{
+			"name":    "vision",
+			"version": "1.0.0",
+		},
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return fmt.Errorf("failed to marshal initialize params: %w", err)
+	}
+
+	initReq := &Request{
+		JSONRPC: "2.0",
+		ID:      b.idGen.Next(),
+		Method:  "initialize",
+		Params:  paramsJSON,
+	}
+
+	// Send initialize request with timeout
+	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	resp, err := b.SendRequest(initCtx, initReq)
+	if err != nil {
+		return fmt.Errorf("initialize request failed: %w", err)
+	}
+
+	// Check for error response
+	if resp.Error != nil {
+		return fmt.Errorf("initialize returned error: %s", resp.Error.Message)
+	}
+
+	b.logger.Debug("MCP initialize succeeded")
+
+	// Send initialized notification (no ID = notification)
+	initializedNotif := &Request{
+		JSONRPC: "2.0",
+		Method:  "notifications/initialized",
+	}
+
+	if err := b.SendNotification(initializedNotif); err != nil {
+		return fmt.Errorf("failed to send initialized notification: %w", err)
+	}
+
+	b.logger.Debug("MCP session initialized")
+	return nil
+}
+
 // Close shuts down the bridge.
 func (b *StdioHTTPBridge) Close() error {
 	b.pendingMu.Lock()

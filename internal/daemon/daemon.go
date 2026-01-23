@@ -7,12 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 
 	"github.com/jrede/vision/internal/admin"
-	"github.com/jrede/vision/internal/api"
 	"github.com/jrede/vision/internal/bridge"
 	"github.com/jrede/vision/internal/config"
 	"github.com/jrede/vision/internal/mcp"
@@ -22,16 +20,13 @@ import (
 
 // Daemon is the main Vision daemon that coordinates all components.
 type Daemon struct {
-	cfg            *config.Config
-	configPath     string
-	managementPort int
+	cfg        *config.Config
+	configPath string
 
 	supervisor  *supervisor.Supervisor
 	registry    *server.Registry
 	portManager *mcp.PortManager
-	apiServer   *api.Server
 	adminServer *admin.Server // Admin MCP server on port 6275
-	httpServer  *http.Server
 
 	logger *slog.Logger
 
@@ -93,14 +88,6 @@ func New(cfg Config) (*Daemon, error) {
 	// Create port manager for MCP HTTP endpoints
 	pm := mcp.NewPortManager(cfg.Logger)
 
-	// Create API server (REST, for backward compatibility - will be deprecated)
-	apiSrv := api.NewServer(api.ServerConfig{
-		Registry:       reg,
-		Config:         visionCfg,
-		Logger:         cfg.Logger,
-		AllowedOrigins: []string{"*"},
-	})
-
 	// Create Admin MCP server (primary management interface)
 	adminSrv := admin.NewServer(admin.Config{
 		Registry:     reg,
@@ -110,17 +97,15 @@ func New(cfg Config) (*Daemon, error) {
 	})
 
 	return &Daemon{
-		cfg:            visionCfg,
-		configPath:     cfg.ConfigPath,
-		managementPort: cfg.ManagementPort,
-		supervisor:     sup,
-		registry:       reg,
-		portManager:    pm,
-		apiServer:      apiSrv,
-		adminServer:    adminSrv,
-		logger:         cfg.Logger,
-		ctx:            ctx,
-		cancel:         cancel,
+		cfg:         visionCfg,
+		configPath:  cfg.ConfigPath,
+		supervisor:  sup,
+		registry:    reg,
+		portManager: pm,
+		adminServer: adminSrv,
+		logger:      cfg.Logger,
+		ctx:         ctx,
+		cancel:      cancel,
 	}, nil
 }
 
@@ -164,10 +149,7 @@ func (d *Daemon) Start() error {
 		d.logger.Warn("some HTTP proxies failed to start", slog.String("error", err.Error()))
 	}
 
-	// Start management HTTP server (REST API - for backward compatibility)
-	// Note: In future, this will be removed in favor of Admin MCP
-	d.wg.Add(1)
-	go d.runHTTPServer()
+	// NOTE: Legacy REST API removed - use Admin MCP on port 6275 instead
 
 	d.logger.Info("Vision daemon started",
 		slog.Int("server_count", d.registry.Count()),
@@ -196,13 +178,6 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	if d.adminServer != nil {
 		if err := d.adminServer.Stop(ctx); err != nil {
 			d.logger.Warn("admin MCP server shutdown error", slog.String("error", err.Error()))
-		}
-	}
-
-	// Stop HTTP server (REST API)
-	if d.httpServer != nil {
-		if err := d.httpServer.Shutdown(ctx); err != nil {
-			d.logger.Warn("HTTP server shutdown error", slog.String("error", err.Error()))
 		}
 	}
 
@@ -413,6 +388,19 @@ func (d *Daemon) setupHTTPProxies() error {
 		})
 		b.Start()
 
+		// Initialize MCP session (required by fastmcp-based servers like kagimcp)
+		initCtx, initCancel := context.WithTimeout(d.ctx, 10*time.Second)
+		if err := b.Initialize(initCtx); err != nil {
+			initCancel()
+			d.logger.Warn("MCP initialization failed",
+				slog.String("server", srv.Name),
+				slog.String("error", err.Error()),
+			)
+			// Continue anyway - older servers may not need initialization
+		} else {
+			initCancel()
+		}
+
 		// Add to port manager (starts HTTP listener on the server's port)
 		if err := d.portManager.Add(srv.Name, srv.Config.Port, b); err != nil {
 			d.logger.Warn("failed to add HTTP proxy",
@@ -434,24 +422,6 @@ func (d *Daemon) setupHTTPProxies() error {
 		return errors.Join(errs...)
 	}
 	return nil
-}
-
-// runHTTPServer runs the management HTTP server.
-func (d *Daemon) runHTTPServer() {
-	defer d.wg.Done()
-
-	addr := fmt.Sprintf(":%d", d.managementPort)
-
-	d.httpServer = &http.Server{
-		Addr:    addr,
-		Handler: d.apiServer.Handler(),
-	}
-
-	d.logger.Info("starting management API", slog.String("addr", addr))
-
-	if err := d.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		d.logger.Error("HTTP server error", slog.String("error", err.Error()))
-	}
 }
 
 // Registry returns the server registry.

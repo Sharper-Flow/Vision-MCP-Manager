@@ -5,7 +5,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/vision daemon start --foreground
+ExecStart=%h/.local/bin/vision daemon start
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
