@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Unified MCP Server Management for AI Agents</strong>
+  <strong>The MCP Control Plane for Agentic Coding</strong>
 </p>
 
 <p align="center">
@@ -11,19 +11,63 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"></a>
 </p>
 
-Vision is a Go-native daemon that centralizes [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server management for AI coding agents like Claude Code, OpenCode, and Cursor. It replaces fragmented multi-tool setups with a single binary that handles process supervision, stdio-to-HTTP bridging, and configuration generation.
+Vision turns MCP servers from a configuration nightmare into a supervised, agent-accessible control plane. One daemon. One config. Full agent autonomy with complete operator oversight.
 
-## Why Vision?
+## The Problem
 
-Managing MCP servers typically means juggling multiple configuration files, manually starting processes, and dealing with inconsistent transport protocols. Vision solves this by providing:
+Using MCP servers with AI coding agents today means:
 
-| Challenge | Vision's Solution |
-|-----------|-------------------|
-| **Scattered configs** | Single YAML registry (`~/.config/vision/servers.yaml`) |
-| **Manual process management** | Erlang-style supervision with automatic restarts |
-| **stdio-only servers** | HTTP bridge exposing each server on a dedicated port |
-| **Per-project duplication** | Global config + project-local overrides |
-| **Complex Jarvis/MCPM setups** | One-command migration path |
+- **Scattered configurations** — Each project has its own MCP setup, duplicated across machines
+- **Manual process management** — Servers crash silently, requiring manual restarts
+- **No visibility** — Which tools are running? What's failing? No central place to look
+- **Static tooling** — Agents can't adapt their capabilities; humans must edit configs
+- **Transport chaos** — stdio, HTTP, SSE... each client expects something different
+
+## The Solution
+
+Vision is a Go-native daemon that provides:
+
+| Capability | What It Means |
+|------------|---------------|
+| **Centralized Registry** | One YAML file (`~/.config/vision/servers.yaml`) defines all your MCP servers |
+| **Process Supervision** | Erlang-style supervision with automatic restarts and exponential backoff |
+| **stdio-to-HTTP Bridge** | Every server gets a dedicated HTTP port—no more transport incompatibilities |
+| **Agent Self-Management** | AI agents can add, remove, and restart servers through the Admin MCP API |
+| **Hot Reload** | Update configuration without restarting your coding session |
+
+## Why Vision + OpenCode?
+
+[OpenCode](https://opencode.ai) is an open-source AI coding agent with native support for Vision's `remote` MCP transport. Together, they enable **high-agency coding with guardrails**:
+
+```
+You: "Research best practices for React Server Components"
+
+Agent: [Calls vision_list — no documentation server available]
+Agent: [Calls vision_search("documentation") — finds context7]
+Agent: [Calls vision_add("context7", start=true)]
+Agent: [Now has Context7 available — proceeds with research]
+```
+
+No human intervention. No config file edits. The agent adapts to what it needs.
+
+**But you stay in control:**
+- All servers are defined in your central config
+- The Admin API only exposes servers you've pre-approved in the catalog
+- Every process is supervised and logged
+- One `vision daemon status` shows everything
+
+## Comparison
+
+| Feature | Vision | MCP Gateway | Direct in OpenCode |
+|---------|--------|-------------|-------------------|
+| Agent self-management | Yes | No | No |
+| Process supervision | Yes (Erlang-style) | Varies | No |
+| Automatic restarts | Yes | Varies | No |
+| Hot reload | Yes | No | No |
+| Central config | Yes | Yes | No (per-project) |
+| stdio-to-HTTP bridge | Yes | Some | No |
+| Admin MCP API | Yes | No | N/A |
+| Single binary | Yes | Varies | N/A |
 
 ## Quick Start
 
@@ -31,17 +75,14 @@ Managing MCP servers typically means juggling multiple configuration files, manu
 # Install Vision
 curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/trunk/scripts/install.sh | bash
 
-# Add your first MCP server
-vision server add time --command uvx --args "mcp-server-time"
-
-# Start the daemon
+# Start the daemon (with example servers)
 vision daemon start -d
 
-# Generate client configuration
+# Generate OpenCode configuration
 vision init --global
 ```
 
-That's it. Your AI agent can now connect to `http://localhost:6282/mcp` for the time server.
+Your AI agent can now connect to Vision-managed servers at `http://localhost:627X/mcp`.
 
 ## Installation
 
@@ -54,8 +95,8 @@ curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/tru
 The installer downloads the latest binary, places it in `/usr/local/bin`, and creates the configuration directory.
 
 **Options:**
-- `--migrate` — Automatically import servers from existing Jarvis/MCPM setups
 - `--systemd` — Install and enable the systemd user service
+- `--opencode` — Auto-configure OpenCode integration
 
 ### From Source
 
@@ -66,41 +107,37 @@ make build
 sudo cp bin/vision /usr/local/bin/
 ```
 
-**Requirements:** Go 1.24+ (uses `iter.Seq` from the MCP SDK)
+**Requirements:** Go 1.24+
 
 ### Running as a Service
 
 For always-on operation, install the systemd user service:
 
 ```bash
-# User service (recommended, no sudo required)
 mkdir -p ~/.config/systemd/user
 cp scripts/vision-user.service ~/.config/systemd/user/vision.service
 systemctl --user daemon-reload
 systemctl --user enable --now vision
-
-# Check status
-systemctl --user status vision
 ```
 
 ## Configuration
 
 ### Server Registry
 
-Vision maintains a central registry of MCP servers at `~/.config/vision/servers.yaml`:
+Vision maintains a central registry at `~/.config/vision/servers.yaml`:
 
 ```yaml
 servers:
   # Context7 - Library documentation lookup
-  # Get a free API key at https://context7.com/dashboard
   context7:
     port: 6276
     command: npx
-    args: ["-y", "@upstash/context7-mcp@latest", "--api-key", "your-api-key-here"]
+    args: ["-y", "@upstash/context7-mcp@latest"]
+    env:
+      CONTEXT7_API_KEY: "your-api-key-here"
     autostart: true
 
   # Kagi - Web search and summarization
-  # Get an API key at https://kagi.com/settings?p=api
   kagi:
     port: 6284
     command: uvx
@@ -109,16 +146,7 @@ servers:
       KAGI_API_KEY: "your-kagi-api-key-here"
     autostart: true
 
-  # Firecrawl - Web scraping and extraction
-  firecrawl:
-    port: 6281
-    command: npx
-    args: ["-y", "firecrawl-mcp"]
-    env:
-      FIRECRAWL_API_KEY: "your-firecrawl-api-key-here"
-    autostart: true
-
-  # Time - Timezone and scheduling utilities
+  # Time - Timezone utilities
   time:
     port: 6282
     command: uvx
@@ -126,176 +154,11 @@ servers:
     autostart: true
 ```
 
-Each server entry specifies:
-- **port** — Dedicated HTTP port (6276-6300 range)
-- **command** — Executable (`npx`, `uvx`, or direct binary path)
-- **args** — Command-line arguments (including API keys via `--api-key` flags)
-- **env** — Environment variables for servers that read from env
-- **autostart** — Whether to start with the daemon
-
-> **Best Practice: Hardcode API Keys**
->
-> Put API keys directly in `servers.yaml`. This file is local (`~/.config/vision/`) and never committed to git. Hardcoding keys is more reliable than environment variable expansion (`${VAR}`), which can fail depending on how the daemon is launched.
->
-> Check each MCP server's documentation for how it accepts API keys—some use `--api-key` args (like Context7), others read from environment variables (like Kagi).
-
-### Client Configuration
-
-Vision generates configuration for AI agents. For OpenCode:
-
-```bash
-# Global configuration (~/.opencode.json)
-vision init --global
-
-# Project-local configuration (./.opencode.json)
-vision init
-
-# Specific servers only
-vision init --servers time,context7
-
-# Extend global config with additional servers
-vision init --extend --servers project-specific-server
-```
-
-Generated configuration looks like:
-
-```json
-{
-  "mcp": {
-    "context7": {
-      "type": "remote",
-      "url": "http://localhost:6276/mcp",
-      "enabled": true
-    },
-    "time": {
-      "type": "remote",
-      "url": "http://localhost:6282/mcp",
-      "enabled": true
-    }
-  }
-}
-```
-
-## Architecture
-
-Vision operates as a central orchestrator between AI agents and MCP servers:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        AI Agents                                │
-│            (Claude Code, OpenCode, Cursor, etc.)                │
-└───────────────────────────────┬─────────────────────────────────┘
-                            │ HTTP POST /mcp (JSON-RPC 2.0)
-                            ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                       Vision Daemon                             │
-│                                                                 │
-│   ┌─────────────────────────────────────────────────────────┐   │
-│   │              Admin MCP Server (:6275)                   │   │
-│   │    vision_list  vision_add  vision_status  vision_init  │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                                                                 │
-│   ┌─────────────────────────────────────────────────────────┐   │
-│   │              stdio-to-HTTP Bridge Layer                 │   │
-│   │      :6276/mcp      :6284/mcp      :6283/mcp    ...     │   │
-│   └────────────┬──────────────┬──────────────┬──────────────┘   │
-│                │              │              │                  │
-│   ┌────────────▼──────────────▼──────────────▼──────────────┐   │
-│   │              Process Supervisor (suture)                │   │
-│   │    ┌──────────┐   ┌──────────┐   ┌──────────┐           │   │
-│   │    │ context7 │   │   kagi   │   │  fetch   │   ...     │   │
-│   │    │  (stdio) │   │  (stdio) │   │  (stdio) │           │   │
-│   │    └──────────┘   └──────────┘   └──────────┘           │   │
-│   └─────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Key components:**
-
-1. **Admin MCP Server** (port 6275) — Exposes Vision's management tools as MCP tools, allowing AI agents to add/remove servers, check status, and generate configs without leaving the conversation.
-
-2. **stdio-to-HTTP Bridge** — Converts stdio-based MCP servers to HTTP endpoints. Each server receives a dedicated port, enabling parallel access and security isolation.
-
-3. **Process Supervisor** — Uses [suture](https://github.com/thejerf/suture) for Erlang-style process supervision. Failed servers restart automatically with exponential backoff.
-
-## CLI Reference
-
-### Daemon Management
-
-```bash
-vision daemon start        # Start in foreground
-vision daemon start -d     # Start in background (daemonize)
-vision daemon stop         # Graceful shutdown
-vision daemon status       # Show health, uptime, memory usage
-vision daemon reload       # Hot-reload configuration (SIGHUP)
-```
-
-### Server Management
-
-```bash
-vision server add <name> --command <cmd> [--args <args>] [--env KEY=VAL]
-vision server remove <name>
-vision server list         # Show all servers with status
-vision server info <name>  # Detailed server information
-vision server start <name>
-vision server stop <name>
-vision server restart <name>
-```
-
-### Configuration Generation
-
-```bash
-vision init                             # Project-local config
-vision init --global                    # Global config
-vision init --client claude             # Target Claude Code format
-vision init --servers time,context7     # Specific servers
-vision init --extend --servers extra    # Extend existing config
-```
-
-### Migration
-
-```bash
-vision migrate --dry-run   # Preview changes without writing
-vision migrate             # Import from Jarvis/MCPM
-```
-
-## Migrating from Jarvis/MCPM
-
-If you're currently using Jarvis or MCPM for MCP server management, Vision provides automated migration:
-
-```bash
-# Preview what will be imported
-vision migrate --dry-run
-
-# Perform the migration
-vision migrate
-```
-
-The migration:
-- Converts JSON configs to Vision's YAML format
-- Preserves server names, commands, and environment variables
-- Assigns ports in the 6276-6300 range
-- Creates a backup of your existing configuration
-
-See [docs/MIGRATION.md](docs/MIGRATION.md) for detailed migration guidance.
-
-## Admin MCP Tools
-
-Vision exposes its own management interface as MCP tools on port 6275. This allows AI agents to manage servers without CLI access:
-
-| Tool | Description |
-|------|-------------|
-| `vision_list` | List all servers with status (running/stopped/error) |
-| `vision_add` | Add and optionally start a new server |
-| `vision_remove` | Stop and remove a server |
-| `vision_search` | Search the server catalog by name or capability |
-| `vision_init` | Generate client configuration |
-| `vision_status` | Daemon health, uptime, and memory stats |
-| `vision_guidance` | Tool selection recommendations |
+> **Best Practice:** Put API keys directly in `servers.yaml`. This file is local (`~/.config/vision/`) and never committed to git.
 
 ### OpenCode Integration
 
-Add Vision and its managed servers to your OpenCode config (`~/.config/opencode/opencode.json`):
+Add Vision to your OpenCode config (`~/.config/opencode/opencode.jsonc`):
 
 ```json
 {
@@ -310,67 +173,145 @@ Add Vision and its managed servers to your OpenCode config (`~/.config/opencode/
       "url": "http://localhost:6276/mcp",
       "enabled": true
     },
-    "kagimcp": {
+    "kagi": {
       "type": "remote",
-      "url": "http://localhost:6279/mcp",
+      "url": "http://localhost:6284/mcp",
       "enabled": true
     }
   }
 }
 ```
 
-Or use the install script with `--opencode` to auto-configure:
+Or generate automatically:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/trunk/scripts/install.sh | bash -s -- --opencode
+vision init --global --client opencode
 ```
 
-### Claude Code Integration
+## Agent Self-Management
 
-Add Vision to your Claude Code config (`~/.config/claude-code/config.json`):
+Vision's killer feature: **agents can manage their own tools**.
 
-```json
-{
-  "mcp": {
-    "vision": {
-      "type": "remote",
-      "url": "http://localhost:6275/mcp"
-    }
-  }
-}
+The Admin MCP Server (port 6275) exposes these tools to your AI agent:
+
+| Tool | What It Does |
+|------|--------------|
+| `vision_list` | Show all servers with status (running/stopped/error) |
+| `vision_add` | Provision and start a new server from the catalog |
+| `vision_remove` | Stop and remove a server |
+| `vision_search` | Find servers by name or capability |
+| `vision_status` | Daemon health, uptime, memory usage |
+| `vision_guidance` | Get recommendations for which tool to use |
+
+**Example workflow:**
+
+1. Agent needs web search capability
+2. Calls `vision_search("web search")` → finds `kagi`
+3. Calls `vision_add("kagi", start=true)` → server starts
+4. Agent now has web search available
+5. You see it in `vision_list` — full visibility
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        AI Agents                                │
+│                  (OpenCode, Claude Code, etc.)                  │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │ HTTP POST /mcp
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       Vision Daemon                             │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │           Admin MCP Server (:6275)                      │   │
+│   │   vision_list  vision_add  vision_status  vision_search │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              stdio-to-HTTP Bridge Layer                 │   │
+│   │      :6276/mcp      :6284/mcp      :6282/mcp    ...     │   │
+│   └────────────┬──────────────┬──────────────┬──────────────┘   │
+│                │              │              │                  │
+│   ┌────────────▼──────────────▼──────────────▼──────────────┐   │
+│   │         Process Supervisor (Erlang-style)               │   │
+│   │    ┌──────────┐   ┌──────────┐   ┌──────────┐           │   │
+│   │    │ context7 │   │   kagi   │   │   time   │   ...     │   │
+│   │    │  (stdio) │   │  (stdio) │   │  (stdio) │           │   │
+│   │    └──────────┘   └──────────┘   └──────────┘           │   │
+│   └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## Development
+**Key components:**
+
+1. **Admin MCP Server** — Lets agents manage their own tooling without human intervention
+2. **stdio-to-HTTP Bridge** — Converts any stdio MCP server to HTTP, each on a dedicated port
+3. **Process Supervisor** — Uses [suture](https://github.com/thejerf/suture) for automatic restarts with backoff
+
+## Trust Through Visibility
+
+High-agency doesn't mean black-box. Vision gives you:
+
+- **Centralized config** — Know exactly what tools are available (`~/.config/vision/servers.yaml`)
+- **Process supervision** — Every server is monitored; crashes trigger automatic restarts
+- **Single daemon** — One place to check status: `vision daemon status`
+- **Dedicated ports** — Each server isolated on its own port for security and debugging
+- **Hot reload** — Update config without disrupting active sessions: `vision daemon reload`
+
+## CLI Reference
+
+### Daemon
 
 ```bash
-# Build the binary
-make build
-
-# Run tests with race detection
-make test
-
-# Run linter
-make lint
-
-# Run all checks (lint + test + build)
-make all
-
-# Cross-compile for all platforms
-make dist
-
-# Generate coverage report
-make test-coverage
+vision daemon start        # Start in foreground
+vision daemon start -d     # Start daemonized
+vision daemon stop         # Graceful shutdown
+vision daemon status       # Health, uptime, memory
+vision daemon reload       # Hot-reload config (SIGHUP)
 ```
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for architecture details and contribution guidelines.
+### Servers
+
+```bash
+vision server list                    # Show all servers
+vision server add <name> --command <cmd> [--args <args>]
+vision server remove <name>
+vision server start <name>
+vision server stop <name>
+```
+
+### Configuration
+
+```bash
+vision init                           # Project-local config
+vision init --global                  # Global config
+vision init --client opencode         # Target OpenCode format
+vision init --servers time,context7   # Specific servers only
+```
+
+## Troubleshooting
+
+| Symptom | Solution |
+|---------|----------|
+| Server not responding | `vision daemon status` — check if daemon is running |
+| Server keeps crashing | Check logs: `journalctl --user -u vision -f` |
+| Config changes not applied | Run `vision daemon reload` |
+| Port already in use | Check for conflicts: `lsof -i :6276` |
 
 ## Documentation
 
-- [Configuration Reference](docs/CONFIGURATION.md) — Complete server configuration options
-- [AI Agents](docs/agents.md) — Integrating with OpenCode, Claude Code, and more
-- [Migration Guide](docs/MIGRATION.md) — Migrating from Jarvis/MCPM
-- [MCP Transports](docs/MCP_TRANSPORTS.md) — Understanding stdio, HTTP, and SSE transports
-- [Development Guide](DEVELOPMENT.md) — Building, testing, and contributing
+- [Configuration Reference](docs/CONFIGURATION.md) — Complete server options
+- [AI Agents Guide](docs/agents.md) — Deep dive into agent integration
+- [MCP Transports](docs/MCP_TRANSPORTS.md) — Understanding stdio, HTTP, SSE
+- [Development Guide](DEVELOPMENT.md) — Building and contributing
+
+## Roadmap
+
+- [ ] Audit logging for all MCP traffic
+- [ ] Per-tool permission controls
+- [ ] Usage analytics dashboard
+- [ ] Multi-machine sync
 
 ## License
 
@@ -378,4 +319,6 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-<sub>Built with Go. Inspired by the need for simpler MCP server management.</sub>
+<p align="center">
+  <sub>Built with Go. Designed for agentic coding.</sub>
+</p>
