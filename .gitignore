@@ -53,3 +53,7 @@ opencode.json
 
 # Local logs (generated at runtime)
 logs/
+
+# ADV (Advance) plugin files - project-specific, not part of Vision
+.specdb/
+project.json
