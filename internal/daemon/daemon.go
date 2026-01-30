@@ -38,6 +38,9 @@ type Daemon struct {
 	// State
 	mu      sync.RWMutex
 	running bool
+
+	// Proxy setup deduplication (prevents race between handleServerEvent and setupHTTPProxies)
+	proxySetupInProgress sync.Map
 }
 
 // Config configures the daemon.
@@ -404,13 +407,22 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		return nil
 	}
 
-	// Check if proxy already exists
+	// Check if proxy already exists (check portManager first)
 	if d.portManager.Get(srv.Name) != nil {
 		d.logger.Debug("proxy already exists for server",
 			slog.String("server", srv.Name),
 		)
 		return nil
 	}
+
+	// Check if we're already setting up this server (use a sync.Map for in-progress setups)
+	if _, loaded := d.proxySetupInProgress.LoadOrStore(srv.Name, true); loaded {
+		d.logger.Debug("proxy setup already in progress for server",
+			slog.String("server", srv.Name),
+		)
+		return nil
+	}
+	defer d.proxySetupInProgress.Delete(srv.Name)
 
 	// Get the managed process
 	proc := srv.Process
