@@ -82,6 +82,10 @@ type ServerConfig struct {
 
 	// MaxSessions limits concurrent sessions (for stateful servers, 0 = unlimited).
 	MaxSessions int `yaml:"max_sessions,omitempty" env:"MAX_SESSIONS" env-default:"0"`
+
+	// SessionTTL is the absolute maximum lifetime of a session regardless of activity.
+	// 0 means no TTL (sessions only expire via idle timeout or explicit close).
+	SessionTTL Duration `yaml:"session_ttl,omitempty" env:"SESSION_TTL" env-default:"0s"`
 }
 
 // SupervisionConfig holds global supervisor settings.
@@ -99,10 +103,26 @@ type SupervisionConfig struct {
 	MaxRestartDelay Duration `yaml:"max_restart_delay" env:"MAX_RESTART_DELAY" env-default:"60s"`
 }
 
+// SecurityConfig holds daemon-wide security settings for MCP endpoints.
+type SecurityConfig struct {
+	// BearerToken is the shared secret for Authorization header validation.
+	// When empty, authentication is not enforced (open access).
+	// Supports ${VAR} expansion from the environment.
+	BearerToken string `yaml:"bearer_token,omitempty" env:"VISION_BEARER_TOKEN"`
+
+	// AllowedOrigins is the list of permitted Origin header values.
+	// When empty, origin checking is not enforced.
+	// Wildcard ("*") is explicitly rejected and treated as disallowed.
+	AllowedOrigins []string `yaml:"allowed_origins,omitempty"`
+}
+
 // Config is the root configuration structure for Vision.
 type Config struct {
 	// Servers maps server names to their configurations.
 	Servers map[string]*ServerConfig `yaml:"servers"`
+
+	// Security holds daemon-wide security settings for MCP endpoints.
+	Security SecurityConfig `yaml:"security"`
 
 	// Supervision holds global supervisor settings.
 	Supervision SupervisionConfig `yaml:"supervision"`

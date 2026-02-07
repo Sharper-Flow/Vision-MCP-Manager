@@ -148,10 +148,8 @@ vision server list
 # Check health
 vision health
 
-# Test a server
-curl http://localhost:6276/mcp -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}'
+# Test a server health endpoint
+curl http://localhost:6276/health
 ```
 
 ## Key Differences

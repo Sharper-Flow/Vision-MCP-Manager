@@ -4,14 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/jrede/vision/internal/bridge"
+	"github.com/jrede/vision/internal/catalog"
 	"github.com/jrede/vision/internal/config"
 	"github.com/jrede/vision/internal/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // --- MCP Tool Definitions ---
@@ -144,83 +146,6 @@ func (s *Server) getTools() []Tool {
 	}
 }
 
-// --- MCP Protocol Handlers ---
-
-// InitializeResult is the response to the initialize method.
-type InitializeResult struct {
-	ProtocolVersion string       `json:"protocolVersion"`
-	Capabilities    Capabilities `json:"capabilities"`
-	ServerInfo      ServerInfo   `json:"serverInfo"`
-}
-
-// Capabilities describes the server's capabilities.
-type Capabilities struct {
-	Tools ToolsCapability `json:"tools"`
-}
-
-// ToolsCapability describes tool capabilities.
-type ToolsCapability struct {
-	ListChanged bool `json:"listChanged"`
-}
-
-// ServerInfo describes the server.
-type ServerInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-// handleInitialize handles the MCP initialize method.
-func (s *Server) handleInitialize(req *bridge.Request) *bridge.Response {
-	result := InitializeResult{
-		ProtocolVersion: "2024-11-05",
-		Capabilities: Capabilities{
-			Tools: ToolsCapability{
-				ListChanged: false,
-			},
-		},
-		ServerInfo: ServerInfo{
-			Name:    "vision-admin",
-			Version: "1.0.0",
-		},
-	}
-
-	resp, err := bridge.NewResponse(req.ID, result)
-	if err != nil {
-		return bridge.NewErrorResponse(req.ID, bridge.NewError(
-			bridge.CodeInternalError,
-			"Failed to create response: "+err.Error(),
-		))
-	}
-	return resp
-}
-
-// ToolsListResult is the response to tools/list.
-type ToolsListResult struct {
-	Tools []Tool `json:"tools"`
-}
-
-// handleToolsList handles the tools/list method.
-func (s *Server) handleToolsList(req *bridge.Request) *bridge.Response {
-	result := ToolsListResult{
-		Tools: s.getTools(),
-	}
-
-	resp, err := bridge.NewResponse(req.ID, result)
-	if err != nil {
-		return bridge.NewErrorResponse(req.ID, bridge.NewError(
-			bridge.CodeInternalError,
-			"Failed to create response: "+err.Error(),
-		))
-	}
-	return resp
-}
-
-// ToolCallParams is the params for tools/call.
-type ToolCallParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments"`
-}
-
 // ToolCallResult is the response to tools/call.
 type ToolCallResult struct {
 	Content []ToolContent `json:"content"`
@@ -233,62 +158,69 @@ type ToolContent struct {
 	Text string `json:"text"`
 }
 
-// handleToolsCall handles the tools/call method.
-func (s *Server) handleToolsCall(ctx context.Context, req *bridge.Request) *bridge.Response {
-	var params ToolCallParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		return bridge.NewErrorResponse(req.ID, bridge.NewError(
-			bridge.CodeInvalidParams,
-			"Invalid params: "+err.Error(),
-		))
-	}
-
-	// Check if tool exists - return JSON-RPC error for unknown tools per MCP spec
-	if !s.isValidTool(params.Name) {
-		return bridge.NewErrorResponse(req.ID, bridge.NewError(
-			bridge.CodeMethodNotFound,
-			fmt.Sprintf("Unknown tool: %s", params.Name),
-		))
-	}
-
-	// Dispatch to tool handler
-	result, err := s.callTool(ctx, params.Name, params.Arguments)
-	if err != nil {
-		// Check if this is a validation error (invalid params)
-		if isValidationError(err) {
-			return bridge.NewErrorResponse(req.ID, bridge.NewError(
-				bridge.CodeInvalidParams,
-				err.Error(),
-			))
+func (s *Server) registerTools(server *mcp.Server) {
+	for _, tool := range s.getTools() {
+		tool := tool
+		schema, err := tool.InputSchema.marshal()
+		if err != nil {
+			schema = json.RawMessage(`{"type":"object"}`)
+			s.logger.Warn("failed to marshal tool input schema",
+				slog.String("tool", tool.Name),
+				slog.String("error", err.Error()),
+			)
 		}
-		// Return other errors as tool result (business logic errors)
-		errorResult := ToolCallResult{
-			IsError: true,
-			Content: []ToolContent{
-				{Type: "text", Text: err.Error()},
-			},
-		}
-		resp, _ := bridge.NewResponse(req.ID, errorResult)
-		return resp
-	}
 
-	resp, err := bridge.NewResponse(req.ID, result)
-	if err != nil {
-		return bridge.NewErrorResponse(req.ID, bridge.NewError(
-			bridge.CodeInternalError,
-			"Failed to create response: "+err.Error(),
-		))
+		server.AddTool(&mcp.Tool{
+			Name:        tool.Name,
+			Description: tool.Description,
+			InputSchema: schema,
+		}, s.toolHandler(tool.Name))
 	}
-	return resp
 }
 
-// isValidTool checks if a tool name is valid.
-func (s *Server) isValidTool(name string) bool {
-	switch name {
-	case "vision_list", "vision_add", "vision_remove", "vision_search", "vision_init", "vision_status", "vision_guidance":
-		return true
-	default:
-		return false
+func (s InputSchema) marshal() (json.RawMessage, error) {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(b), nil
+}
+
+func (s *Server) toolHandler(name string) mcp.ToolHandler {
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.Params.Arguments
+		if len(args) == 0 {
+			args = json.RawMessage(`{}`)
+		}
+
+		result, err := s.callTool(ctx, name, args)
+		if err != nil {
+			if isValidationError(err) {
+				return nil, fmt.Errorf("invalid params: %w", err)
+			}
+			return &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: err.Error()}},
+			}, nil
+		}
+
+		return toMCPToolResult(result), nil
+	}
+}
+
+func toMCPToolResult(result *ToolCallResult) *mcp.CallToolResult {
+	if result == nil {
+		return &mcp.CallToolResult{}
+	}
+
+	content := make([]mcp.Content, 0, len(result.Content))
+	for _, c := range result.Content {
+		content = append(content, &mcp.TextContent{Text: c.Text})
+	}
+
+	return &mcp.CallToolResult{
+		Content: content,
+		IsError: result.IsError,
 	}
 }
 
@@ -525,14 +457,79 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 		return jsonToolResult(response)
 	}
 
-	// TODO: In future, we could auto-add the server to configuration here.
-	// For now, the server must be pre-configured in servers.yaml.
-	// Return success=false with instructions.
-	errMsg := fmt.Sprintf("Server '%s' found in catalog but not configured. Add to ~/.config/vision/servers.yaml to use.", params.Name)
+	// Auto-add catalog server to runtime registry and persist to config.
+	serverCfg, err := s.catalogEntryToServerConfig(entry)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to configure server: %s", err.Error())
+		response := AddResponse{
+			Success: false,
+			Name:    params.Name,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
+	}
+
+	// Add to runtime registry.
+	if err := s.registry.Add(params.Name, serverCfg); err != nil {
+		errMsg := fmt.Sprintf("Failed to add server to registry: %s", err.Error())
+		response := AddResponse{
+			Success: false,
+			Name:    params.Name,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
+	}
+
+	// Persist to config file (best-effort — server is already in runtime registry).
+	if s.daemonConfig != nil {
+		if s.daemonConfig.Servers == nil {
+			s.daemonConfig.Servers = make(map[string]*config.ServerConfig)
+		}
+		s.daemonConfig.Servers[params.Name] = serverCfg
+		if s.configPath != "" {
+			if err := config.Save(s.daemonConfig, s.configPath); err != nil {
+				s.logger.Warn("failed to persist config after adding server",
+					slog.String("server", params.Name),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+
+	// Start the server if requested (triggers Streamable HTTP proxy setup via EventServerStarted).
+	if shouldStart {
+		if err := s.registry.Start(params.Name); err != nil {
+			errMsg := fmt.Sprintf("Server added but failed to start: %s", err.Error())
+			port := serverCfg.Port
+			response := AddResponse{
+				Success: false,
+				Name:    params.Name,
+				Port:    &port,
+				Error:   &errMsg,
+			}
+			return jsonToolResult(response)
+		}
+	}
+
+	srv := s.registry.Get(params.Name)
+	if srv != nil {
+		status := srv.Status()
+		port := status.Port
+		response := AddResponse{
+			Success: true,
+			Name:    params.Name,
+			Status:  mapStateToStatus(string(status.State)),
+			Port:    &port,
+		}
+		return jsonToolResult(response)
+	}
+
+	port := serverCfg.Port
 	response := AddResponse{
-		Success: false,
+		Success: true,
 		Name:    params.Name,
-		Error:   &errMsg,
+		Status:  "stopped",
+		Port:    &port,
 	}
 	return jsonToolResult(response)
 }
@@ -1030,6 +1027,55 @@ func isToolRelevantToContext(inst *config.ToolInstructions, context string) bool
 		return true
 	}
 	return false
+}
+
+// catalogEntryToServerConfig converts a catalog entry into a runtime ServerConfig,
+// allocating the next available port from the daemon config.
+func (s *Server) catalogEntryToServerConfig(entry *catalog.Entry) (*config.ServerConfig, error) {
+	if s.daemonConfig == nil {
+		return nil, fmt.Errorf("daemon config not available for port allocation")
+	}
+
+	port, err := s.daemonConfig.NextAvailablePort()
+	if err != nil {
+		return nil, fmt.Errorf("port allocation failed: %w", err)
+	}
+
+	cfg := &config.ServerConfig{
+		Port:      port,
+		Autostart: true,
+	}
+
+	// Set transport-specific fields from catalog entry.
+	switch entry.GetTransport() {
+	case "stdio":
+		cfg.Transport = config.TransportStdio
+		cfg.Command = entry.Command
+		cfg.Args = entry.Args
+	case "http":
+		cfg.Transport = config.TransportHTTP
+		cfg.URL = entry.URL
+	case "sse":
+		cfg.Transport = config.TransportSSE
+		cfg.URL = entry.URL
+	}
+
+	// Build environment hints from catalog's required env vars.
+	// Only set env vars that are available in the current environment.
+	if len(entry.EnvVars) > 0 {
+		env := make(map[string]string)
+		for _, varName := range entry.EnvVars {
+			if val, ok := os.LookupEnv(varName); ok && val != "" {
+				env[varName] = val
+			}
+		}
+		if len(env) > 0 {
+			cfg.Env = env
+		}
+	}
+
+	cfg.ApplyDefaults()
+	return cfg, nil
 }
 
 // sortGuidanceByPriority sorts guidance entries by priority (high > medium > low > empty).

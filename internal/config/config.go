@@ -294,6 +294,22 @@ func ParseYAML(data string) (*Config, error) {
 	return &cfg, nil
 }
 
+// NextAvailablePort returns the next unused port in the Vision range (MinPort-MaxPort).
+// It checks against all ports currently assigned in the Config.
+// Returns 0 and an error if all ports are exhausted.
+func (c *Config) NextAvailablePort() (int, error) {
+	used := make(map[int]bool)
+	for _, srv := range c.Servers {
+		used[srv.Port] = true
+	}
+	for port := MinPort; port <= MaxPort; port++ {
+		if !used[port] {
+			return port, nil
+		}
+	}
+	return 0, fmt.Errorf("config: all ports in range %d-%d are in use", MinPort, MaxPort)
+}
+
 // GetServer returns a server config by name, or nil if not found.
 func (c *Config) GetServer(name string) *ServerConfig {
 	if c.Servers == nil {

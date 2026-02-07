@@ -1,134 +1,15 @@
 // Package mcp provides HTTP handlers for MCP (Model Context Protocol) servers.
 // Each MCP server runs on its own dedicated port, proxying requests to the
-// underlying stdio or HTTP transport.
+// underlying subprocess via the go-sdk StreamableHTTPHandler.
 package mcp
 
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"sync"
-
-	"github.com/jrede/vision/internal/bridge"
 )
-
-// Handler handles MCP HTTP requests for a single server.
-// It exposes POST /mcp for JSON-RPC requests and GET /mcp for server info.
-type Handler struct {
-	serverName string
-	bridge     *bridge.StdioHTTPBridge
-	logger     *slog.Logger
-}
-
-// NewHandler creates a new MCP HTTP handler for the given server.
-func NewHandler(serverName string, b *bridge.StdioHTTPBridge, logger *slog.Logger) *Handler {
-	if logger == nil {
-		logger = slog.Default()
-	}
-	return &Handler{
-		serverName: serverName,
-		bridge:     b,
-		logger:     logger,
-	}
-}
-
-// ServeHTTP handles HTTP requests to the MCP endpoint.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodPost:
-		h.handleMCPRequest(w, r)
-	case http.MethodGet:
-		h.handleMCPInfo(w, r)
-	case http.MethodOptions:
-		// CORS preflight
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
-		w.WriteHeader(http.StatusNoContent)
-	default:
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	}
-}
-
-// handleMCPRequest handles POST /mcp - JSON-RPC requests.
-func (h *Handler) handleMCPRequest(w http.ResponseWriter, r *http.Request) {
-	// Read request body
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB limit
-	if err != nil {
-		h.writeJSONRPCError(w, nil, bridge.CodeParseError, "Failed to read request body")
-		return
-	}
-
-	// Validate content type
-	contentType := r.Header.Get("Content-Type")
-	if contentType != "" && contentType != "application/json" {
-		h.writeJSONRPCError(w, nil, bridge.CodeInvalidRequest, "Content-Type must be application/json")
-		return
-	}
-
-	// Forward to bridge
-	resp, err := h.bridge.ForwardRequest(r.Context(), body)
-	if err != nil {
-		h.logger.Error("failed to forward request",
-			slog.String("server", h.serverName),
-			slog.String("error", err.Error()),
-		)
-		h.writeJSONRPCError(w, nil, bridge.CodeInternalError, err.Error())
-		return
-	}
-
-	// Handle notifications (no response)
-	if resp == nil {
-		w.WriteHeader(http.StatusAccepted)
-		return
-	}
-
-	// Return response
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	_, _ = w.Write(resp)
-}
-
-// handleMCPInfo handles GET /mcp - server information.
-func (h *Handler) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
-	info := MCPServerInfo{
-		Server:   h.serverName,
-		Protocol: "JSON-RPC 2.0",
-		Version:  "1.0.0",
-		Endpoints: []string{
-			"POST /mcp - Send JSON-RPC request",
-			"GET /mcp - Get server info",
-		},
-	}
-
-	// Add bridge stats if available
-	if h.bridge != nil {
-		info.Stats = h.bridge.Stats()
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	_ = json.NewEncoder(w).Encode(info)
-}
-
-// writeJSONRPCError writes a JSON-RPC error response.
-func (h *Handler) writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message string) {
-	resp := bridge.NewErrorResponse(id, bridge.NewError(code, message))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK) // JSON-RPC errors still use 200
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-// MCPServerInfo contains information about an MCP server endpoint.
-type MCPServerInfo struct {
-	Server    string             `json:"server"`
-	Protocol  string             `json:"protocol"`
-	Version   string             `json:"version"`
-	Endpoints []string           `json:"endpoints"`
-	Stats     bridge.BridgeStats `json:"stats,omitempty"`
-}
 
 // --- Port Manager ---
 
@@ -141,12 +22,19 @@ type PortManager struct {
 	logger    *slog.Logger
 }
 
+// SessionCloser is implemented by types that manage per-session resources
+// and need cleanup when a server listener is removed.
+type SessionCloser interface {
+	CloseAll()
+}
+
 // ServerListener holds the HTTP server for a single MCP server.
 type ServerListener struct {
-	Name    string
-	Port    int
-	Handler *Handler
-	Server  *http.Server
+	Name           string
+	Port           int
+	MCPHandler     http.Handler  // Streamable HTTP handler
+	SessionManager SessionCloser // Session manager for cleanup (nil if not applicable)
+	Server         *http.Server
 }
 
 // NewPortManager creates a new port manager.
@@ -160,8 +48,22 @@ func NewPortManager(logger *slog.Logger) *PortManager {
 	}
 }
 
-// Add registers and starts an HTTP listener for a server.
-func (pm *PortManager) Add(name string, port int, b *bridge.StdioHTTPBridge) error {
+// AddStreamable registers and starts an HTTP listener backed by a StreamableHTTPHandler.
+// The handler serves the MCP endpoint; sessionMgr (if non-nil) is closed when the listener is removed.
+// If security is non-nil, the SecurityMiddleware is applied to the MCP handler.
+// Default hardening (timeouts, body size cap, rate limiting) is always applied.
+func (pm *PortManager) AddStreamable(name string, port int, handler http.Handler, sessionMgr SessionCloser, security ...SecurityConfig) error {
+	return pm.addStreamableInternal(name, port, handler, sessionMgr, HardeningConfig{}, security...)
+}
+
+// AddStreamableWithHardening registers and starts a hardened HTTP listener with custom hardening config.
+// This allows overriding default timeouts, body size limits, and rate limiting.
+func (pm *PortManager) AddStreamableWithHardening(name string, port int, handler http.Handler, sessionMgr SessionCloser, hardening HardeningConfig, security ...SecurityConfig) error {
+	return pm.addStreamableInternal(name, port, handler, sessionMgr, hardening, security...)
+}
+
+// addStreamableInternal is the shared implementation for AddStreamable and AddStreamableWithHardening.
+func (pm *PortManager) addStreamableInternal(name string, port int, handler http.Handler, sessionMgr SessionCloser, hardening HardeningConfig, security ...SecurityConfig) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -169,46 +71,70 @@ func (pm *PortManager) Add(name string, port int, b *bridge.StdioHTTPBridge) err
 		return ErrServerAlreadyRegistered
 	}
 
-	handler := NewHandler(name, b, pm.logger)
+	// Apply security middleware if configured.
+	// Inject the port manager's logger for security event observability.
+	mcpHandler := handler
+	if len(security) > 0 {
+		sec := security[0]
+		if sec.BearerToken != "" || len(sec.AllowedOrigins) > 0 {
+			if sec.Logger == nil {
+				sec.Logger = pm.logger.With(slog.String("server", name))
+			}
+			mcpHandler = SecurityMiddleware(sec)(handler)
+		}
+	}
+
+	// Apply body size limiting middleware.
+	mcpHandler = MaxBytesMiddleware(hardening.resolvedMaxBodyBytes())(mcpHandler)
+
+	// Apply rate limiting middleware (unless disabled).
+	// Pass the port manager's logger for rate limit denial observability.
+	burst := hardening.resolvedRateBurst()
+	if burst > 0 {
+		serverLogger := pm.logger.With(slog.String("server", name))
+		mcpHandler = RateLimitMiddleware(burst, hardening.resolvedRateInterval(), serverLogger)(mcpHandler)
+	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/mcp", handler)
-	mux.Handle("/", handler) // Also handle root for convenience
+	mux.Handle("/mcp", mcpHandler)
 
-	// Add health endpoint for each MCP port
+	// Health endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"server": name,
 			"status": "ok",
-			"stats":  b.Stats(),
 		})
 	})
 
-	addr := formatAddr(port)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: mux,
 	}
 
+	// Apply hardening timeouts to the HTTP server.
+	hardening.ApplyServerTimeouts(srv)
+
 	listener := &ServerListener{
-		Name:    name,
-		Port:    port,
-		Handler: handler,
-		Server:  srv,
+		Name:           name,
+		Port:           port,
+		MCPHandler:     handler,
+		SessionManager: sessionMgr,
+		Server:         srv,
 	}
 	pm.listeners[name] = listener
 
-	// Start listener in background with WaitGroup tracking
+	// Start listener in background
 	pm.wg.Add(1)
 	go func() {
 		defer pm.wg.Done()
-		pm.logger.Info("starting MCP listener",
+		pm.logger.Info("starting streamable MCP listener",
 			slog.String("server", name),
 			slog.String("addr", addr),
 		)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			pm.logger.Error("MCP listener error",
+			pm.logger.Error("streamable MCP listener error",
 				slog.String("server", name),
 				slog.String("error", err.Error()),
 			)
@@ -219,6 +145,7 @@ func (pm *PortManager) Add(name string, port int, b *bridge.StdioHTTPBridge) err
 }
 
 // Remove stops and removes the listener for a server.
+// If the listener has a SessionManager, all sessions are closed first.
 func (pm *PortManager) Remove(name string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -226,6 +153,11 @@ func (pm *PortManager) Remove(name string) error {
 	listener, exists := pm.listeners[name]
 	if !exists {
 		return ErrServerNotRegistered
+	}
+
+	// Close session manager first (terminates subprocesses)
+	if listener.SessionManager != nil {
+		listener.SessionManager.CloseAll()
 	}
 
 	if err := listener.Server.Close(); err != nil {
@@ -259,10 +191,14 @@ func (pm *PortManager) List() []*ServerListener {
 	return result
 }
 
-// Close shuts down all listeners and waits for goroutines to exit.
+// Close shuts down all listeners, closes session managers, and waits for goroutines to exit.
 func (pm *PortManager) Close() error {
 	pm.mu.Lock()
 	for name, listener := range pm.listeners {
+		// Close session managers first (terminates subprocesses)
+		if listener.SessionManager != nil {
+			listener.SessionManager.CloseAll()
+		}
 		if err := listener.Server.Close(); err != nil {
 			pm.logger.Warn("error closing server",
 				slog.String("server", name),
@@ -276,11 +212,6 @@ func (pm *PortManager) Close() error {
 	// Wait for all listener goroutines to exit
 	pm.wg.Wait()
 	return nil
-}
-
-// formatAddr formats a port number as an address string.
-func formatAddr(port int) string {
-	return fmt.Sprintf(":%d", port)
 }
 
 // Errors

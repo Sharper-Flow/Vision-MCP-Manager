@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/jrede/vision/internal/admin"
-	"github.com/jrede/vision/internal/bridge"
 	"github.com/jrede/vision/internal/config"
 	"github.com/jrede/vision/internal/mcp"
 	"github.com/jrede/vision/internal/server"
+	"github.com/jrede/vision/internal/session"
 	"github.com/jrede/vision/internal/supervisor"
 )
 
@@ -95,6 +95,8 @@ func New(cfg Config) (*Daemon, error) {
 	adminSrv := admin.NewServer(admin.Config{
 		Registry:     reg,
 		Instructions: instructions,
+		DaemonConfig: visionCfg,
+		ConfigPath:   cfg.ConfigPath,
 		Port:         admin.DefaultPort, // 6275
 		Logger:       cfg.Logger,
 	})
@@ -291,6 +293,12 @@ func (d *Daemon) Reload() error {
 		}
 	}
 
+	// Update config reference BEFORE adding servers so that event handlers
+	// (e.g., setupProxyForServer reading d.cfg.Security) see the new config.
+	d.mu.Lock()
+	d.cfg = newCfg
+	d.mu.Unlock()
+
 	// Add new servers
 	for _, name := range toAdd {
 		d.logger.Info("adding server", slog.String("name", name))
@@ -311,11 +319,6 @@ func (d *Daemon) Reload() error {
 			}
 		}
 	}
-
-	// Update config reference
-	d.mu.Lock()
-	d.cfg = newCfg
-	d.mu.Unlock()
 
 	d.logger.Info("configuration reloaded",
 		slog.Int("added", len(toAdd)),
@@ -351,8 +354,8 @@ type DaemonStatus struct {
 	Registry   server.RegistryStatus `json:"registry"`
 }
 
-// setupHTTPProxies creates HTTP bridges for all running stdio servers.
-// Each stdio server gets an HTTP endpoint on its configured port.
+// setupHTTPProxies creates streamable HTTP proxies for all running stdio servers.
+// Each stdio server gets a per-session proxy on its configured port.
 func (d *Daemon) setupHTTPProxies() error {
 	var errs []error
 
@@ -386,8 +389,8 @@ func (d *Daemon) handleServerEvent(event server.ServerEvent) {
 	}
 }
 
-// setupProxyForServer creates an HTTP bridge for a single server.
-// This is extracted from setupHTTPProxies to support dynamic server addition.
+// setupProxyForServer creates a StreamableHTTPHandler proxy for a single server.
+// Each upstream session gets its own isolated downstream subprocess via session.Manager.
 func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	if srv == nil {
 		return errors.New("server is nil")
@@ -398,7 +401,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		return nil
 	}
 
-	// Skip HTTP transport servers (they don't need a bridge)
+	// Skip HTTP transport servers (they don't need a proxy)
 	if srv.Config.InferTransport() != config.TransportStdio {
 		d.logger.Debug("skipping non-stdio server",
 			slog.String("server", srv.Name),
@@ -407,7 +410,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		return nil
 	}
 
-	// Check if proxy already exists (check portManager first)
+	// Check if proxy already exists
 	if d.portManager.Get(srv.Name) != nil {
 		d.logger.Debug("proxy already exists for server",
 			slog.String("server", srv.Name),
@@ -415,7 +418,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		return nil
 	}
 
-	// Check if we're already setting up this server (use a sync.Map for in-progress setups)
+	// Check if we're already setting up this server (deduplication)
 	if _, loaded := d.proxySetupInProgress.LoadOrStore(srv.Name, true); loaded {
 		d.logger.Debug("proxy setup already in progress for server",
 			slog.String("server", srv.Name),
@@ -424,42 +427,50 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	}
 	defer d.proxySetupInProgress.Delete(srv.Name)
 
-	// Get the managed process
-	proc := srv.Process
-	if proc == nil {
-		return fmt.Errorf("no process for running server %s", srv.Name)
+	// Create a session manager for this server's per-session subprocesses
+	mgr := session.NewManager(srv.Name, srv.Config, d.logger)
+
+	// Start the session reaper for idle/TTL cleanup.
+	// Uses SessionTimeout as idle timeout and SessionTTL as absolute TTL.
+	idleTimeout := srv.Config.SessionTimeout.Duration()
+	sessionTTL := srv.Config.SessionTTL.Duration()
+	if idleTimeout > 0 || sessionTTL > 0 {
+		// Check interval: half of the shortest timeout (min 1s, max 30s).
+		shortest := idleTimeout
+		if sessionTTL > 0 && (shortest == 0 || sessionTTL < shortest) {
+			shortest = sessionTTL
+		}
+		checkInterval := shortest / 2
+		if checkInterval < time.Second {
+			checkInterval = time.Second
+		}
+		if checkInterval > 30*time.Second {
+			checkInterval = 30 * time.Second
+		}
+		mgr.StartReaper(d.ctx, checkInterval)
 	}
 
-	// Get stdin/stdout pipes
-	stdin := proc.Stdin()
-	stdout := proc.Stdout()
-	if stdin == nil || stdout == nil {
-		return fmt.Errorf("missing stdio pipes for server %s", srv.Name)
-	}
-
-	// Create the bridge
-	b := bridge.NewStdioHTTPBridge(stdin, stdout, &bridge.BridgeOptions{
-		Logger: d.logger.With(slog.String("server", srv.Name)),
+	// Create the streamable proxy handler
+	handler := mcp.NewProxyHandler(mcp.ProxyConfig{
+		ServerName:     srv.Name,
+		SessionManager: mgr,
+		Logger:         d.logger,
 	})
-	b.Start()
 
-	// Initialize MCP session (required by fastmcp-based servers like kagimcp)
-	initCtx, initCancel := context.WithTimeout(d.ctx, 10*time.Second)
-	defer initCancel()
-	if err := b.Initialize(initCtx); err != nil {
-		d.logger.Warn("MCP initialization failed",
-			slog.String("server", srv.Name),
-			slog.String("error", err.Error()),
-		)
-		// Continue anyway - older servers may not need initialization
+	// Build security config from daemon-wide settings (read under lock).
+	d.mu.RLock()
+	secCfg := mcp.SecurityConfig{
+		BearerToken:    d.cfg.Security.BearerToken,
+		AllowedOrigins: d.cfg.Security.AllowedOrigins,
+	}
+	d.mu.RUnlock()
+
+	// Add to port manager with session manager for cleanup and security middleware.
+	if err := d.portManager.AddStreamable(srv.Name, srv.Config.Port, handler, mgr, secCfg); err != nil {
+		return fmt.Errorf("failed to add streamable proxy: %w", err)
 	}
 
-	// Add to port manager (starts HTTP listener on the server's port)
-	if err := d.portManager.Add(srv.Name, srv.Config.Port, b); err != nil {
-		return fmt.Errorf("failed to add HTTP proxy: %w", err)
-	}
-
-	d.logger.Info("HTTP proxy started",
+	d.logger.Info("streamable proxy started",
 		slog.String("server", srv.Name),
 		slog.Int("port", srv.Config.Port),
 	)

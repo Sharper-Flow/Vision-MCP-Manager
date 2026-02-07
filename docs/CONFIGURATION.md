@@ -29,7 +29,7 @@ servers:
     port: 6276
     
     # Transport type (auto-detected if not specified)
-    transport: stdio | http | sse
+    transport: stdio
     
     # For stdio transport: command to execute
     command: npx
@@ -44,13 +44,6 @@ servers:
       API_KEY: "your-api-key-here"
       DEBUG: "true"
     
-    # For http/sse transport: server URL
-    url: "http://localhost:8080/mcp"
-    
-    # HTTP headers for http transport
-    headers:
-      Authorization: "Bearer ${TOKEN}"
-    
     # Start on daemon launch
     autostart: true
     
@@ -60,14 +53,23 @@ servers:
     # Maximum restart attempts (default: 5)
     max_restarts: 5
     
-    # Process-per-session mode for stateful servers
-    stateful: false
-    
     # Idle session timeout (default: 5m)
     session_timeout: 5m
     
-    # Maximum concurrent sessions (default: 100)
+    # Absolute session TTL (default: 0, no limit)
+    session_ttl: 1h
+    
+    # Maximum concurrent sessions per server (default: 100)
     max_sessions: 100
+
+# Security settings (applied to all Streamable HTTP endpoints)
+security:
+  # Bearer token for authentication (optional)
+  bearer_token: "your-secret-token"
+  
+  # Allowed origins for CORS (optional, wildcards rejected)
+  allowed_origins:
+    - "http://localhost:3000"
 
 # Global supervision settings
 supervision:
@@ -86,16 +88,16 @@ supervision:
 
 ### Transport Types
 
+Vision uses **Streamable HTTP** as the upstream transport for all servers. Downstream, stdio subprocesses are managed with per-session isolation.
+
 | Transport | When to Use | Configuration |
 |-----------|-------------|---------------|
 | `stdio` | Most MCP servers (npx, uvx, binaries) | Set `command` and optional `args` |
-| `http` | Native HTTP MCP servers | Set `url` pointing to `/mcp` endpoint |
-| `sse` | Legacy SSE-based MCP servers | Set `url` to the SSE endpoint |
 
 Transport is auto-detected:
-- Has `command` → `stdio`
-- Has `url` ending with `/mcp` → `http`
-- Has `url` without `/mcp` → `sse`
+- Has `command` → `stdio` (exposed as Streamable HTTP on the configured port)
+
+> **Note:** Each client session spawns an isolated subprocess. There is no shared state between sessions.
 
 ### Example Configurations
 
@@ -137,17 +139,17 @@ servers:
       Authorization: "Bearer ${API_TOKEN}"
 ```
 
-#### Stateful server (process-per-session)
+#### Session limits
 
 ```yaml
 servers:
-  stateful-db:
+  expensive-server:
     port: 6279
     command: npx
-    args: ["-y", "@example/stateful-mcp"]
-    stateful: true
+    args: ["-y", "@example/expensive-mcp"]
+    max_sessions: 5
     session_timeout: 10m
-    max_sessions: 50
+    session_ttl: 1h
 ```
 
 ## Client Configurations
@@ -181,11 +183,11 @@ Create `.opencode.json` in your project or `~/.opencode.json` globally:
 {
   "mcp": {
     "time": {
-      "type": "sse",
+      "type": "remote",
       "url": "http://localhost:6276/mcp"
     },
     "context7": {
-      "type": "sse",
+      "type": "remote",
       "url": "http://localhost:6277/mcp"
     }
   }

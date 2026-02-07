@@ -6,16 +6,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/jrede/vision/internal/bridge"
 	"github.com/jrede/vision/internal/catalog"
 	"github.com/jrede/vision/internal/config"
+	visionmcp "github.com/jrede/vision/internal/mcp"
 	"github.com/jrede/vision/internal/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // DefaultPort is the default port for the Admin MCP server.
@@ -26,9 +26,12 @@ type Server struct {
 	registry     *server.Registry
 	catalog      *catalog.Catalog
 	instructions *config.Instructions
+	daemonConfig *config.Config // Mutable reference for persisting changes
+	configPath   string         // Path to servers.yaml
 	port         int
 	logger       *slog.Logger
 	httpSrv      *http.Server
+	mcpServer    *mcp.Server
 	startedAt    time.Time
 
 	mu      sync.RWMutex
@@ -40,6 +43,8 @@ type Config struct {
 	Registry     *server.Registry
 	Catalog      *catalog.Catalog
 	Instructions *config.Instructions
+	DaemonConfig *config.Config // Mutable reference for persisting changes
+	ConfigPath   string         // Path to servers.yaml for config persistence
 	Port         int
 	Logger       *slog.Logger
 }
@@ -70,6 +75,8 @@ func NewServer(cfg Config) *Server {
 		registry:     cfg.Registry,
 		catalog:      cat,
 		instructions: inst,
+		daemonConfig: cfg.DaemonConfig,
+		configPath:   cfg.ConfigPath,
 		port:         cfg.Port,
 		logger:       cfg.Logger,
 	}
@@ -83,12 +90,23 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("admin server already running")
 	}
 
-	mux := http.NewServeMux()
+	mcpServer := mcp.NewServer(&mcp.Implementation{
+		Name:    "vision-admin",
+		Version: "1.0.0",
+	}, nil)
+	s.registerTools(mcpServer)
 
-	// MCP endpoint - handles JSON-RPC
-	mux.HandleFunc("POST /mcp", s.handleMCP)
-	mux.HandleFunc("GET /mcp", s.handleMCPInfo)
-	mux.HandleFunc("OPTIONS /mcp", s.handleCORS)
+	mux := http.NewServeMux()
+	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return mcpServer
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	secCfg := visionmcp.SecurityConfig{Logger: s.logger.With(slog.String("component", "admin-security"))}
+	if s.daemonConfig != nil {
+		secCfg.BearerToken = s.daemonConfig.Security.BearerToken
+		secCfg.AllowedOrigins = s.daemonConfig.Security.AllowedOrigins
+	}
+	mux.Handle("/mcp", visionmcp.SecurityMiddleware(secCfg)(streamable))
 
 	// Health endpoint
 	mux.HandleFunc("GET /health", s.handleHealth)
@@ -99,6 +117,7 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:    addr,
 		Handler: mux,
 	}
+	s.mcpServer = mcpServer
 	s.startedAt = time.Now()
 	s.running = true
 	s.mu.Unlock()
@@ -151,77 +170,6 @@ func (s *Server) Port() int {
 
 // --- HTTP Handlers ---
 
-// handleMCP handles POST /mcp - MCP JSON-RPC requests.
-func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
-	// Read request body
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024)) // 1MB limit
-	if err != nil {
-		s.writeError(w, nil, bridge.CodeParseError, "Failed to read request body")
-		return
-	}
-
-	// Parse JSON-RPC request
-	var req bridge.Request
-	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeError(w, nil, bridge.CodeParseError, "Invalid JSON: "+err.Error())
-		return
-	}
-
-	// Validate JSON-RPC version
-	if req.JSONRPC != "2.0" {
-		s.writeError(w, req.ID, bridge.CodeInvalidRequest, "Invalid JSON-RPC version")
-		return
-	}
-
-	// Route to handler
-	resp := s.handleMethod(r.Context(), &req)
-
-	// Write response
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	_ = json.NewEncoder(w).Encode(resp)
-}
-
-// handleMethod dispatches to the appropriate method handler.
-func (s *Server) handleMethod(ctx context.Context, req *bridge.Request) *bridge.Response {
-	switch req.Method {
-	case "initialize":
-		return s.handleInitialize(req)
-	case "tools/list":
-		return s.handleToolsList(req)
-	case "tools/call":
-		return s.handleToolsCall(ctx, req)
-	default:
-		return bridge.NewErrorResponse(req.ID, bridge.NewError(
-			bridge.CodeMethodNotFound,
-			fmt.Sprintf("Method not found: %s", req.Method),
-		))
-	}
-}
-
-// handleMCPInfo handles GET /mcp - returns server info.
-func (s *Server) handleMCPInfo(w http.ResponseWriter, r *http.Request) {
-	info := map[string]interface{}{
-		"name":     "vision-admin",
-		"version":  "1.0.0",
-		"protocol": "MCP/JSON-RPC 2.0",
-		"tools":    len(s.getTools()),
-		"uptime":   time.Since(s.startedAt).String(),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	_ = json.NewEncoder(w).Encode(info)
-}
-
-// handleCORS handles OPTIONS /mcp - CORS preflight.
-func (s *Server) handleCORS(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-	w.WriteHeader(http.StatusNoContent)
-}
-
 // handleHealth handles GET /health - detailed health status.
 // Returns {"status": "ok"} when healthy, {"status": "degraded", "errors": [...]} when servers have errors.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -271,12 +219,4 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-}
-
-// writeError writes a JSON-RPC error response.
-func (s *Server) writeError(w http.ResponseWriter, id interface{}, code int, message string) {
-	resp := bridge.NewErrorResponse(id, bridge.NewError(code, message))
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK) // JSON-RPC errors use 200
-	_ = json.NewEncoder(w).Encode(resp)
 }

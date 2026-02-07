@@ -1,0 +1,161 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anomalyco/oc-plugins/main/advance/plugin/schemas/spec.schema.json",
+  "name": "mcp-streamable-transport",
+  "title": "Mcp Streamable Transport",
+  "purpose": "Capability: Mcp Streamable Transport",
+  "version": "1.0.0",
+  "updated_at": "2026-02-07T21:55:27.921Z",
+  "requirements": [
+    {
+      "id": "rq-mcpstr01",
+      "title": "Serve MCP over streamable HTTP with session semantics",
+      "body": "Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per server port. The server MUST support initialize, GET event streaming, and session teardown via DELETE while honoring Mcp-Session-Id semantics.",
+      "priority": "must",
+      "tags": [
+        "mcp",
+        "transport",
+        "streamable-http"
+      ],
+      "scenarios": [
+        {
+          "id": "rq-mcpstr01.1",
+          "title": "Initialize returns a server session id",
+          "given": [
+            "Vision daemon is running with a configured MCP server port",
+            "A client sends a valid initialize request"
+          ],
+          "when": "The initialize request is handled by the streamable endpoint",
+          "then": [
+            "Response is successful and includes Mcp-Session-Id",
+            "The session id can be used by follow-up requests"
+          ]
+        },
+        {
+          "id": "rq-mcpstr01.2",
+          "title": "Session teardown invalidates further use",
+          "given": [
+            "A client has an active streamable session",
+            "The client sends DELETE for that session"
+          ],
+          "when": "A later request reuses the deleted session id",
+          "then": [
+            "The request is rejected as an unknown or expired session",
+            "No previous session resources remain attached"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq-mcpstr02",
+      "title": "Enforce one subprocess per MCP session",
+      "body": "Vision MUST maintain strict 1:1 mapping between each upstream MCP session and a supervised downstream subprocess. Session teardown or timeout MUST terminate only the owning subprocess and remove the mapping.",
+      "priority": "must",
+      "tags": [
+        "sessions",
+        "supervision",
+        "isolation"
+      ],
+      "scenarios": [
+        {
+          "id": "rq-mcpstr02.1",
+          "title": "Concurrent clients receive isolated subprocesses",
+          "given": [
+            "Two clients connect concurrently to the same server port",
+            "Both establish independent MCP sessions"
+          ],
+          "when": "Each client performs tool calls and receives notifications",
+          "then": [
+            "Each session maps to a different subprocess",
+            "Notifications and responses are routed to the correct session only"
+          ]
+        },
+        {
+          "id": "rq-mcpstr02.2",
+          "title": "Session timeout cleans up deterministicly",
+          "given": [
+            "A session exceeds idle timeout or absolute TTL"
+          ],
+          "when": "Timeout handling executes",
+          "then": [
+            "The owned subprocess is terminated gracefully then forcefully if needed",
+            "The session mapping is removed and cannot be reused"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq-mcpstr03",
+      "title": "Apply security and admission controls to all streamable endpoints",
+      "body": "Vision MUST require bearer authentication, enforce a strict Origin allowlist, reject wildcard CORS, and enforce configured limits for max concurrent sessions, request sizes, and HTTP timeouts on streamable MCP endpoints.",
+      "priority": "must",
+      "tags": [
+        "security",
+        "limits",
+        "hardening"
+      ],
+      "scenarios": [
+        {
+          "id": "rq-mcpstr03.1",
+          "title": "Unauthorized and disallowed origin requests are denied",
+          "given": [
+            "A request is missing valid credentials or has a non-allowlisted Origin"
+          ],
+          "when": "The request hits a streamable MCP endpoint",
+          "then": [
+            "The request is rejected",
+            "No session or subprocess is created"
+          ]
+        },
+        {
+          "id": "rq-mcpstr03.2",
+          "title": "Admission limits reject excess sessions",
+          "given": [
+            "Configured max concurrent sessions is reached"
+          ],
+          "when": "Another initialize request is submitted",
+          "then": [
+            "The request is rejected with a clear limit error",
+            "Existing sessions remain healthy"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rq-mcpstr04",
+      "title": "Preserve operational compatibility and emit migration observability",
+      "body": "Vision MUST preserve existing daemon command and health endpoint behavior while adding structured lifecycle/security logs for session creation, teardown, timeout, subprocess spawn/kill, and request denials.",
+      "priority": "should",
+      "tags": [
+        "compatibility",
+        "operations",
+        "observability"
+      ],
+      "scenarios": [
+        {
+          "id": "rq-mcpstr04.1",
+          "title": "Daemon and health contracts remain stable",
+          "given": [
+            "The Streamable migration is deployed"
+          ],
+          "when": "Operators run daemon lifecycle commands and health checks",
+          "then": [
+            "Daemon start/status/reload/stop remain functional",
+            "/health and /healthz behavior remains backward-compatible"
+          ]
+        },
+        {
+          "id": "rq-mcpstr04.2",
+          "title": "Lifecycle and denial events are observable",
+          "given": [
+            "Sessions are created, timed out, denied, and torn down during normal operation"
+          ],
+          "when": "System logs are inspected",
+          "then": [
+            "Logs include session and server identifiers for lifecycle and denial events",
+            "Operators can correlate subprocess lifecycle with session lifecycle"
+          ]
+        }
+      ]
+    }
+  ]
+}

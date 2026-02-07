@@ -21,7 +21,7 @@ Using MCP servers with AI coding agents today means:
 - **Manual process management** — Servers crash silently, requiring manual restarts
 - **No visibility** — Which tools are running? What's failing? No central place to look
 - **Static tooling** — Agents can't adapt their capabilities; humans must edit configs
-- **Transport chaos** — stdio, HTTP, SSE... each client expects something different
+- **Transport chaos** — stdio servers can't be shared across clients without a proxy layer
 
 ## The Solution
 
@@ -31,7 +31,7 @@ Vision is a Go-native daemon that provides:
 |------------|---------------|
 | **Centralized Registry** | One YAML file (`~/.config/vision/servers.yaml`) defines all your MCP servers |
 | **Process Supervision** | Erlang-style supervision with automatic restarts and exponential backoff |
-| **stdio-to-HTTP Bridge** | Every server gets a dedicated HTTP port—no more transport incompatibilities |
+| **Streamable HTTP Proxy** | Per-session subprocess isolation—each client gets its own MCP process on a dedicated port |
 | **Agent Self-Management** | AI agents can add, remove, and restart servers through the Admin MCP API |
 | **Hot Reload** | Update configuration without restarting your coding session |
 
@@ -65,7 +65,8 @@ No human intervention. No config file edits. The agent adapts to what it needs.
 | Automatic restarts | Yes | Varies | No |
 | Hot reload | Yes | No | No |
 | Central config | Yes | Yes | No (per-project) |
-| stdio-to-HTTP bridge | Yes | Some | No |
+| Streamable HTTP proxy | Yes | Some | No |
+| Per-session isolation | Yes | No | No |
 | Admin MCP API | Yes | No | N/A |
 | Single binary | Yes | Varies | N/A |
 
@@ -218,7 +219,7 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 │                        AI Agents                                │
 │                  (OpenCode, Claude Code, etc.)                  │
 └───────────────────────────────┬─────────────────────────────────┘
-                                │ HTTP POST /mcp
+                                │ HTTP POST/GET/DELETE /mcp
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                       Vision Daemon                             │
@@ -229,16 +230,20 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 │   └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │              stdio-to-HTTP Bridge Layer                 │   │
-│   │      :6276/mcp      :6284/mcp      :6282/mcp    ...     │   │
-│   └────────────┬──────────────┬──────────────┬──────────────┘   │
-│                │              │              │                  │
-│   ┌────────────▼──────────────▼──────────────▼──────────────┐   │
+│   │          Streamable HTTP Proxy Layer                    │   │
+│   │                                                         │   │
+│   │  :6276/mcp ──[session A]──> subprocess A (stdio)        │   │
+│   │            ──[session B]──> subprocess B (stdio)         │   │
+│   │                                                         │   │
+│   │  :6284/mcp ──[session C]──> subprocess C (stdio)        │   │
+│   │                                                         │   │
+│   │  :6282/mcp ──[session D]──> subprocess D (stdio)  ...   │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
 │   │         Process Supervisor (Erlang-style)               │   │
-│   │    ┌──────────┐   ┌──────────┐   ┌──────────┐           │   │
-│   │    │ context7 │   │   kagi   │   │   time   │   ...     │   │
-│   │    │  (stdio) │   │  (stdio) │   │  (stdio) │           │   │
-│   │    └──────────┘   └──────────┘   └──────────┘           │   │
+│   │   Automatic restarts · Exponential backoff · Graceful   │   │
+│   │   teardown: stdin close → SIGTERM → SIGKILL             │   │
 │   └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -246,8 +251,9 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 **Key components:**
 
 1. **Admin MCP Server** — Lets agents manage their own tooling without human intervention
-2. **stdio-to-HTTP Bridge** — Converts any stdio MCP server to HTTP, each on a dedicated port
+2. **Streamable HTTP Proxy** — Each client session spawns an isolated subprocess; tools are discovered dynamically and proxied transparently
 3. **Process Supervisor** — Uses [suture](https://github.com/thejerf/suture) for automatic restarts with backoff
+4. **Security Middleware** — Bearer auth, origin allowlist, rate limiting, body size caps, and session admission control
 
 ## Trust Through Visibility
 
@@ -303,13 +309,13 @@ vision init --servers time,context7   # Specific servers only
 
 - [Configuration Reference](docs/CONFIGURATION.md) — Complete server options
 - [AI Agents Guide](docs/agents.md) — Deep dive into agent integration
-- [MCP Transports](docs/MCP_TRANSPORTS.md) — Understanding stdio, HTTP, SSE
+- [MCP Transports](docs/MCP_TRANSPORTS.md) — Streamable HTTP proxy and per-session subprocess model
 - [Development Guide](DEVELOPMENT.md) — Building and contributing
 
 ## Roadmap
 
-- [ ] Audit logging for all MCP traffic
-- [ ] Per-tool permission controls
+- [x] Structured audit logging for session lifecycle and security events
+- [x] Per-session admission controls (max concurrent sessions, idle timeout, TTL)
 - [ ] Usage analytics dashboard
 - [ ] Multi-machine sync
 
