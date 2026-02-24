@@ -8,6 +8,18 @@
 //   - tools/list_changed: re-discovers tools from downstream and updates upstream server
 //   - logging/message: relayed via ServerSession.Log()
 //   - progress: relayed via ServerSession.NotifyProgress()
+//
+// Lifecycle safety:
+//
+//	proxySession uses two separate locks:
+//	  - mu: guards upstreamSession, upstreamSessionID, and currentTools
+//	  - downstreamMu: guards downstream pointer and downstreamClosed flag
+//
+//	Callers (tool handlers, notification relays) acquire downstreamMu.RLock to
+//	snapshot the downstream pointer and check the closed flag.  closeDownstream
+//	acquires the write lock to set the flag and nil the pointer atomically before
+//	handing off to IO teardown. This prevents calls being dispatched after close
+//	has begun, eliminating the "client is closing" error surfacing to callers.
 package mcp
 
 import (
@@ -19,11 +31,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/jrede/vision/internal/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// ErrDownstreamUnavailable is returned when a tool call or notification relay
+// is attempted after the downstream session has been closed.
+var ErrDownstreamUnavailable = errors.New("downstream session unavailable")
 
 // ProxyConfig configures a per-session proxy handler.
 type ProxyConfig struct {
@@ -54,10 +71,28 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	logger := cfg.Logger.With(slog.String("component", "proxy"), slog.String("server", cfg.ServerName))
 
 	type sessionIndex struct {
-		mu sync.RWMutex
-		m  map[string]*proxySession
+		mu           sync.RWMutex
+		byUpstream   map[string]*proxySession // upstream MCP session ID → proxySession
+		byDownstream map[string]*proxySession // downstream manager session ID → proxySession
 	}
-	idx := &sessionIndex{m: make(map[string]*proxySession)}
+	idx := &sessionIndex{
+		byUpstream:   make(map[string]*proxySession),
+		byDownstream: make(map[string]*proxySession),
+	}
+
+	// Register a callback so that any removal path (reaper, RemoveSession,
+	// CloseAll) triggers closeDownstream on the proxy session, setting the
+	// closed flag before the SDK connection is torn down.
+	if cfg.SessionManager != nil {
+		cfg.SessionManager.SetOnSessionRemoved(func(sessionID string) {
+			idx.mu.RLock()
+			ps := idx.byDownstream[sessionID]
+			idx.mu.RUnlock()
+			if ps != nil {
+				ps.closeDownstream("session removed by manager")
+			}
+		})
+	}
 
 	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		srv, err := newPerSessionServer(
@@ -67,12 +102,17 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			logger,
 			func(upstreamSessionID string, ps *proxySession) {
 				idx.mu.Lock()
-				idx.m[upstreamSessionID] = ps
+				idx.byUpstream[upstreamSessionID] = ps
+				idx.byDownstream[ps.sessionID] = ps
 				idx.mu.Unlock()
 			},
 			func(upstreamSessionID string) {
 				idx.mu.Lock()
-				delete(idx.m, upstreamSessionID)
+				ps := idx.byUpstream[upstreamSessionID]
+				delete(idx.byUpstream, upstreamSessionID)
+				if ps != nil {
+					delete(idx.byDownstream, ps.sessionID)
+				}
 				idx.mu.Unlock()
 			},
 		)
@@ -104,7 +144,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 		sessionHeader := r.Header.Get("Mcp-Session-Id")
 		if sessionHeader != "" {
 			idx.mu.RLock()
-			ps := idx.m[sessionHeader]
+			ps := idx.byUpstream[sessionHeader]
 			idx.mu.RUnlock()
 			if ps != nil {
 				ps.touch()
@@ -115,14 +155,19 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 
 		if r.Method == http.MethodDelete && sessionHeader != "" {
 			idx.mu.RLock()
-			ps := idx.m[sessionHeader]
+			ps := idx.byUpstream[sessionHeader]
 			idx.mu.RUnlock()
 			if ps != nil {
 				ps.closeDownstream("upstream delete")
+				// Trigger the manager's removal path (kills subprocess, fires
+				// reaper cleanup). closeDownstream already set the closed flag,
+				// so the onSessionRemoved callback will be a no-op.
+				if err := ps.mgr.RemoveSession(ps.sessionID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+					logger.Warn("failed to remove session on delete",
+						slog.String("error", err.Error()),
+					)
+				}
 			}
-			idx.mu.Lock()
-			delete(idx.m, sessionHeader)
-			idx.mu.Unlock()
 		}
 	})
 }
@@ -150,20 +195,25 @@ func isInitializeRequest(r *http.Request) bool {
 // proxySession holds the state for a single proxied session, used to relay
 // notifications from downstream to the upstream ServerSession.
 type proxySession struct {
-	server     *mcp.Server
-	downstream *mcp.ClientSession
-	sessionID  string
-	mgr        *session.Manager
-	logger     *slog.Logger
-	onClosed   func(string)
+	server    *mcp.Server
+	sessionID string
+	mgr       *session.Manager
+	logger    *slog.Logger
+	onClosed  func(string)
 
-	// upstreamSession is set once the upstream initialize completes.
-	// Protected by mu since InitializedHandler runs concurrently with getServer return.
+	// mu guards upstreamSession, upstreamSessionID, and currentTools.
+	// InitializedHandler runs concurrently with getServer return.
 	mu                sync.Mutex
 	upstreamSession   *mcp.ServerSession
 	upstreamSessionID string
 	currentTools      map[string]struct{}
 	closeOnce         sync.Once
+
+	// downstreamMu guards downstream and downstreamClosed.
+	// Use RLock to snapshot/check before IO; Lock to transition to closed.
+	downstreamMu     sync.RWMutex
+	downstream       *mcp.ClientSession
+	downstreamClosed bool
 }
 
 // newPerSessionServer creates a new mcp.Server for a single upstream session.
@@ -229,6 +279,7 @@ func newPerSessionServer(
 	if err != nil {
 		return nil, fmt.Errorf("failed to spawn downstream session: %w", err)
 	}
+	// ps is local here (not yet returned or indexed), so no lock needed.
 	ps.downstream = downstream
 
 	// Discover tools from downstream.
@@ -265,13 +316,24 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	ps.logger.Info("downstream tools/list_changed, re-discovering tools")
 	ps.touch()
 
-	if ps.downstream == nil {
+	// Snapshot downstream under read lock; abort if already closed.
+	ps.downstreamMu.RLock()
+	ds := ps.downstream
+	closed := ps.downstreamClosed
+	ps.downstreamMu.RUnlock()
+
+	if closed || ds == nil {
+		ps.logger.Debug("skipping tool list refresh: downstream closed")
 		return
 	}
 
 	// Re-discover tools from downstream.
-	toolsResult, err := ps.downstream.ListTools(ctx, nil)
+	toolsResult, err := ds.ListTools(ctx, nil)
 	if err != nil {
+		if isDownstreamClosureError(err) {
+			ps.logger.Debug("downstream closed during tool list refresh")
+			return
+		}
 		ps.logger.Error("failed to re-list downstream tools", slog.String("error", err.Error()))
 		return
 	}
@@ -356,15 +418,27 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 			slog.String("tool", toolName),
 		)
 
-		if ps.downstream == nil {
-			return nil, fmt.Errorf("downstream session unavailable")
+		// Snapshot downstream under read lock; reject if closed.
+		ps.downstreamMu.RLock()
+		ds := ps.downstream
+		closed := ps.downstreamClosed
+		ps.downstreamMu.RUnlock()
+
+		if closed || ds == nil {
+			return nil, ErrDownstreamUnavailable
 		}
 
-		result, err := ps.downstream.CallTool(ctx, &mcp.CallToolParams{
+		result, err := ds.CallTool(ctx, &mcp.CallToolParams{
 			Name:      req.Params.Name,
 			Arguments: req.Params.Arguments,
 		})
 		if err != nil {
+			if isDownstreamClosureError(err) {
+				ps.logger.Debug("downstream closed during tool call",
+					slog.String("tool", toolName),
+				)
+				return nil, ErrDownstreamUnavailable
+			}
 			ps.logger.Error("downstream tool call failed",
 				slog.String("tool", toolName),
 				slog.String("error", err.Error()),
@@ -392,13 +466,16 @@ func (ps *proxySession) closeDownstream(reason string) {
 		ps.logger.Info("closing proxy session downstream",
 			slog.String("reason", reason),
 		)
-		err := ps.mgr.RemoveSession(ps.sessionID)
-		if err != nil && !errors.Is(err, session.ErrSessionNotFound) {
-			ps.logger.Warn("failed to remove session",
-				slog.String("error", err.Error()),
-			)
-		}
 
+		// Atomically mark closed and detach the downstream pointer so that any
+		// concurrent tool calls see the closed state without dispatching to a
+		// closing SDK connection.
+		ps.downstreamMu.Lock()
+		ps.downstreamClosed = true
+		ps.downstream = nil
+		ps.downstreamMu.Unlock()
+
+		// Clean up index maps via the onClosed callback.
 		ps.mu.Lock()
 		upstreamID := ps.upstreamSessionID
 		onClosed := ps.onClosed
@@ -407,6 +484,18 @@ func (ps *proxySession) closeDownstream(reason string) {
 			onClosed(upstreamID)
 		}
 	})
+}
+
+// isDownstreamClosureError reports whether err is an SDK-level connection
+// closure error that Vision normalizes to ErrDownstreamUnavailable.
+// Context errors (Canceled, DeadlineExceeded) are NOT matched — those are
+// caller-side cancellations and should propagate as-is.
+func isDownstreamClosureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "client is closing")
 }
 
 // sessionCounter provides unique session IDs via atomic increment.

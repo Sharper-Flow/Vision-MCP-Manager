@@ -43,8 +43,9 @@ type Manager struct {
 	config     *config.ServerConfig
 	logger     *slog.Logger
 
-	mu       sync.RWMutex
-	sessions map[string]*TrackedSession
+	mu               sync.RWMutex
+	sessions         map[string]*TrackedSession
+	onSessionRemoved func(sessionID string) // optional callback, fired before session IO teardown
 }
 
 // NewManager creates a new session Manager for the given server.
@@ -58,6 +59,17 @@ func NewManager(serverName string, cfg *config.ServerConfig, logger *slog.Logger
 		logger:     logger.With(slog.String("server", serverName)),
 		sessions:   make(map[string]*TrackedSession),
 	}
+}
+
+// SetOnSessionRemoved registers a callback that fires before any session's
+// downstream connection is closed. This is called from all removal paths:
+// RemoveSession, reaper, and CloseAll. The callback receives the session ID
+// and runs outside any Manager lock, allowing the proxy layer to gate further
+// dispatches before the SDK connection is torn down.
+func (m *Manager) SetOnSessionRemoved(fn func(sessionID string)) {
+	m.mu.Lock()
+	m.onSessionRemoved = fn
+	m.mu.Unlock()
 }
 
 // SpawnSession creates a new downstream subprocess for the given session ID.
@@ -325,9 +337,21 @@ func (m *Manager) CloseAll() {
 // 3. SIGTERM if not exited
 // 4. Wait again
 // 5. SIGKILL if still alive
+//
+// If an OnSessionRemoved callback is registered, it fires BEFORE the SDK
+// connection is closed so that the proxy layer can gate further dispatches.
 func (m *Manager) closeTrackedSession(tracked *TrackedSession) error {
 	if tracked == nil || tracked.Downstream == nil {
 		return nil
+	}
+
+	// Notify the proxy layer before IO teardown so it can set its closed flag
+	// and stop dispatching calls to the about-to-close connection.
+	m.mu.RLock()
+	cb := m.onSessionRemoved
+	m.mu.RUnlock()
+	if cb != nil {
+		cb(tracked.SessionID)
 	}
 
 	m.logger.Debug("closing downstream session",

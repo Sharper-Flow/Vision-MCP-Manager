@@ -2,11 +2,13 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -742,6 +744,114 @@ func TestProxyHandler_ConcurrentInitCallDelete(t *testing.T) {
 	}
 
 	t.Logf("all %d concurrent clients completed init/call/delete without races", numClients)
+}
+
+// TestProxySession_CallToolVsClose verifies that when the downstream session is
+// closed while tool calls are in-flight, Vision normalizes the error to
+// ErrDownstreamUnavailable rather than leaking raw SDK internals ("client is
+// closing") back through the MCP response. This is a regression test for the
+// bug where agents received opaque SDK errors instead of a stable Vision error.
+func TestProxySession_CallToolVsClose(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := &config.ServerConfig{
+		Command:        "node",
+		Args:           []string{"-e", echoMCPServerJS},
+		Port:           16297,
+		Autostart:      true,
+		RestartPolicy:  config.RestartOnFailure,
+		SessionTimeout: config.Duration(30 * time.Second),
+		MaxSessions:    5,
+	}
+
+	mgr := session.NewManager("test-race-close", cfg, logger)
+	defer mgr.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:     "test-race-close",
+		SessionManager: mgr,
+		Logger:         logger,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// Establish a single session.
+	client := mcp.NewClient(&mcp.Implementation{Name: "race-close-client", Version: "1.0.0"}, nil)
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	if _, err := sess.ListTools(ctx, nil); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	// Verify a normal call works before the close.
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "pre-close"},
+	}); err != nil {
+		t.Fatalf("pre-close CallTool failed: %v", err)
+	}
+
+	// Force-close the downstream subprocess directly (simulates reaper/idle
+	// timeout). This happens while the upstream HTTP session remains open.
+	// The next tool call should get a clean Vision error, not raw SDK internals.
+	sessionIDs := mgr.Sessions()
+	if len(sessionIDs) == 0 {
+		t.Fatal("expected at least one active session")
+	}
+	for _, id := range sessionIDs {
+		if err := mgr.RemoveSession(id); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+			t.Fatalf("RemoveSession: %v", err)
+		}
+	}
+
+	// Give closeDownstream time to propagate (it runs synchronously via DELETE
+	// handler, but RemoveSession is immediate here).
+	time.Sleep(50 * time.Millisecond)
+
+	// Now hammer calls in parallel; all should get ErrDownstreamUnavailable
+	// (or a transport error) — NOT raw "client is closing".
+	const callers = 5
+	var wg sync.WaitGroup
+	var rawSdkErrors sync.Map
+
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 3 {
+				_, err := sess.CallTool(ctx, &mcp.CallToolParams{
+					Name:      "echo",
+					Arguments: map[string]any{"message": "post-close"},
+				})
+				if err != nil {
+					// Errors from the upstream transport layer (connection closed,
+					// context errors) are expected and OK.
+					// What is NOT OK: Vision forwarding a raw "client is closing"
+					// as the tool result error.
+					msg := err.Error()
+					if containsSubstring(msg, "client is closing") &&
+						!containsSubstring(msg, "downstream session unavailable") {
+						rawSdkErrors.Store(msg, true)
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// No raw SDK close errors should have leaked as proxy errors.
+	rawSdkErrors.Range(func(k, _ any) bool {
+		t.Errorf("raw SDK error leaked through Vision proxy: %v", k)
+		return true
+	})
 }
 
 func containsSubstring(s, substr string) bool {
