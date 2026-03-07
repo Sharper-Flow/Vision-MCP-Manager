@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -133,6 +134,54 @@ func TestPortManager_RemoveWithSessionManager(t *testing.T) {
 
 	if !sm.closed {
 		t.Error("expected SessionManager.CloseAll() to be called on Remove")
+	}
+}
+
+func TestProbeCompatibilityMiddleware_GETWithoutSessionReturnsSSE(t *testing.T) {
+	handler := ProbeCompatibilityMiddleware("test-server")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("next handler should not be called for compatibility probe")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("expected text/event-stream content type, got %q", got)
+	}
+	body := rr.Body.String()
+	if body == "" {
+		t.Fatal("expected SSE probe body")
+	}
+	if body != "event: endpoint\ndata: /mcp\n\n: test-server requires MCP initialize before SSE session\n\n" {
+		t.Fatalf("unexpected SSE probe body: %q", body)
+	}
+}
+
+func TestProbeCompatibilityMiddleware_GETWithSessionFallsThrough(t *testing.T) {
+	called := false
+	handler := ProbeCompatibilityMiddleware("test-server")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusAccepted)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Mcp-Session-Id", "abc123")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if !called {
+		t.Fatal("expected next handler to be called when session id is present")
+	}
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected downstream status, got %d", rr.Code)
 	}
 }
 

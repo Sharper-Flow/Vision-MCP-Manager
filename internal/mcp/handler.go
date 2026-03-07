@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -95,6 +96,12 @@ func (pm *PortManager) addStreamableInternal(name string, port int, handler http
 		mcpHandler = RateLimitMiddleware(burst, hardening.resolvedRateInterval(), serverLogger)(mcpHandler)
 	}
 
+	// Compatibility shim for clients that probe streamable MCP endpoints with a
+	// bare GET /mcp request before establishing a session. The MCP SDK rejects
+	// this with 405/404, but some clients use a 200 SSE response as a cheap
+	// liveness signal when listing servers.
+	mcpHandler = ProbeCompatibilityMiddleware(name)(mcpHandler)
+
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpHandler)
 
@@ -142,6 +149,34 @@ func (pm *PortManager) addStreamableInternal(name string, port int, handler http
 	}()
 
 	return nil
+}
+
+// ProbeCompatibilityMiddleware returns a short-lived legacy SSE handshake for
+// GET /mcp requests that do not yet carry an Mcp-Session-Id.
+//
+// This preserves normal MCP session semantics for real clients while improving
+// interoperability with older tooling that still probes MCP endpoints with the
+// pre-streamable SSE transport.
+func ProbeCompatibilityMiddleware(serverName string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && r.Header.Get("Mcp-Session-Id") == "" {
+				accept := r.Header.Get("Accept")
+				if strings.Contains(accept, "text/event-stream") {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Cache-Control", "no-cache, no-transform")
+					w.Header().Set("Connection", "keep-alive")
+					w.Header().Set("X-Accel-Buffering", "no")
+					w.WriteHeader(http.StatusOK)
+					_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", r.URL.Path)
+					_, _ = fmt.Fprintf(w, ": %s requires MCP initialize before SSE session\n\n", serverName)
+					return
+				}
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // Remove stops and removes the listener for a server.
