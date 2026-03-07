@@ -94,6 +94,7 @@ curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/tru
 ```
 
 The installer downloads the latest binary, places it in `/usr/local/bin`, and creates the configuration directory.
+When it installs the systemd unit, it also captures your current `PATH` so shell-managed MCP binaries (for example `pyenv`, `nvm`, or `uvx` tools) remain spawnable under systemd.
 
 **Options:**
 - `--systemd` — Install and enable the systemd user service
@@ -120,6 +121,8 @@ cp scripts/vision-user.service ~/.config/systemd/user/vision.service
 systemctl --user daemon-reload
 systemctl --user enable --now vision
 ```
+
+If your MCP commands live outside the default systemd path, reinstall with `scripts/install.sh` or add a matching `PATH` to `~/.config/systemd/user/vision.service` before starting the daemon.
 
 ## Configuration
 

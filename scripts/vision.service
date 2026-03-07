@@ -10,6 +10,7 @@ ExecStart=/usr/local/bin/vision daemon start
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
+Environment="PATH=__VISION_PATH__"
 
 # Environment file for API keys and secrets
 EnvironmentFile=-/etc/vision/environment

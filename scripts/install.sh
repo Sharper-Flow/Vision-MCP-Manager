@@ -24,6 +24,46 @@ log_success() { echo -e "${GREEN}[OK]${NC} $*"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+resolved_service_path() {
+    local extra_path="$1"
+    local base_path="${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin"
+    local combined="${extra_path}:${base_path}"
+    local deduped=""
+    local part
+
+    IFS=':' read -r -a path_parts <<< "$combined"
+    for part in "${path_parts[@]}"; do
+        [[ -z "$part" ]] && continue
+        case ":${deduped}:" in
+            *":${part}:"*) continue ;;
+        esac
+        if [[ -z "$deduped" ]]; then
+            deduped="$part"
+        else
+            deduped="${deduped}:$part"
+        fi
+    done
+
+    printf '%s' "$deduped"
+}
+
+configure_service_path() {
+    local service_path="$1"
+    local current_path
+    current_path=$(resolved_service_path "$PATH")
+
+    python3 - "$service_path" "$current_path" <<'PY'
+from pathlib import Path
+import sys
+
+service_file = Path(sys.argv[1])
+path_value = sys.argv[2]
+content = service_file.read_text()
+content = content.replace('__VISION_PATH__', path_value)
+service_file.write_text(content)
+PY
+}
+
 usage() {
     cat <<EOF
 Vision MCP Daemon Installer
@@ -181,6 +221,7 @@ install_systemd_user() {
     
     # Update path to binary
     sed -i "s|%h/.local/bin/vision|${INSTALL_DIR}/vision|g" "${SYSTEMD_USER_DIR}/vision.service"
+    configure_service_path "${SYSTEMD_USER_DIR}/vision.service"
     
     systemctl --user daemon-reload
     
@@ -199,6 +240,18 @@ install_systemd_system() {
     fi
     
     sudo cp "$service_file" /etc/systemd/system/vision@.service
+    local current_path
+    current_path=$(resolved_service_path "$PATH")
+    sudo python3 - /etc/systemd/system/vision@.service "$current_path" <<'PY'
+from pathlib import Path
+import sys
+
+service_file = Path(sys.argv[1])
+path_value = sys.argv[2]
+content = service_file.read_text()
+content = content.replace('__VISION_PATH__', path_value)
+service_file.write_text(content)
+PY
     sudo systemctl daemon-reload
     
     log_success "Systemd system service installed"
