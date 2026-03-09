@@ -32,6 +32,7 @@ Vision is a Go-native daemon that provides:
 | **Centralized Registry** | One YAML file (`~/.config/vision/servers.yaml`) defines all your MCP servers |
 | **Process Supervision** | Erlang-style supervision with automatic restarts and exponential backoff |
 | **Streamable HTTP Proxy** | Per-session subprocess isolation—each client gets its own MCP process on a dedicated port |
+| **Automatic Respawn** | If a downstream subprocess is reaped or crashes, the next tool call transparently spawns a fresh one |
 | **Agent Self-Management** | AI agents can add, remove, and restart servers through the Admin MCP API |
 | **Hot Reload** | Update configuration without restarting your coding session |
 
@@ -140,6 +141,7 @@ servers:
     env:
       CONTEXT7_API_KEY: "your-api-key-here"
     autostart: true
+    session_timeout: 30m   # How long idle sessions live (default: 5m)
 
   # Kagi - Web search and summarization
   kagi:
@@ -157,6 +159,8 @@ servers:
     args: ["mcp-server-time", "--local-timezone=America/New_York"]
     autostart: true
 ```
+
+> **Session lifecycle:** Idle sessions are reaped after `session_timeout` (default 5m). If a tool call arrives after the session is reaped, Vision automatically respawns a fresh subprocess — no error is returned to the agent.
 
 > **Best Practice:** Put API keys directly in `servers.yaml`. This file is local (`~/.config/vision/`) and never committed to git.
 
@@ -254,7 +258,7 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 **Key components:**
 
 1. **Admin MCP Server** — Lets agents manage their own tooling without human intervention
-2. **Streamable HTTP Proxy** — Each client session spawns an isolated subprocess; tools are discovered dynamically and proxied transparently
+2. **Streamable HTTP Proxy** — Each client session spawns an isolated subprocess; tools are discovered dynamically and proxied transparently. If a subprocess is reaped (idle timeout) or crashes, the proxy automatically respawns it on the next request
 3. **Process Supervisor** — Uses [suture](https://github.com/thejerf/suture) for automatic restarts with backoff
 4. **Security Middleware** — Bearer auth, origin allowlist, rate limiting, body size caps, and session admission control
 
@@ -307,6 +311,7 @@ vision init --servers time,context7   # Specific servers only
 | Server keeps crashing | Check logs: `journalctl --user -u vision -f` |
 | Config changes not applied | Run `vision daemon reload` |
 | Port already in use | Check for conflicts: `lsof -i :6276` |
+| "downstream session unavailable" | Session was reaped after idle timeout. Vision auto-respawns on next call. If persistent, increase `session_timeout` in `servers.yaml` |
 
 ## Documentation
 
@@ -319,6 +324,7 @@ vision init --servers time,context7   # Specific servers only
 
 - [x] Structured audit logging for session lifecycle and security events
 - [x] Per-session admission controls (max concurrent sessions, idle timeout, TTL)
+- [x] Automatic downstream respawn on idle reap or crash
 - [ ] Usage analytics dashboard
 - [ ] Multi-machine sync
 

@@ -53,7 +53,10 @@ servers:
     # Maximum restart attempts (default: 5)
     max_restarts: 5
     
-    # Idle session timeout (default: 5m)
+    # Idle session timeout (default: 5m).
+    # When a session is reaped, the next tool call automatically
+    # respawns a fresh subprocess — no error is returned to the agent.
+    # Increase for servers where agents pause between calls (e.g. 30m).
     session_timeout: 5m
     
     # Absolute session TTL (default: 0, no limit)
