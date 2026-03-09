@@ -327,14 +327,25 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	ps.logger.Info("downstream tools/list_changed, re-discovering tools")
 	ps.touch()
 
-	// Snapshot downstream under read lock; abort if already closed.
+	// Snapshot downstream under read lock; attempt respawn if closed.
 	ps.downstreamMu.RLock()
 	ds := ps.downstream
 	closed := ps.downstreamClosed
 	ps.downstreamMu.RUnlock()
 
 	if closed || ds == nil {
-		ps.logger.Debug("skipping tool list refresh: downstream closed")
+		ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
+		var err error
+		ds, err = ps.respawnDownstream(ctx)
+		if err != nil {
+			ps.logger.Warn("respawn failed during tool list refresh",
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+		// respawnDownstream already re-discovered tools and updated registrations,
+		// so we can return early — the tool list is already current.
+		ps.logger.Info("downstream respawned during tool list refresh")
 		return
 	}
 

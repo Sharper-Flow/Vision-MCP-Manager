@@ -97,6 +97,29 @@ Downstream-to-upstream notifications are relayed via the `proxySession` struct:
 
 Notification handlers are set via `ClientOptions` at `mcp.NewClient()` time. The upstream `ServerSession` is captured via the `InitializedHandler` callback in `ServerOptions`.
 
+### Downstream Respawn
+
+When a downstream subprocess becomes unavailable — reaped by idle timeout, crashed, or otherwise closed — the proxy transparently respawns a new subprocess instead of returning `ErrDownstreamUnavailable` to the upstream client.
+
+**Respawn triggers:**
+- Tool call (`tools/call`) hits a closed downstream
+- Tool list refresh (`tools/list_changed` notification relay) hits a closed downstream
+
+**Respawn flow:**
+1. Handler detects `downstreamClosed == true` or `downstream == nil`
+2. Calls `proxySession.respawnDownstream()` which:
+   - Acquires `respawnMu` to serialize concurrent attempts (only one subprocess spawns)
+   - Double-checks state (another goroutine may have already respawned)
+   - Spawns a new subprocess via `session.Manager.SpawnSession()`
+   - Re-discovers tools via `ListTools` and re-registers proxy handlers
+   - Atomically swaps the downstream pointer and resets the closed flag
+3. If respawn succeeds, the original operation proceeds against the new downstream
+4. If respawn fails, the error propagates as before
+
+**Concurrency:** `respawnMu` ensures only one goroutine spawns a subprocess. Other concurrent callers block, then see the already-respawned downstream via double-check.
+
+**Overhead:** ~20ms for subprocess spawn + initialize handshake (Node.js servers). Transparent to the upstream client.
+
 ### Admission Control
 
 `session.Manager` enforces a configurable `MaxSessions` limit per server. When the limit is reached, new `initialize` requests fail with an admission error. Existing sessions remain unaffected.
