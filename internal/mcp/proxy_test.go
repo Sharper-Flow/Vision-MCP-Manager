@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -852,6 +853,237 @@ func TestProxySession_CallToolVsClose(t *testing.T) {
 		t.Errorf("raw SDK error leaked through Vision proxy: %v", k)
 		return true
 	})
+}
+
+// TestProxyHandler_RespawnAfterReap verifies that when a downstream session is
+// reaped (idle timeout, crash), the next tool call transparently respawns a new
+// downstream subprocess instead of returning ErrDownstreamUnavailable.
+// This is the fix for the "downstream session unavailable" error that agents
+// (e.g., Context7 callers) were seeing intermittently.
+func TestProxyHandler_RespawnAfterReap(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := &config.ServerConfig{
+		Command:        "node",
+		Args:           []string{"-e", echoMCPServerJS},
+		Port:           16298,
+		Autostart:      true,
+		RestartPolicy:  config.RestartOnFailure,
+		SessionTimeout: config.Duration(30 * time.Second),
+		MaxSessions:    10,
+	}
+
+	mgr := session.NewManager("test-respawn", cfg, logger)
+	defer mgr.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:     "test-respawn",
+		SessionManager: mgr,
+		Logger:         logger,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// Connect as an MCP client.
+	client := mcp.NewClient(&mcp.Implementation{
+		Name:    "respawn-client",
+		Version: "1.0.0",
+	}, nil)
+
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer sess.Close()
+
+	// Verify initial tool call works.
+	result1, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "before-reap"},
+	})
+	if err != nil {
+		t.Fatalf("pre-reap CallTool failed: %v", err)
+	}
+	text1 := ""
+	if len(result1.Content) > 0 {
+		if tc, ok := result1.Content[0].(*mcp.TextContent); ok {
+			text1 = tc.Text
+		}
+	}
+	if !containsSubstring(text1, "before-reap") {
+		t.Fatalf("expected 'before-reap' in result, got %q", text1)
+	}
+	t.Logf("pre-reap result: %s", text1)
+
+	// Simulate reaper: force-remove all downstream sessions.
+	sessionIDs := mgr.Sessions()
+	if len(sessionIDs) == 0 {
+		t.Fatal("expected at least one active session before reap")
+	}
+	for _, id := range sessionIDs {
+		if err := mgr.RemoveSession(id); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+			t.Fatalf("RemoveSession: %v", err)
+		}
+	}
+
+	// Give closeDownstream time to propagate.
+	time.Sleep(100 * time.Millisecond)
+
+	// The next tool call should trigger a respawn and succeed.
+	result2, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "after-respawn"},
+	})
+	if err != nil {
+		t.Fatalf("post-reap CallTool failed (respawn should have succeeded): %v", err)
+	}
+
+	text2 := ""
+	if len(result2.Content) > 0 {
+		if tc, ok := result2.Content[0].(*mcp.TextContent); ok {
+			text2 = tc.Text
+		}
+	}
+	if !containsSubstring(text2, "after-respawn") {
+		t.Fatalf("expected 'after-respawn' in result, got %q", text2)
+	}
+
+	// The PID should differ (new subprocess was spawned).
+	if text1 == text2 {
+		t.Errorf("expected different PIDs after respawn, but got identical results: %q", text1)
+	}
+
+	t.Logf("post-respawn result: %s (different PID confirms new subprocess)", text2)
+}
+
+// TestProxyHandler_ConcurrentRespawn verifies that when multiple tool calls
+// hit a closed downstream simultaneously, only one respawn occurs and all
+// callers get valid results.
+func TestProxyHandler_ConcurrentRespawn(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := &config.ServerConfig{
+		Command:        "node",
+		Args:           []string{"-e", echoMCPServerJS},
+		Port:           16299,
+		Autostart:      true,
+		RestartPolicy:  config.RestartOnFailure,
+		SessionTimeout: config.Duration(30 * time.Second),
+		MaxSessions:    10,
+	}
+
+	mgr := session.NewManager("test-concurrent-respawn", cfg, logger)
+	defer mgr.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:     "test-concurrent-respawn",
+		SessionManager: mgr,
+		Logger:         logger,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{
+		Name:    "concurrent-respawn-client",
+		Version: "1.0.0",
+	}, nil)
+
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer sess.Close()
+
+	// Verify initial call works.
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "init"},
+	}); err != nil {
+		t.Fatalf("initial CallTool failed: %v", err)
+	}
+
+	// Kill downstream.
+	for _, id := range mgr.Sessions() {
+		_ = mgr.RemoveSession(id)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Fire multiple concurrent tool calls — all should succeed via respawn.
+	const callers = 5
+	var wg sync.WaitGroup
+	results := make([]string, callers)
+	errs := make([]error, callers)
+
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			r, err := sess.CallTool(ctx, &mcp.CallToolParams{
+				Name:      "echo",
+				Arguments: map[string]any{"message": fmt.Sprintf("concurrent-%d", idx)},
+			})
+			errs[idx] = err
+			if err == nil && len(r.Content) > 0 {
+				if tc, ok := r.Content[0].(*mcp.TextContent); ok {
+					results[idx] = tc.Text
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	// All callers should have succeeded.
+	for i := 0; i < callers; i++ {
+		if errs[i] != nil {
+			t.Errorf("caller %d failed: %v", i, errs[i])
+		}
+		if results[i] == "" {
+			t.Errorf("caller %d got empty result", i)
+		}
+	}
+
+	// All results should have the same PID (single respawn).
+	pids := make(map[string]bool)
+	for _, r := range results {
+		if r != "" {
+			// Extract pid= portion
+			for _, part := range splitOnSpace(r) {
+				if containsSubstring(part, "pid=") {
+					pids[part] = true
+				}
+			}
+		}
+	}
+	if len(pids) > 1 {
+		t.Errorf("expected single respawn (1 PID), got %d different PIDs: %v", len(pids), pids)
+	}
+
+	t.Logf("concurrent respawn test passed: %d callers, %d unique PIDs", callers, len(pids))
+}
+
+func splitOnSpace(s string) []string {
+	var parts []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' {
+			if i > start {
+				parts = append(parts, s[start:i])
+			}
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		parts = append(parts, s[start:])
+	}
+	return parts
 }
 
 func containsSubstring(s, substr string) bool {

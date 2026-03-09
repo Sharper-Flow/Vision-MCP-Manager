@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jrede/vision/internal/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -201,6 +202,11 @@ type proxySession struct {
 	logger    *slog.Logger
 	onClosed  func(string)
 
+	// clientOpts are the MCP client options used for downstream connections,
+	// retained so that respawnDownstream can create a new session with the
+	// same notification handlers.
+	clientOpts *mcp.ClientOptions
+
 	// mu guards upstreamSession, upstreamSessionID, and currentTools.
 	// InitializedHandler runs concurrently with getServer return.
 	mu                sync.Mutex
@@ -214,6 +220,10 @@ type proxySession struct {
 	downstreamMu     sync.RWMutex
 	downstream       *mcp.ClientSession
 	downstreamClosed bool
+
+	// respawnMu serializes respawn attempts so only one goroutine respawns
+	// at a time. Other callers wait for the result.
+	respawnMu sync.Mutex
 }
 
 // newPerSessionServer creates a new mcp.Server for a single upstream session.
@@ -273,6 +283,7 @@ func newPerSessionServer(
 			ps.handleProgress(ctx, req.Params)
 		},
 	}
+	ps.clientOpts = clientOpts
 
 	// Spawn downstream subprocess with notification handlers.
 	downstream, err := mgr.SpawnSession(ctx, sessionID, clientOpts)
@@ -411,6 +422,7 @@ func (ps *proxySession) handleProgress(ctx context.Context, params *mcp.Progress
 }
 
 // makeProxyToolHandler creates a ToolHandler that forwards calls to the downstream ClientSession.
+// If the downstream is unavailable (reaped, crashed), it attempts a single respawn before failing.
 func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		ps.touch()
@@ -418,14 +430,28 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 			slog.String("tool", toolName),
 		)
 
-		// Snapshot downstream under read lock; reject if closed.
+		// Snapshot downstream under read lock; attempt respawn if closed.
 		ps.downstreamMu.RLock()
 		ds := ps.downstream
 		closed := ps.downstreamClosed
 		ps.downstreamMu.RUnlock()
 
 		if closed || ds == nil {
-			return nil, ErrDownstreamUnavailable
+			ps.logger.Info("downstream unavailable, attempting respawn",
+				slog.String("tool", toolName),
+			)
+			var err error
+			ds, err = ps.respawnDownstream(ctx)
+			if err != nil {
+				ps.logger.Warn("respawn failed, returning unavailable",
+					slog.String("tool", toolName),
+					slog.String("error", err.Error()),
+				)
+				return nil, ErrDownstreamUnavailable
+			}
+			ps.logger.Info("downstream respawned successfully",
+				slog.String("tool", toolName),
+			)
 		}
 
 		result, err := ds.CallTool(ctx, &mcp.CallToolParams{
@@ -448,6 +474,81 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 
 		return result, nil
 	}
+}
+
+// respawnDownstream attempts to create a new downstream session after the
+// previous one was closed (reaped, crashed, etc.). It is serialized via
+// respawnMu so that concurrent tool calls don't spawn multiple subprocesses.
+//
+// On success the proxySession's downstream pointer is updated and tools are
+// re-discovered. Returns the new ClientSession or an error.
+func (ps *proxySession) respawnDownstream(ctx context.Context) (*mcp.ClientSession, error) {
+	ps.respawnMu.Lock()
+	defer ps.respawnMu.Unlock()
+
+	// Double-check: another goroutine may have already respawned while we waited.
+	ps.downstreamMu.RLock()
+	if !ps.downstreamClosed && ps.downstream != nil {
+		ds := ps.downstream
+		ps.downstreamMu.RUnlock()
+		return ds, nil
+	}
+	ps.downstreamMu.RUnlock()
+
+	// Use a bounded context for the respawn attempt.
+	spawnCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	newSessionID := fmt.Sprintf("%s-respawn-%d", ps.sessionID, nextSessionID())
+	ps.logger.Info("respawning downstream session",
+		slog.String("new_session_id", newSessionID),
+	)
+
+	downstream, err := ps.mgr.SpawnSession(spawnCtx, newSessionID, ps.clientOpts)
+	if err != nil {
+		return nil, fmt.Errorf("respawn spawn failed: %w", err)
+	}
+
+	// Re-discover tools from the new downstream.
+	toolsResult, err := downstream.ListTools(spawnCtx, nil)
+	if err != nil {
+		// Best-effort close of the just-spawned session.
+		_ = ps.mgr.RemoveSession(newSessionID)
+		return nil, fmt.Errorf("respawn tools/list failed: %w", err)
+	}
+
+	// Update tool registrations on the upstream server.
+	newToolNames := make(map[string]struct{}, len(toolsResult.Tools))
+	for _, t := range toolsResult.Tools {
+		newToolNames[t.Name] = struct{}{}
+	}
+	for _, tool := range toolsResult.Tools {
+		ps.server.AddTool(tool, makeProxyToolHandler(ps, tool.Name))
+	}
+
+	// Atomically swap the downstream pointer and reset the closed flag.
+	// Reset closeOnce so that the new downstream can be closed cleanly later.
+	ps.downstreamMu.Lock()
+	ps.downstream = downstream
+	ps.downstreamClosed = false
+	ps.closeOnce = sync.Once{}
+	ps.downstreamMu.Unlock()
+
+	// Update the session ID so that touch/close operate on the new session.
+	oldSessionID := ps.sessionID
+	ps.sessionID = newSessionID
+
+	ps.mu.Lock()
+	ps.currentTools = newToolNames
+	ps.mu.Unlock()
+
+	ps.logger.Info("downstream respawn complete",
+		slog.String("old_session", oldSessionID),
+		slog.String("new_session", newSessionID),
+		slog.Int("tools", len(toolsResult.Tools)),
+	)
+
+	return downstream, nil
 }
 
 func (ps *proxySession) touch() {

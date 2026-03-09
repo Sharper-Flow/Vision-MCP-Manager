@@ -121,3 +121,35 @@ Key concurrency fixes:
 1. **ManagedProcess I/O**: `Stdin()` and `Stdout()` are protected by a separate `ioMu` mutex to prevent races between spawn() and accessors.
 2. **HealthChecker mockBridge**: Test mock uses thread-safe setters for concurrent access during recovery tests.
 3. **Daemon management port**: Now configurable via `ManagementPort` in daemon.Config.
+
+## Proxy Downstream Respawn
+
+When a downstream MCP subprocess becomes unavailable (reaped by idle timeout,
+crashed, or otherwise closed), the proxy layer transparently respawns a new
+subprocess on the next tool call instead of returning `ErrDownstreamUnavailable`.
+
+### How It Works
+
+1. `makeProxyToolHandler` detects `downstreamClosed == true` or `downstream == nil`
+2. Calls `proxySession.respawnDownstream()` which:
+   - Acquires `respawnMu` to serialize concurrent respawn attempts
+   - Double-checks the downstream state (another goroutine may have already respawned)
+   - Spawns a new subprocess via `session.Manager.SpawnSession()`
+   - Re-discovers tools from the new downstream
+   - Atomically swaps the downstream pointer and resets the closed flag
+3. If respawn succeeds, the tool call proceeds normally against the new downstream
+4. If respawn fails, `ErrDownstreamUnavailable` is returned as before
+
+### Concurrency Safety
+
+- `respawnMu` ensures only one goroutine spawns a new subprocess
+- Other concurrent callers block on `respawnMu`, then see the already-respawned
+  downstream via the double-check pattern
+- `closeOnce` is reset after respawn so the new downstream can be closed cleanly
+
+### Test Coverage
+
+| Test | What it validates |
+|------|-------------------|
+| `TestProxyHandler_RespawnAfterReap` | Tool call succeeds after downstream is reaped (different PID confirms new subprocess) |
+| `TestProxyHandler_ConcurrentRespawn` | 5 concurrent callers all succeed with only 1 respawn (single PID) |
