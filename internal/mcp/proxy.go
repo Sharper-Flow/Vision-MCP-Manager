@@ -335,8 +335,7 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 
 	if closed || ds == nil {
 		ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
-		var err error
-		ds, err = ps.respawnDownstream(ctx)
+		_, err := ps.respawnDownstream(ctx)
 		if err != nil {
 			ps.logger.Warn("respawn failed during tool list refresh",
 				slog.String("error", err.Error()),
