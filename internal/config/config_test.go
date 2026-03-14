@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -70,7 +71,7 @@ func TestLoad_FileNotFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load() expected error for nonexistent file, got nil")
 	}
-	if !containsError(err, ErrConfigNotFound) {
+	if !errors.Is(err, ErrConfigNotFound) {
 		t.Errorf("Expected ErrConfigNotFound, got: %v", err)
 	}
 }
@@ -85,7 +86,7 @@ func TestLoad_EmptyPath_UsesDefault(t *testing.T) {
 		return
 	}
 	// Should be file not found (unless user has a config there)
-	if !containsError(err, ErrConfigNotFound) {
+	if !errors.Is(err, ErrConfigNotFound) {
 		t.Errorf("Expected ErrConfigNotFound, got: %v", err)
 	}
 }
@@ -196,7 +197,7 @@ servers:
 	if err == nil {
 		t.Fatal("ParseYAML() expected validation error, got nil")
 	}
-	if !containsError(err, ErrInvalidPort) {
+	if !errors.Is(err, ErrInvalidPort) {
 		t.Errorf("Expected ErrInvalidPort, got: %v", err)
 	}
 }

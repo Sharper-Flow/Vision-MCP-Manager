@@ -86,6 +86,12 @@ type ServerConfig struct {
 	// SessionTTL is the absolute maximum lifetime of a session regardless of activity.
 	// 0 means no TTL (sessions only expire via idle timeout or explicit close).
 	SessionTTL Duration `yaml:"session_ttl,omitempty" env:"SESSION_TTL" env-default:"0s"`
+
+	// HealthCheckInterval is how often to probe idle downstream sessions for liveness.
+	// When set, the proxy layer sends periodic tools/list calls to detect dead
+	// subprocesses before a tool call hits the failure path. Must be >= 5s if set.
+	// 0 means use default (30s).
+	HealthCheckInterval Duration `yaml:"health_check_interval,omitempty" env:"HEALTH_CHECK_INTERVAL" env-default:"30s"`
 }
 
 // SupervisionConfig holds global supervisor settings.
@@ -162,15 +168,16 @@ func (d Duration) String() string {
 
 // Validation errors
 var (
-	ErrInvalidPort          = errors.New("config: port must be between 6276 and 6300")
-	ErrDuplicatePort        = errors.New("config: duplicate port assignment")
-	ErrMissingCommand       = errors.New("config: stdio transport requires 'command' field")
-	ErrEmptyCommand         = errors.New("config: command cannot be empty string")
-	ErrMissingURL           = errors.New("config: http/sse transport requires 'url' field")
-	ErrConflictingConfig    = errors.New("config: cannot specify both 'command' and 'url'")
-	ErrInvalidTransport     = errors.New("config: invalid transport type")
-	ErrInvalidRestartPolicy = errors.New("config: invalid restart_policy (must be 'always', 'on-failure', or 'never')")
-	ErrInvalidHTTPURL       = errors.New("config: http transport url must end with '/mcp'")
+	ErrInvalidPort                = errors.New("config: port must be between 6276 and 6300")
+	ErrDuplicatePort              = errors.New("config: duplicate port assignment")
+	ErrMissingCommand             = errors.New("config: stdio transport requires 'command' field")
+	ErrEmptyCommand               = errors.New("config: command cannot be empty string")
+	ErrMissingURL                 = errors.New("config: http/sse transport requires 'url' field")
+	ErrConflictingConfig          = errors.New("config: cannot specify both 'command' and 'url'")
+	ErrInvalidTransport           = errors.New("config: invalid transport type")
+	ErrInvalidRestartPolicy       = errors.New("config: invalid restart_policy (must be 'always', 'on-failure', or 'never')")
+	ErrInvalidHTTPURL             = errors.New("config: http transport url must end with '/mcp'")
+	ErrInvalidHealthCheckInterval = errors.New("config: health_check_interval must be >= 5s")
 )
 
 // InferTransport determines the transport type from config fields.
@@ -242,6 +249,11 @@ func (s *ServerConfig) Validate(name string) error {
 		}
 	}
 
+	// Health check interval validation (0 means use default, >0 must be >= 5s)
+	if s.HealthCheckInterval > 0 && time.Duration(s.HealthCheckInterval) < 5*time.Second {
+		return fmt.Errorf("%w: server %q has health_check_interval %v", ErrInvalidHealthCheckInterval, name, time.Duration(s.HealthCheckInterval))
+	}
+
 	// Restart policy validation
 	switch s.RestartPolicy {
 	case "", RestartAlways, RestartOnFailure, RestartNever:
@@ -289,6 +301,9 @@ func (s *ServerConfig) ApplyDefaults() {
 	}
 	if s.SessionTimeout == 0 {
 		s.SessionTimeout = Duration(5 * time.Minute)
+	}
+	if s.HealthCheckInterval == 0 {
+		s.HealthCheckInterval = Duration(30 * time.Second)
 	}
 }
 

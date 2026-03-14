@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -174,10 +175,10 @@ func TestProxyHandler_EndToEnd(t *testing.T) {
 	t.Logf("proxy result: %s", tc.Text)
 
 	// Verify it contains our message and a PID (proving subprocess was spawned)
-	if !containsSubstring(tc.Text, "hello-proxy") {
+	if !strings.Contains(tc.Text, "hello-proxy") {
 		t.Errorf("expected result to contain 'hello-proxy', got %q", tc.Text)
 	}
-	if !containsSubstring(tc.Text, "pid=") {
+	if !strings.Contains(tc.Text, "pid=") {
 		t.Errorf("expected result to contain 'pid=', got %q", tc.Text)
 	}
 }
@@ -361,7 +362,7 @@ func TestProxyHandler_SessionTeardownIsolation(t *testing.T) {
 		t.Fatalf("expected TextContent, got %T", resultB2.Content[0])
 	}
 
-	if !containsSubstring(tc.Text, "still-alive") {
+	if !strings.Contains(tc.Text, "still-alive") {
 		t.Errorf("expected result to contain 'still-alive', got %q", tc.Text)
 	}
 
@@ -838,8 +839,8 @@ func TestProxySession_CallToolVsClose(t *testing.T) {
 					// What is NOT OK: Vision forwarding a raw "client is closing"
 					// as the tool result error.
 					msg := err.Error()
-					if containsSubstring(msg, "client is closing") &&
-						!containsSubstring(msg, "downstream session unavailable") {
+					if strings.Contains(msg, "client is closing") &&
+						!strings.Contains(msg, "downstream session unavailable") {
 						rawSdkErrors.Store(msg, true)
 					}
 				}
@@ -914,7 +915,7 @@ func TestProxyHandler_RespawnAfterReap(t *testing.T) {
 			text1 = tc.Text
 		}
 	}
-	if !containsSubstring(text1, "before-reap") {
+	if !strings.Contains(text1, "before-reap") {
 		t.Fatalf("expected 'before-reap' in result, got %q", text1)
 	}
 	t.Logf("pre-reap result: %s", text1)
@@ -948,7 +949,7 @@ func TestProxyHandler_RespawnAfterReap(t *testing.T) {
 			text2 = tc.Text
 		}
 	}
-	if !containsSubstring(text2, "after-respawn") {
+	if !strings.Contains(text2, "after-respawn") {
 		t.Fatalf("expected 'after-respawn' in result, got %q", text2)
 	}
 
@@ -1055,8 +1056,8 @@ func TestProxyHandler_ConcurrentRespawn(t *testing.T) {
 	for _, r := range results {
 		if r != "" {
 			// Extract pid= portion
-			for _, part := range splitOnSpace(r) {
-				if containsSubstring(part, "pid=") {
+			for _, part := range strings.Fields(r) {
+				if strings.Contains(part, "pid=") {
 					pids[part] = true
 				}
 			}
@@ -1069,32 +1070,267 @@ func TestProxyHandler_ConcurrentRespawn(t *testing.T) {
 	t.Logf("concurrent respawn test passed: %d callers, %d unique PIDs", callers, len(pids))
 }
 
-func splitOnSpace(s string) []string {
-	var parts []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ' ' {
-			if i > start {
-				parts = append(parts, s[start:i])
-			}
-			start = i + 1
+// TestProxyHandler_IndexCleanupAfterRespawn verifies that after a downstream
+// respawn, the old session ID is removed from the session manager and the new
+// session ID is present. This prevents admission counter leaks and ensures
+// touch/close operate on the correct session.
+//
+// The critical assertion is that a second reap+respawn cycle works correctly,
+// which proves the session index (idx.byDownstream) was updated after the first
+// respawn. If the index still has the old key, the second reap's onSessionRemoved
+// callback won't find the proxy session, breaking the cleanup chain.
+func TestProxyHandler_IndexCleanupAfterRespawn(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := &config.ServerConfig{
+		Command:        "node",
+		Args:           []string{"-e", echoMCPServerJS},
+		Port:           16300,
+		Autostart:      true,
+		RestartPolicy:  config.RestartOnFailure,
+		SessionTimeout: config.Duration(30 * time.Second),
+		MaxSessions:    2, // Low limit to catch admission leaks
+	}
+
+	mgr := session.NewManager("test-index-cleanup", cfg, logger)
+	defer mgr.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:     "test-index-cleanup",
+		SessionManager: mgr,
+		Logger:         logger,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// Connect as an MCP client.
+	client := mcp.NewClient(&mcp.Implementation{
+		Name:    "index-cleanup-client",
+		Version: "1.0.0",
+	}, nil)
+
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer sess.Close()
+
+	// Verify initial tool call works.
+	if _, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "initial"},
+	}); err != nil {
+		t.Fatalf("initial CallTool failed: %v", err)
+	}
+
+	// --- First reap+respawn cycle ---
+
+	oldIDs1 := mgr.Sessions()
+	if len(oldIDs1) != 1 {
+		t.Fatalf("expected 1 session before first reap, got %d", len(oldIDs1))
+	}
+
+	for _, id := range oldIDs1 {
+		if err := mgr.RemoveSession(id); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+			t.Fatalf("first RemoveSession: %v", err)
 		}
 	}
-	if start < len(s) {
-		parts = append(parts, s[start:])
+	time.Sleep(100 * time.Millisecond)
+
+	// Tool call triggers first respawn.
+	result1, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "after-respawn-1"},
+	})
+	if err != nil {
+		t.Fatalf("first respawn CallTool failed: %v", err)
 	}
-	return parts
-}
-
-func containsSubstring(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && findSubstring(s, substr))
-}
-
-func findSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
+	text1 := ""
+	if len(result1.Content) > 0 {
+		if tc, ok := result1.Content[0].(*mcp.TextContent); ok {
+			text1 = tc.Text
 		}
 	}
-	return false
+	if !strings.Contains(text1, "after-respawn-1") {
+		t.Fatalf("expected 'after-respawn-1', got %q", text1)
+	}
+
+	// Verify old session is gone and new session exists.
+	for _, oldID := range oldIDs1 {
+		if tracked := mgr.GetSession(oldID); tracked != nil {
+			t.Errorf("old session %q still in manager after first respawn", oldID)
+		}
+	}
+	if count := mgr.SessionCount(); count != 1 {
+		t.Fatalf("expected 1 session after first respawn, got %d (admission leak)", count)
+	}
+
+	// --- Second reap+respawn cycle (proves index was updated) ---
+
+	oldIDs2 := mgr.Sessions()
+	if len(oldIDs2) != 1 {
+		t.Fatalf("expected 1 session before second reap, got %d", len(oldIDs2))
+	}
+
+	// Verify the new session ID differs from the first.
+	if oldIDs2[0] == oldIDs1[0] {
+		t.Fatalf("session ID unchanged after first respawn: %q", oldIDs2[0])
+	}
+
+	for _, id := range oldIDs2 {
+		if err := mgr.RemoveSession(id); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+			t.Fatalf("second RemoveSession: %v", err)
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Tool call triggers second respawn. If the index wasn't updated after the
+	// first respawn, the onSessionRemoved callback won't find the proxy session
+	// for the second reap, and closeDownstream won't be called — causing the
+	// respawn to fail or the session count to leak.
+	result2, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "after-respawn-2"},
+	})
+	if err != nil {
+		t.Fatalf("second respawn CallTool failed: %v", err)
+	}
+	text2 := ""
+	if len(result2.Content) > 0 {
+		if tc, ok := result2.Content[0].(*mcp.TextContent); ok {
+			text2 = tc.Text
+		}
+	}
+	if !strings.Contains(text2, "after-respawn-2") {
+		t.Fatalf("expected 'after-respawn-2', got %q", text2)
+	}
+
+	// Final assertions: no admission leak, old sessions gone.
+	for _, oldID := range oldIDs2 {
+		if tracked := mgr.GetSession(oldID); tracked != nil {
+			t.Errorf("old session %q still in manager after second respawn", oldID)
+		}
+	}
+	if count := mgr.SessionCount(); count != 1 {
+		t.Errorf("expected 1 session after second respawn, got %d (admission leak)", count)
+	}
+
+	t.Logf("index cleanup test passed: two reap+respawn cycles, session count=%d", mgr.SessionCount())
+}
+
+// TestProxyHandler_ProactiveHealthCheck verifies that the per-session health
+// probe detects a dead downstream subprocess and triggers closeDownstream
+// before any tool call hits the failure path. The next tool call then
+// transparently respawns a new downstream.
+func TestProxyHandler_ProactiveHealthCheck(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := &config.ServerConfig{
+		Command:             "node",
+		Args:                []string{"-e", echoMCPServerJS},
+		Port:                16301,
+		Autostart:           true,
+		RestartPolicy:       config.RestartOnFailure,
+		SessionTimeout:      config.Duration(30 * time.Second),
+		MaxSessions:         10,
+		HealthCheckInterval: config.Duration(100 * time.Millisecond), // Very fast for testing
+	}
+
+	mgr := session.NewManager("test-health-probe", cfg, logger)
+	defer mgr.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:          "test-health-probe",
+		SessionManager:      mgr,
+		Logger:              logger,
+		HealthCheckInterval: 100 * time.Millisecond,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// Connect as an MCP client.
+	client := mcp.NewClient(&mcp.Implementation{
+		Name:    "health-probe-client",
+		Version: "1.0.0",
+	}, nil)
+
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer sess.Close()
+
+	// Verify initial tool call works.
+	result1, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "before-kill"},
+	})
+	if err != nil {
+		t.Fatalf("pre-kill CallTool failed: %v", err)
+	}
+	text1 := ""
+	if len(result1.Content) > 0 {
+		if tc, ok := result1.Content[0].(*mcp.TextContent); ok {
+			text1 = tc.Text
+		}
+	}
+	t.Logf("pre-kill result: %s", text1)
+
+	// Simulate an external downstream crash by closing the tracked downstream
+	// client session directly while leaving the manager entry in place. This
+	// forces the background probe to detect the dead connection; it does NOT go
+	// through RemoveSession/onSessionRemoved.
+	sessionIDs := mgr.Sessions()
+	if len(sessionIDs) != 1 {
+		t.Fatalf("expected exactly one active session, got %d", len(sessionIDs))
+	}
+	tracked := mgr.GetSession(sessionIDs[0])
+	if tracked == nil || tracked.Downstream == nil {
+		t.Fatal("expected tracked downstream session before simulated crash")
+	}
+	if err := tracked.Downstream.Close(); err != nil {
+		t.Fatalf("failed to close downstream client session: %v", err)
+	}
+
+	// Wait for the health probe to observe 3 consecutive failures and call
+	// closeDownstream. 100ms interval + threshold 3 + scheduling slack.
+	time.Sleep(700 * time.Millisecond)
+
+	// The manager entry should still exist until respawn cleanup runs; the key
+	// signal is that the next tool call succeeds via respawn rather than leaking
+	// ErrDownstreamUnavailable.
+
+	// The next tool call should trigger respawn and succeed.
+	result2, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "after-health-respawn"},
+	})
+	if err != nil {
+		t.Fatalf("post-health-check CallTool failed (respawn should have succeeded): %v", err)
+	}
+
+	text2 := ""
+	if len(result2.Content) > 0 {
+		if tc, ok := result2.Content[0].(*mcp.TextContent); ok {
+			text2 = tc.Text
+		}
+	}
+	if !strings.Contains(text2, "after-health-respawn") {
+		t.Fatalf("expected 'after-health-respawn' in result, got %q", text2)
+	}
+
+	// Verify session count is 1 (no leak).
+	if count := mgr.SessionCount(); count != 1 {
+		t.Errorf("expected 1 session after health respawn, got %d", count)
+	}
+
+	t.Logf("proactive health check test passed: probe-triggered respawn succeeded, count=%d", mgr.SessionCount())
 }

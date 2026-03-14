@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -229,7 +230,7 @@ func TestServerConfig_Validate(t *testing.T) {
 			} else {
 				if err == nil {
 					t.Errorf("Validate() expected error %v, got nil", tt.wantErr)
-				} else if !containsError(err, tt.wantErr) {
+				} else if !errors.Is(err, tt.wantErr) {
 					t.Errorf("Validate() error = %v, want %v", err, tt.wantErr)
 				}
 			}
@@ -300,8 +301,8 @@ func TestConfig_Validate(t *testing.T) {
 			} else {
 				if err == nil {
 					t.Errorf("Validate() expected error %v, got nil", tt.wantErr)
-				} else if !containsError(err, tt.wantErr) {
-					t.Errorf("Validate() error = %v, want %v", err, tt.wantErr)
+				} else if !errors.Is(err, tt.wantErr) {
+					t.Errorf("Config.Validate() error = %v, want %v", err, tt.wantErr)
 				}
 			}
 		})
@@ -325,6 +326,63 @@ func TestServerConfig_ApplyDefaults(t *testing.T) {
 	if s.SessionTimeout.Duration() != 5*time.Minute {
 		t.Errorf("SessionTimeout = %v, want 5m", s.SessionTimeout)
 	}
+}
+
+func TestServerConfig_HealthCheckInterval(t *testing.T) {
+	t.Run("default is 30s when not set", func(t *testing.T) {
+		s := &ServerConfig{Port: 6276, Command: "echo"}
+		s.ApplyDefaults()
+		if s.HealthCheckInterval.Duration() != 30*time.Second {
+			t.Errorf("HealthCheckInterval = %v, want 30s", s.HealthCheckInterval)
+		}
+	})
+
+	t.Run("custom value is preserved", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                6276,
+			Command:             "echo",
+			HealthCheckInterval: Duration(60 * time.Second),
+		}
+		s.ApplyDefaults()
+		if s.HealthCheckInterval.Duration() != 60*time.Second {
+			t.Errorf("HealthCheckInterval = %v, want 60s", s.HealthCheckInterval)
+		}
+	})
+
+	t.Run("validation rejects interval less than 5s", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                6276,
+			Command:             "echo",
+			HealthCheckInterval: Duration(1 * time.Second),
+		}
+		err := s.Validate("test")
+		if !errors.Is(err, ErrInvalidHealthCheckInterval) {
+			t.Errorf("expected ErrInvalidHealthCheckInterval, got %v", err)
+		}
+	})
+
+	t.Run("validation accepts interval of 5s", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                6276,
+			Command:             "echo",
+			HealthCheckInterval: Duration(5 * time.Second),
+		}
+		err := s.Validate("test")
+		if err != nil {
+			t.Errorf("unexpected validation error for HealthCheckInterval = 5s: %v", err)
+		}
+	})
+
+	t.Run("validation accepts zero (uses default)", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:    6276,
+			Command: "echo",
+		}
+		err := s.Validate("test")
+		if err != nil {
+			t.Errorf("unexpected validation error for zero HealthCheckInterval: %v", err)
+		}
+	})
 }
 
 func TestSupervisionConfig_ApplyDefaults(t *testing.T) {
@@ -371,24 +429,4 @@ func TestDuration_String(t *testing.T) {
 	if d.String() != "30s" {
 		t.Errorf("Duration.String() = %q, want %q", d.String(), "30s")
 	}
-}
-
-// containsError checks if err wraps or equals target.
-func containsError(err, target error) bool {
-	if err == nil || target == nil {
-		return err == target
-	}
-	// Check if the error message contains the target error message
-	return err.Error() != "" && target.Error() != "" &&
-		(err == target ||
-			err.Error() == target.Error() ||
-			len(err.Error()) > len(target.Error()) &&
-				err.Error()[:len(target.Error())] == target.Error()[:min(len(err.Error()), len(target.Error()))])
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

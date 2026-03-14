@@ -452,9 +452,10 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 
 	// Create the streamable proxy handler
 	handler := mcp.NewProxyHandler(mcp.ProxyConfig{
-		ServerName:     srv.Name,
-		SessionManager: mgr,
-		Logger:         d.logger,
+		ServerName:          srv.Name,
+		SessionManager:      mgr,
+		Logger:              d.logger,
+		HealthCheckInterval: srv.Config.HealthCheckInterval.Duration(),
 	})
 
 	// Build security config from daemon-wide settings (read under lock).
