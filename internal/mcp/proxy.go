@@ -62,6 +62,16 @@ type ProxyConfig struct {
 	// HealthCheckInterval is how often to probe idle downstream sessions.
 	// 0 means no proactive health checking (reactive respawn only).
 	HealthCheckInterval time.Duration
+
+	// RequestTimeout is the default downstream tool-call deadline when the
+	// upstream request has no earlier deadline.
+	RequestTimeout time.Duration
+
+	// RetryConfig controls retry behavior for retryable downstream failures.
+	RetryConfig RetryConfig
+
+	// CircuitBreakerConfig controls fast-fail behavior after repeated failures.
+	CircuitBreakerConfig CircuitBreakerConfig
 }
 
 // NewProxyHandler creates a StreamableHTTPHandler that proxies MCP requests
@@ -111,6 +121,9 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			cfg.SessionManager,
 			logger,
 			cfg.HealthCheckInterval,
+			cfg.RequestTimeout,
+			cfg.RetryConfig,
+			cfg.CircuitBreakerConfig,
 			func(upstreamSessionID string, ps *proxySession) {
 				idx.mu.Lock()
 				idx.byUpstream[upstreamSessionID] = ps
@@ -212,11 +225,12 @@ func isInitializeRequest(r *http.Request) bool {
 // proxySession holds the state for a single proxied session, used to relay
 // notifications from downstream to the upstream ServerSession.
 type proxySession struct {
-	server    *mcp.Server
-	sessionID string
-	mgr       *session.Manager
-	logger    *slog.Logger
-	onClosed  func(string)
+	serverName string
+	server     *mcp.Server
+	sessionID  string
+	mgr        *session.Manager
+	logger     *slog.Logger
+	onClosed   func(string)
 
 	// onRespawn is called after a successful downstream respawn to update
 	// external indexes (e.g., idx.byDownstream). It receives the old and new
@@ -233,6 +247,9 @@ type proxySession struct {
 	// healthCheckInterval is the interval for proactive downstream health probes.
 	// 0 means no proactive health checking.
 	healthCheckInterval time.Duration
+	requestTimeout      time.Duration
+	retryConfig         RetryConfig
+	circuitBreaker      *circuitBreaker
 
 	// healthProbeCancel stops the active health probe goroutine.
 	// nil when no probe is running.
@@ -268,6 +285,9 @@ func newPerSessionServer(
 	mgr *session.Manager,
 	logger *slog.Logger,
 	healthCheckInterval time.Duration,
+	requestTimeout time.Duration,
+	retryConfig RetryConfig,
+	circuitBreakerConfig CircuitBreakerConfig,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
 	onRespawn func(oldSessionID, newSessionID string, ps *proxySession),
@@ -278,12 +298,31 @@ func newPerSessionServer(
 	// Create the proxy session state that will be shared between the upstream
 	// server and the downstream notification handlers.
 	ps := &proxySession{
+		serverName:          serverName,
 		sessionID:           sessionID,
 		mgr:                 mgr,
 		logger:              logger,
 		onClosed:            onClosed,
 		onRespawn:           onRespawn,
 		healthCheckInterval: healthCheckInterval,
+		requestTimeout:      requestTimeout,
+		retryConfig:         retryConfig,
+		circuitBreaker:      newCircuitBreaker(circuitBreakerConfig, nil),
+	}
+	if ps.requestTimeout <= 0 {
+		ps.requestTimeout = 30 * time.Second
+	}
+	if ps.retryConfig.MaxAttempts <= 0 {
+		ps.retryConfig.MaxAttempts = 1
+	}
+	if ps.retryConfig.InitialDelay <= 0 {
+		ps.retryConfig.InitialDelay = 100 * time.Millisecond
+	}
+	if ps.retryConfig.MaxDelay <= 0 {
+		ps.retryConfig.MaxDelay = 5 * time.Second
+	}
+	if len(ps.retryConfig.RetryableErrors) == 0 {
+		ps.retryConfig.RetryableErrors = []string{"timeout", "429", "502", "503", "econnreset", "econnrefused", "enetunreach"}
 	}
 
 	// Create the upstream server with tools capability advertised.
@@ -480,49 +519,103 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 			slog.String("tool", toolName),
 		)
 
-		// Snapshot downstream under read lock; attempt respawn if closed.
-		ps.downstreamMu.RLock()
-		ds := ps.downstream
-		closed := ps.downstreamClosed
-		ps.downstreamMu.RUnlock()
-
-		if closed || ds == nil {
-			ps.logger.Info("downstream unavailable, attempting respawn",
+		if ps.circuitBreaker != nil && !ps.circuitBreaker.allow() {
+			err := &CircuitOpenError{Server: ps.serverName, RetryIn: ps.circuitBreaker.retryIn()}
+			ps.logger.Warn("circuit breaker open, failing fast",
 				slog.String("tool", toolName),
-			)
-			var err error
-			ds, err = ps.respawnDownstream(ctx, "tool_call")
-			if err != nil {
-				ps.logger.Warn("respawn failed, returning unavailable",
-					slog.String("tool", toolName),
-					slog.String("error", err.Error()),
-				)
-				return nil, ErrDownstreamUnavailable
-			}
-			ps.logger.Info("downstream respawned successfully",
-				slog.String("tool", toolName),
-			)
-		}
-
-		result, err := ds.CallTool(ctx, &mcp.CallToolParams{
-			Name:      req.Params.Name,
-			Arguments: req.Params.Arguments,
-		})
-		if err != nil {
-			if isDownstreamClosureError(err) {
-				ps.logger.Debug("downstream closed during tool call",
-					slog.String("tool", toolName),
-				)
-				return nil, ErrDownstreamUnavailable
-			}
-			ps.logger.Error("downstream tool call failed",
-				slog.String("tool", toolName),
-				slog.String("error", err.Error()),
+				slog.Duration("retry_in", err.RetryIn),
 			)
 			return nil, err
 		}
 
-		return result, nil
+		var lastErr error
+		for attempt := 1; attempt <= ps.retryConfig.MaxAttempts; attempt++ {
+			attemptCtx := ctx
+			cancel := func() {}
+			if timeout := effectiveRequestTimeout(ctx, ps.requestTimeout); timeout > 0 {
+				attemptCtx, cancel = context.WithTimeout(ctx, timeout)
+			}
+
+			ps.downstreamMu.RLock()
+			ds := ps.downstream
+			closed := ps.downstreamClosed
+			ps.downstreamMu.RUnlock()
+
+			if closed || ds == nil {
+				ps.logger.Info("downstream unavailable, attempting respawn",
+					slog.String("tool", toolName),
+					slog.Int("attempt", attempt),
+				)
+				var err error
+				ds, err = ps.respawnDownstream(attemptCtx, "tool_call")
+				if err != nil {
+					cancel()
+					lastErr = ErrDownstreamUnavailable
+				} else {
+					ps.logger.Info("downstream respawned successfully",
+						slog.String("tool", toolName),
+						slog.Int("attempt", attempt),
+					)
+					result, err := ds.CallTool(attemptCtx, &mcp.CallToolParams{
+						Name:      req.Params.Name,
+						Arguments: req.Params.Arguments,
+					})
+					cancel()
+					if err == nil {
+						ps.circuitBreaker.recordSuccess()
+						return result, nil
+					}
+					if isDownstreamClosureError(err) {
+						lastErr = ErrDownstreamUnavailable
+					} else {
+						lastErr = err
+					}
+				}
+			} else {
+				result, err := ds.CallTool(attemptCtx, &mcp.CallToolParams{
+					Name:      req.Params.Name,
+					Arguments: req.Params.Arguments,
+				})
+				cancel()
+				if err == nil {
+					ps.circuitBreaker.recordSuccess()
+					return result, nil
+				}
+				if isDownstreamClosureError(err) {
+					ps.logger.Debug("downstream closed during tool call",
+						slog.String("tool", toolName),
+						slog.Int("attempt", attempt),
+					)
+					lastErr = ErrDownstreamUnavailable
+				} else {
+					lastErr = err
+				}
+			}
+
+			if !isRetryableToolCallError(lastErr, ps.retryConfig.RetryableErrors) || attempt == ps.retryConfig.MaxAttempts {
+				break
+			}
+
+			delay := computeBackoffDelay(attempt, ps.retryConfig.InitialDelay, ps.retryConfig.MaxDelay)
+			ps.logger.Warn("retrying downstream tool call",
+				slog.String("tool", toolName),
+				slog.Int("attempt", attempt),
+				slog.Duration("backoff", delay),
+				slog.String("error", lastErr.Error()),
+			)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		ps.circuitBreaker.recordFailure()
+		ps.logger.Error("downstream tool call failed",
+			slog.String("tool", toolName),
+			slog.String("error", lastErr.Error()),
+		)
+		return nil, lastErr
 	}
 }
 

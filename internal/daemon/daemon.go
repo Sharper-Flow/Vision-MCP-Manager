@@ -456,6 +456,17 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		SessionManager:      mgr,
 		Logger:              d.logger,
 		HealthCheckInterval: srv.Config.HealthCheckInterval.Duration(),
+		RequestTimeout:      srv.Config.RequestTimeout.Duration(),
+		RetryConfig: mcp.RetryConfig{
+			MaxAttempts:     srv.Config.Retry.MaxAttempts,
+			InitialDelay:    srv.Config.Retry.InitialDelay.Duration(),
+			MaxDelay:        srv.Config.Retry.MaxDelay.Duration(),
+			RetryableErrors: append([]string(nil), srv.Config.Retry.RetryableErrors...),
+		},
+		CircuitBreakerConfig: mcp.CircuitBreakerConfig{
+			FailureThreshold: srv.Config.CircuitBreaker.FailureThreshold,
+			RecoveryTimeout:  srv.Config.CircuitBreaker.RecoveryTimeout.Duration(),
+		},
 	})
 
 	// Build security config from daemon-wide settings (read under lock).
