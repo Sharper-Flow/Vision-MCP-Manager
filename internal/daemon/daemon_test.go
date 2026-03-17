@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jrede/vision/internal/config"
 )
 
 // --- PID File Tests ---
@@ -182,6 +184,50 @@ func TestDaemonStatus_Structure(t *testing.T) {
 
 	if status.ConfigPath != "/test/path" {
 		t.Errorf("expected /test/path, got %s", status.ConfigPath)
+	}
+}
+
+func TestReload_ReplacesUpdatedServerConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "servers.yaml")
+
+	initial := []byte("servers:\n  echo:\n    port: 6276\n    command: echo\n    autostart: false\n    request_timeout: 30s\n")
+	if err := os.WriteFile(configPath, initial, 0o644); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d, err := New(Config{ConfigPath: configPath, Logger: logger})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := d.registry.Add("echo", d.cfg.Servers["echo"]); err != nil {
+		t.Fatalf("registry.Add: %v", err)
+	}
+	d.running = true
+
+	updated := []byte("servers:\n  echo:\n    port: 6276\n    command: echo\n    autostart: false\n    request_timeout: 45s\n")
+	if err := os.WriteFile(configPath, updated, 0o644); err != nil {
+		t.Fatalf("write updated config: %v", err)
+	}
+
+	if err := d.Reload(); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	srv := d.registry.Get("echo")
+	if srv == nil {
+		t.Fatal("expected server to remain in registry")
+	}
+	if got := srv.Config.RequestTimeout.Duration(); got != 45*time.Second {
+		t.Fatalf("RequestTimeout = %v, want 45s", got)
+	}
+	if got := d.cfg.Servers["echo"].RequestTimeout.Duration(); got != 45*time.Second {
+		t.Fatalf("daemon cfg RequestTimeout = %v, want 45s", got)
+	}
+	if srv.Config.RequestTimeout != config.Duration(45*time.Second) {
+		t.Fatalf("registry server config timeout = %v, want 45s", srv.Config.RequestTimeout)
 	}
 }
 

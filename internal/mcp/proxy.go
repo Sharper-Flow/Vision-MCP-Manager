@@ -43,6 +43,11 @@ import (
 // is attempted after the downstream session has been closed.
 var ErrDownstreamUnavailable = errors.New("downstream session unavailable")
 
+// closeReasonHealthCheck is the canonical close reason used when the proactive
+// health probe detects a dead downstream. Used to emit session.health_respawn
+// events after a successful respawn.
+const closeReasonHealthCheck = "health check failed"
+
 // ProxyConfig configures a per-session proxy handler.
 type ProxyConfig struct {
 	// ServerName is the name of the MCP server being proxied.
@@ -53,6 +58,20 @@ type ProxyConfig struct {
 
 	// Logger for proxy operations.
 	Logger *slog.Logger
+
+	// HealthCheckInterval is how often to probe idle downstream sessions.
+	// 0 means no proactive health checking (reactive respawn only).
+	HealthCheckInterval time.Duration
+
+	// RequestTimeout is the default downstream tool-call deadline when the
+	// upstream request has no earlier deadline.
+	RequestTimeout time.Duration
+
+	// RetryConfig controls retry behavior for retryable downstream failures.
+	RetryConfig RetryConfig
+
+	// CircuitBreakerConfig controls fast-fail behavior after repeated failures.
+	CircuitBreakerConfig CircuitBreakerConfig
 }
 
 // NewProxyHandler creates a StreamableHTTPHandler that proxies MCP requests
@@ -101,6 +120,10 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			cfg.ServerName,
 			cfg.SessionManager,
 			logger,
+			cfg.HealthCheckInterval,
+			cfg.RequestTimeout,
+			cfg.RetryConfig,
+			cfg.CircuitBreakerConfig,
 			func(upstreamSessionID string, ps *proxySession) {
 				idx.mu.Lock()
 				idx.byUpstream[upstreamSessionID] = ps
@@ -114,6 +137,12 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				if ps != nil {
 					delete(idx.byDownstream, ps.sessionID)
 				}
+				idx.mu.Unlock()
+			},
+			func(oldSessionID, newSessionID string, ps *proxySession) {
+				idx.mu.Lock()
+				delete(idx.byDownstream, oldSessionID)
+				idx.byDownstream[newSessionID] = ps
 				idx.mu.Unlock()
 			},
 		)
@@ -196,16 +225,35 @@ func isInitializeRequest(r *http.Request) bool {
 // proxySession holds the state for a single proxied session, used to relay
 // notifications from downstream to the upstream ServerSession.
 type proxySession struct {
-	server    *mcp.Server
-	sessionID string
-	mgr       *session.Manager
-	logger    *slog.Logger
-	onClosed  func(string)
+	serverName string
+	server     *mcp.Server
+	sessionID  string
+	mgr        *session.Manager
+	logger     *slog.Logger
+	onClosed   func(string)
+
+	// onRespawn is called after a successful downstream respawn to update
+	// external indexes (e.g., idx.byDownstream). It receives the old and new
+	// downstream session IDs plus the proxySession pointer so the caller can
+	// atomically swap the index entry without needing to look up by old key
+	// (which may have been deleted by closeDownstream's onClosed callback).
+	onRespawn func(oldSessionID, newSessionID string, ps *proxySession)
 
 	// clientOpts are the MCP client options used for downstream connections,
 	// retained so that respawnDownstream can create a new session with the
 	// same notification handlers.
 	clientOpts *mcp.ClientOptions
+
+	// healthCheckInterval is the interval for proactive downstream health probes.
+	// 0 means no proactive health checking.
+	healthCheckInterval time.Duration
+	requestTimeout      time.Duration
+	retryConfig         RetryConfig
+	circuitBreaker      *circuitBreaker
+
+	// healthProbeCancel stops the active health probe goroutine.
+	// nil when no probe is running.
+	healthProbeCancel context.CancelFunc
 
 	// mu guards upstreamSession, upstreamSessionID, and currentTools.
 	// InitializedHandler runs concurrently with getServer return.
@@ -213,6 +261,8 @@ type proxySession struct {
 	upstreamSession   *mcp.ServerSession
 	upstreamSessionID string
 	currentTools      map[string]struct{}
+	closeReason       string
+	closeMu           sync.Mutex
 	closeOnce         sync.Once
 
 	// downstreamMu guards downstream and downstreamClosed.
@@ -234,8 +284,13 @@ func newPerSessionServer(
 	serverName string,
 	mgr *session.Manager,
 	logger *slog.Logger,
+	healthCheckInterval time.Duration,
+	requestTimeout time.Duration,
+	retryConfig RetryConfig,
+	circuitBreakerConfig CircuitBreakerConfig,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
+	onRespawn func(oldSessionID, newSessionID string, ps *proxySession),
 ) (*mcp.Server, error) {
 	sessionID := fmt.Sprintf("proxy-%s-%d", serverName, nextSessionID())
 	logger = logger.With(slog.String("session_id", sessionID))
@@ -243,10 +298,31 @@ func newPerSessionServer(
 	// Create the proxy session state that will be shared between the upstream
 	// server and the downstream notification handlers.
 	ps := &proxySession{
-		sessionID: sessionID,
-		mgr:       mgr,
-		logger:    logger,
-		onClosed:  onClosed,
+		serverName:          serverName,
+		sessionID:           sessionID,
+		mgr:                 mgr,
+		logger:              logger,
+		onClosed:            onClosed,
+		onRespawn:           onRespawn,
+		healthCheckInterval: healthCheckInterval,
+		requestTimeout:      requestTimeout,
+		retryConfig:         retryConfig,
+		circuitBreaker:      newCircuitBreaker(circuitBreakerConfig, nil),
+	}
+	if ps.requestTimeout <= 0 {
+		ps.requestTimeout = 30 * time.Second
+	}
+	if ps.retryConfig.MaxAttempts <= 0 {
+		ps.retryConfig.MaxAttempts = 1
+	}
+	if ps.retryConfig.InitialDelay <= 0 {
+		ps.retryConfig.InitialDelay = 100 * time.Millisecond
+	}
+	if ps.retryConfig.MaxDelay <= 0 {
+		ps.retryConfig.MaxDelay = 5 * time.Second
+	}
+	if len(ps.retryConfig.RetryableErrors) == 0 {
+		ps.retryConfig.RetryableErrors = []string{"timeout", "429", "502", "503", "econnreset", "econnrefused", "enetunreach"}
 	}
 
 	// Create the upstream server with tools capability advertised.
@@ -317,6 +393,9 @@ func newPerSessionServer(
 		slog.Int("tools", len(toolsResult.Tools)),
 	)
 
+	// Start proactive health probe if configured.
+	ps.startHealthProbe()
+
 	return server, nil
 }
 
@@ -335,7 +414,7 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 
 	if closed || ds == nil {
 		ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
-		_, err := ps.respawnDownstream(ctx)
+		_, err := ps.respawnDownstream(ctx, "notification_relay")
 		if err != nil {
 			ps.logger.Warn("respawn failed during tool list refresh",
 				slog.String("error", err.Error()),
@@ -440,49 +519,99 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 			slog.String("tool", toolName),
 		)
 
-		// Snapshot downstream under read lock; attempt respawn if closed.
-		ps.downstreamMu.RLock()
-		ds := ps.downstream
-		closed := ps.downstreamClosed
-		ps.downstreamMu.RUnlock()
-
-		if closed || ds == nil {
-			ps.logger.Info("downstream unavailable, attempting respawn",
+		if ps.circuitBreaker != nil && !ps.circuitBreaker.allow() {
+			err := &CircuitOpenError{Server: ps.serverName, RetryIn: ps.circuitBreaker.retryIn()}
+			ps.logger.Warn("circuit breaker open, failing fast",
 				slog.String("tool", toolName),
-			)
-			var err error
-			ds, err = ps.respawnDownstream(ctx)
-			if err != nil {
-				ps.logger.Warn("respawn failed, returning unavailable",
-					slog.String("tool", toolName),
-					slog.String("error", err.Error()),
-				)
-				return nil, ErrDownstreamUnavailable
-			}
-			ps.logger.Info("downstream respawned successfully",
-				slog.String("tool", toolName),
-			)
-		}
-
-		result, err := ds.CallTool(ctx, &mcp.CallToolParams{
-			Name:      req.Params.Name,
-			Arguments: req.Params.Arguments,
-		})
-		if err != nil {
-			if isDownstreamClosureError(err) {
-				ps.logger.Debug("downstream closed during tool call",
-					slog.String("tool", toolName),
-				)
-				return nil, ErrDownstreamUnavailable
-			}
-			ps.logger.Error("downstream tool call failed",
-				slog.String("tool", toolName),
-				slog.String("error", err.Error()),
+				slog.Duration("retry_in", err.RetryIn),
 			)
 			return nil, err
 		}
 
-		return result, nil
+		var lastErr error
+		requestCtx, requestCancel := withRequestTimeoutBudget(ctx, ps.requestTimeout)
+		defer requestCancel()
+
+		for attempt := 1; attempt <= ps.retryConfig.MaxAttempts; attempt++ {
+			ps.downstreamMu.RLock()
+			ds := ps.downstream
+			closed := ps.downstreamClosed
+			ps.downstreamMu.RUnlock()
+
+			if closed || ds == nil {
+				ps.logger.Info("downstream unavailable, attempting respawn",
+					slog.String("tool", toolName),
+					slog.Int("attempt", attempt),
+				)
+				var err error
+				ds, err = ps.respawnDownstream(requestCtx, "tool_call")
+				if err != nil {
+					lastErr = ErrDownstreamUnavailable
+				} else {
+					ps.logger.Info("downstream respawned successfully",
+						slog.String("tool", toolName),
+						slog.Int("attempt", attempt),
+					)
+					result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
+						Name:      req.Params.Name,
+						Arguments: req.Params.Arguments,
+					})
+					if err == nil {
+						ps.circuitBreaker.recordSuccess()
+						return result, nil
+					}
+					if isDownstreamClosureError(err) {
+						lastErr = ErrDownstreamUnavailable
+					} else {
+						lastErr = err
+					}
+				}
+			} else {
+				result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
+					Name:      req.Params.Name,
+					Arguments: req.Params.Arguments,
+				})
+				if err == nil {
+					ps.circuitBreaker.recordSuccess()
+					return result, nil
+				}
+				if isDownstreamClosureError(err) {
+					ps.logger.Debug("downstream closed during tool call",
+						slog.String("tool", toolName),
+						slog.Int("attempt", attempt),
+					)
+					lastErr = ErrDownstreamUnavailable
+				} else {
+					lastErr = err
+				}
+			}
+
+			if !isRetryableToolCallError(lastErr, ps.retryConfig.RetryableErrors) || attempt == ps.retryConfig.MaxAttempts {
+				break
+			}
+
+			delay := computeBackoffDelay(attempt, ps.retryConfig.InitialDelay, ps.retryConfig.MaxDelay)
+			ps.logger.Warn("retrying downstream tool call",
+				slog.String("tool", toolName),
+				slog.Int("attempt", attempt),
+				slog.Duration("backoff", delay),
+				slog.String("error", lastErr.Error()),
+			)
+			select {
+			case <-requestCtx.Done():
+				return nil, requestCtx.Err()
+			case <-time.After(delay):
+			}
+		}
+
+		if shouldRecordCircuitFailure(lastErr, ps.retryConfig.RetryableErrors) {
+			ps.circuitBreaker.recordFailure()
+		}
+		ps.logger.Error("downstream tool call failed",
+			slog.String("tool", toolName),
+			slog.String("error", lastErr.Error()),
+		)
+		return nil, lastErr
 	}
 }
 
@@ -492,7 +621,7 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 //
 // On success the proxySession's downstream pointer is updated and tools are
 // re-discovered. Returns the new ClientSession or an error.
-func (ps *proxySession) respawnDownstream(ctx context.Context) (*mcp.ClientSession, error) {
+func (ps *proxySession) respawnDownstream(ctx context.Context, trigger string) (*mcp.ClientSession, error) {
 	ps.respawnMu.Lock()
 	defer ps.respawnMu.Unlock()
 
@@ -510,12 +639,23 @@ func (ps *proxySession) respawnDownstream(ctx context.Context) (*mcp.ClientSessi
 	defer cancel()
 
 	newSessionID := fmt.Sprintf("%s-respawn-%d", ps.sessionID, nextSessionID())
+	ps.mu.Lock()
+	previousCloseReason := ps.closeReason
+	ps.mu.Unlock()
 	ps.logger.Info("respawning downstream session",
+		slog.String("event", "session.respawn_start"),
+		slog.String("trigger", trigger),
 		slog.String("new_session_id", newSessionID),
 	)
 
 	downstream, err := ps.mgr.SpawnSession(spawnCtx, newSessionID, ps.clientOpts)
 	if err != nil {
+		ps.logger.Warn("downstream respawn failed",
+			slog.String("event", "session.respawn_failed"),
+			slog.String("trigger", trigger),
+			slog.String("new_session_id", newSessionID),
+			slog.String("error", err.Error()),
+		)
 		return nil, fmt.Errorf("respawn spawn failed: %w", err)
 	}
 
@@ -541,8 +681,10 @@ func (ps *proxySession) respawnDownstream(ctx context.Context) (*mcp.ClientSessi
 	ps.downstreamMu.Lock()
 	ps.downstream = downstream
 	ps.downstreamClosed = false
-	ps.closeOnce = sync.Once{}
 	ps.downstreamMu.Unlock()
+	ps.closeMu.Lock()
+	ps.closeOnce = sync.Once{}
+	ps.closeMu.Unlock()
 
 	// Update the session ID so that touch/close operate on the new session.
 	oldSessionID := ps.sessionID
@@ -552,11 +694,47 @@ func (ps *proxySession) respawnDownstream(ctx context.Context) (*mcp.ClientSessi
 	ps.currentTools = newToolNames
 	ps.mu.Unlock()
 
+	// Update external indexes BEFORE cleaning up the old session. This order
+	// is critical: RemoveSession fires onSessionRemoved which looks up
+	// idx.byDownstream. If the old key still exists, the callback would call
+	// closeDownstream on the NEW downstream, breaking the just-respawned session.
+	if ps.onRespawn != nil {
+		ps.onRespawn(oldSessionID, newSessionID, ps)
+	}
+
+	// Clean up the old session from the manager to prevent admission counter
+	// leaks. The old subprocess is already dead (reaped/crashed), but its
+	// TrackedSession entry may still occupy a slot. Because onRespawn already
+	// removed the old key from idx.byDownstream, the onSessionRemoved callback
+	// will be a no-op (it won't find the proxy session by the old ID).
+	if err := ps.mgr.RemoveSession(oldSessionID); err != nil {
+		// Not fatal — the old session may have already been removed by the reaper.
+		if !errors.Is(err, session.ErrSessionNotFound) {
+			ps.logger.Warn("failed to remove old session after respawn",
+				slog.String("old_session", oldSessionID),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+
 	ps.logger.Info("downstream respawn complete",
+		slog.String("event", "session.respawn"),
+		slog.String("trigger", trigger),
 		slog.String("old_session", oldSessionID),
 		slog.String("new_session", newSessionID),
 		slog.Int("tools", len(toolsResult.Tools)),
 	)
+	if previousCloseReason == closeReasonHealthCheck {
+		ps.logger.Info("downstream respawn followed health probe closure",
+			slog.String("event", "session.health_respawn"),
+			slog.String("trigger", trigger),
+			slog.String("old_session", oldSessionID),
+			slog.String("new_session", newSessionID),
+		)
+	}
+
+	// Start a new health probe for the respawned downstream.
+	ps.startHealthProbe()
 
 	return downstream, nil
 }
@@ -573,10 +751,19 @@ func (ps *proxySession) closeDownstream(reason string) {
 		return
 	}
 
+	ps.closeMu.Lock()
+	defer ps.closeMu.Unlock()
+
 	ps.closeOnce.Do(func() {
+		ps.mu.Lock()
+		ps.closeReason = reason
+		ps.mu.Unlock()
 		ps.logger.Info("closing proxy session downstream",
 			slog.String("reason", reason),
 		)
+
+		// Stop the health probe before tearing down the downstream.
+		ps.stopHealthProbe()
 
 		// Atomically mark closed and detach the downstream pointer so that any
 		// concurrent tool calls see the closed state without dispatching to a
@@ -618,4 +805,90 @@ func nextSessionID() uint64 {
 	defer sessionCounterMu.Unlock()
 	sessionCounter++
 	return sessionCounter
+}
+
+// startHealthProbe starts a background goroutine that periodically probes the
+// downstream session with a tools/list call. If the probe fails consecutively
+// (3 times), it triggers closeDownstream so the next tool call will respawn.
+// This detects dead subprocesses before a tool call hits the failure path.
+func (ps *proxySession) startHealthProbe() {
+	if ps.healthCheckInterval <= 0 {
+		return
+	}
+
+	// Stop any existing probe before starting a new one.
+	ps.stopHealthProbe()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ps.mu.Lock()
+	ps.healthProbeCancel = cancel
+	ps.mu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(ps.healthCheckInterval)
+		defer ticker.Stop()
+
+		consecutiveFails := 0
+		const failureThreshold = 3
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				ps.downstreamMu.RLock()
+				ds := ps.downstream
+				closed := ps.downstreamClosed
+				ps.downstreamMu.RUnlock()
+
+				if closed || ds == nil {
+					// Already closed; probe is no longer needed.
+					return
+				}
+
+				probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
+				_, err := ds.ListTools(probeCtx, nil)
+				probeCancel()
+
+				if err != nil {
+					consecutiveFails++
+					ps.logger.Debug("health probe failed",
+						slog.Int("consecutive_fails", consecutiveFails),
+						slog.String("error", err.Error()),
+					)
+
+					if consecutiveFails >= failureThreshold {
+						ps.logger.Warn("health probe threshold exceeded, closing downstream",
+							slog.String("event", "session.health_check_failed"),
+							slog.Int("consecutive_failures", consecutiveFails),
+						)
+						ps.closeDownstream(closeReasonHealthCheck)
+						return
+					}
+				} else {
+					if consecutiveFails > 0 {
+						ps.logger.Debug("health probe recovered",
+							slog.Int("previous_fails", consecutiveFails),
+						)
+					}
+					consecutiveFails = 0
+				}
+			}
+		}
+	}()
+
+	ps.logger.Debug("health probe started",
+		slog.Duration("interval", ps.healthCheckInterval),
+	)
+}
+
+// stopHealthProbe cancels the active health probe goroutine, if any.
+func (ps *proxySession) stopHealthProbe() {
+	ps.mu.Lock()
+	cancel := ps.healthProbeCancel
+	ps.healthProbeCancel = nil
+	ps.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }

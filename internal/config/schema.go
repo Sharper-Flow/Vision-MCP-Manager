@@ -86,6 +86,36 @@ type ServerConfig struct {
 	// SessionTTL is the absolute maximum lifetime of a session regardless of activity.
 	// 0 means no TTL (sessions only expire via idle timeout or explicit close).
 	SessionTTL Duration `yaml:"session_ttl,omitempty" env:"SESSION_TTL" env-default:"0s"`
+
+	// HealthCheckInterval is how often to probe idle downstream sessions for liveness.
+	// When set, the proxy layer sends periodic tools/list calls to detect dead
+	// subprocesses before a tool call hits the failure path. Must be >= 5s if set.
+	// 0 means use default (30s).
+	HealthCheckInterval Duration `yaml:"health_check_interval,omitempty" env:"HEALTH_CHECK_INTERVAL" env-default:"30s"`
+
+	// RequestTimeout is the default deadline Vision applies to downstream tool calls
+	// when the upstream request does not already specify one. 0 means use default (30s).
+	RequestTimeout Duration `yaml:"request_timeout,omitempty" env:"REQUEST_TIMEOUT" env-default:"30s"`
+
+	// Retry configures retry/backoff behavior for retryable downstream tool-call failures.
+	Retry *RetryConfig `yaml:"retry,omitempty"`
+
+	// CircuitBreaker configures fast-fail behavior after repeated downstream failures.
+	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker,omitempty"`
+}
+
+// RetryConfig controls retry behavior for retryable downstream failures.
+type RetryConfig struct {
+	MaxAttempts     int      `yaml:"max_attempts,omitempty" env:"MAX_ATTEMPTS" env-default:"1"`
+	InitialDelay    Duration `yaml:"initial_delay,omitempty" env:"INITIAL_DELAY" env-default:"100ms"`
+	MaxDelay        Duration `yaml:"max_delay,omitempty" env:"MAX_DELAY" env-default:"5s"`
+	RetryableErrors []string `yaml:"retryable_errors,omitempty"`
+}
+
+// CircuitBreakerConfig controls fast-fail behavior after repeated failures.
+type CircuitBreakerConfig struct {
+	FailureThreshold int      `yaml:"failure_threshold,omitempty" env:"FAILURE_THRESHOLD" env-default:"5"`
+	RecoveryTimeout  Duration `yaml:"recovery_timeout,omitempty" env:"RECOVERY_TIMEOUT" env-default:"60s"`
 }
 
 // SupervisionConfig holds global supervisor settings.
@@ -162,15 +192,23 @@ func (d Duration) String() string {
 
 // Validation errors
 var (
-	ErrInvalidPort          = errors.New("config: port must be between 6276 and 6300")
-	ErrDuplicatePort        = errors.New("config: duplicate port assignment")
-	ErrMissingCommand       = errors.New("config: stdio transport requires 'command' field")
-	ErrEmptyCommand         = errors.New("config: command cannot be empty string")
-	ErrMissingURL           = errors.New("config: http/sse transport requires 'url' field")
-	ErrConflictingConfig    = errors.New("config: cannot specify both 'command' and 'url'")
-	ErrInvalidTransport     = errors.New("config: invalid transport type")
-	ErrInvalidRestartPolicy = errors.New("config: invalid restart_policy (must be 'always', 'on-failure', or 'never')")
-	ErrInvalidHTTPURL       = errors.New("config: http transport url must end with '/mcp'")
+	ErrInvalidPort                    = errors.New("config: port must be between 6276 and 6300")
+	ErrDuplicatePort                  = errors.New("config: duplicate port assignment")
+	ErrMissingCommand                 = errors.New("config: stdio transport requires 'command' field")
+	ErrEmptyCommand                   = errors.New("config: command cannot be empty string")
+	ErrMissingURL                     = errors.New("config: http/sse transport requires 'url' field")
+	ErrConflictingConfig              = errors.New("config: cannot specify both 'command' and 'url'")
+	ErrInvalidTransport               = errors.New("config: invalid transport type")
+	ErrInvalidRestartPolicy           = errors.New("config: invalid restart_policy (must be 'always', 'on-failure', or 'never')")
+	ErrInvalidHTTPURL                 = errors.New("config: http transport url must end with '/mcp'")
+	ErrInvalidHealthCheckInterval     = errors.New("config: health_check_interval must be >= 5s")
+	ErrInvalidRequestTimeout          = errors.New("config: request_timeout must be >= 1s")
+	ErrInvalidRetryMaxAttempts        = errors.New("config: retry.max_attempts must be >= 1")
+	ErrInvalidRetryInitialDelay       = errors.New("config: retry.initial_delay must be >= 1ms")
+	ErrInvalidRetryMaxDelay           = errors.New("config: retry.max_delay must be >= 1ms")
+	ErrInvalidRetryDelayRange         = errors.New("config: retry.max_delay must be >= retry.initial_delay")
+	ErrInvalidCircuitFailureThreshold = errors.New("config: circuit_breaker.failure_threshold must be >= 1")
+	ErrInvalidCircuitRecoveryTimeout  = errors.New("config: circuit_breaker.recovery_timeout must be >= 1s")
 )
 
 // InferTransport determines the transport type from config fields.
@@ -242,6 +280,40 @@ func (s *ServerConfig) Validate(name string) error {
 		}
 	}
 
+	// Health check interval validation (0 means use default, >0 must be >= 5s)
+	if s.HealthCheckInterval > 0 && time.Duration(s.HealthCheckInterval) < 5*time.Second {
+		return fmt.Errorf("%w: server %q has health_check_interval %v", ErrInvalidHealthCheckInterval, name, time.Duration(s.HealthCheckInterval))
+	}
+
+	// Request timeout validation (0 means use default, >0 must be >= 1s)
+	if s.RequestTimeout > 0 && time.Duration(s.RequestTimeout) < time.Second {
+		return fmt.Errorf("%w: server %q has request_timeout %v", ErrInvalidRequestTimeout, name, time.Duration(s.RequestTimeout))
+	}
+
+	if s.Retry != nil {
+		if s.Retry.MaxAttempts < 1 {
+			return fmt.Errorf("%w: server %q has retry.max_attempts %d", ErrInvalidRetryMaxAttempts, name, s.Retry.MaxAttempts)
+		}
+		if s.Retry.InitialDelay > 0 && time.Duration(s.Retry.InitialDelay) < time.Millisecond {
+			return fmt.Errorf("%w: server %q has retry.initial_delay %v", ErrInvalidRetryInitialDelay, name, time.Duration(s.Retry.InitialDelay))
+		}
+		if s.Retry.MaxDelay > 0 && time.Duration(s.Retry.MaxDelay) < time.Millisecond {
+			return fmt.Errorf("%w: server %q has retry.max_delay %v", ErrInvalidRetryMaxDelay, name, time.Duration(s.Retry.MaxDelay))
+		}
+		if s.Retry.InitialDelay > 0 && s.Retry.MaxDelay > 0 && s.Retry.MaxDelay < s.Retry.InitialDelay {
+			return fmt.Errorf("%w: server %q has retry.initial_delay %v and retry.max_delay %v", ErrInvalidRetryDelayRange, name, time.Duration(s.Retry.InitialDelay), time.Duration(s.Retry.MaxDelay))
+		}
+	}
+
+	if s.CircuitBreaker != nil {
+		if s.CircuitBreaker.FailureThreshold < 1 {
+			return fmt.Errorf("%w: server %q has circuit_breaker.failure_threshold %d", ErrInvalidCircuitFailureThreshold, name, s.CircuitBreaker.FailureThreshold)
+		}
+		if s.CircuitBreaker.RecoveryTimeout > 0 && time.Duration(s.CircuitBreaker.RecoveryTimeout) < time.Second {
+			return fmt.Errorf("%w: server %q has circuit_breaker.recovery_timeout %v", ErrInvalidCircuitRecoveryTimeout, name, time.Duration(s.CircuitBreaker.RecoveryTimeout))
+		}
+	}
+
 	// Restart policy validation
 	switch s.RestartPolicy {
 	case "", RestartAlways, RestartOnFailure, RestartNever:
@@ -289,6 +361,36 @@ func (s *ServerConfig) ApplyDefaults() {
 	}
 	if s.SessionTimeout == 0 {
 		s.SessionTimeout = Duration(5 * time.Minute)
+	}
+	if s.HealthCheckInterval == 0 {
+		s.HealthCheckInterval = Duration(30 * time.Second)
+	}
+	if s.RequestTimeout == 0 {
+		s.RequestTimeout = Duration(30 * time.Second)
+	}
+	if s.Retry == nil {
+		s.Retry = &RetryConfig{}
+	}
+	if s.Retry.MaxAttempts == 0 {
+		s.Retry.MaxAttempts = 1
+	}
+	if s.Retry.InitialDelay == 0 {
+		s.Retry.InitialDelay = Duration(100 * time.Millisecond)
+	}
+	if s.Retry.MaxDelay == 0 {
+		s.Retry.MaxDelay = Duration(5 * time.Second)
+	}
+	if len(s.Retry.RetryableErrors) == 0 {
+		s.Retry.RetryableErrors = []string{"timeout", "429", "502", "503", "ECONNRESET", "ECONNREFUSED", "ENETUNREACH"}
+	}
+	if s.CircuitBreaker == nil {
+		s.CircuitBreaker = &CircuitBreakerConfig{}
+	}
+	if s.CircuitBreaker.FailureThreshold == 0 {
+		s.CircuitBreaker.FailureThreshold = 5
+	}
+	if s.CircuitBreaker.RecoveryTimeout == 0 {
+		s.CircuitBreaker.RecoveryTimeout = Duration(60 * time.Second)
 	}
 }
 

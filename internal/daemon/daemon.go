@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -265,8 +266,10 @@ func (d *Daemon) Reload() error {
 		if !currentNames[name] {
 			toAdd = append(toAdd, name)
 		} else {
-			// Check if config changed
-			toUpdate = append(toUpdate, name)
+			current := d.registry.Get(name)
+			if current != nil && !reflect.DeepEqual(current.Config, newCfg.Servers[name]) {
+				toUpdate = append(toUpdate, name)
+			}
 		}
 	}
 
@@ -313,6 +316,47 @@ func (d *Daemon) Reload() error {
 		if cfg.Autostart {
 			if err := d.registry.Start(name); err != nil {
 				d.logger.Warn("failed to start server",
+					slog.String("name", name),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+
+	// Recreate updated servers so new config applies to the registry and any
+	// future proxy/session-manager wiring.
+	for _, name := range toUpdate {
+		d.logger.Info("updating server", slog.String("name", name))
+
+		existing := d.registry.Get(name)
+		wasRunning := existing != nil && (existing.State == server.StateRunning || existing.State == server.StateStarting)
+
+		if err := d.registry.Stop(name); err != nil {
+			d.logger.Warn("failed to stop server for update",
+				slog.String("name", name),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		if err := d.registry.Remove(name); err != nil {
+			d.logger.Warn("failed to remove server for update",
+				slog.String("name", name),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+
+		cfg := newCfg.Servers[name]
+		if err := d.registry.Add(name, cfg); err != nil {
+			d.logger.Warn("failed to re-add updated server",
+				slog.String("name", name),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+		if wasRunning || cfg.Autostart {
+			if err := d.registry.Start(name); err != nil {
+				d.logger.Warn("failed to restart updated server",
 					slog.String("name", name),
 					slog.String("error", err.Error()),
 				)
@@ -452,9 +496,21 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 
 	// Create the streamable proxy handler
 	handler := mcp.NewProxyHandler(mcp.ProxyConfig{
-		ServerName:     srv.Name,
-		SessionManager: mgr,
-		Logger:         d.logger,
+		ServerName:          srv.Name,
+		SessionManager:      mgr,
+		Logger:              d.logger,
+		HealthCheckInterval: srv.Config.HealthCheckInterval.Duration(),
+		RequestTimeout:      srv.Config.RequestTimeout.Duration(),
+		RetryConfig: mcp.RetryConfig{
+			MaxAttempts:     srv.Config.Retry.MaxAttempts,
+			InitialDelay:    srv.Config.Retry.InitialDelay.Duration(),
+			MaxDelay:        srv.Config.Retry.MaxDelay.Duration(),
+			RetryableErrors: append([]string(nil), srv.Config.Retry.RetryableErrors...),
+		},
+		CircuitBreakerConfig: mcp.CircuitBreakerConfig{
+			FailureThreshold: srv.Config.CircuitBreaker.FailureThreshold,
+			RecoveryTimeout:  srv.Config.CircuitBreaker.RecoveryTimeout.Duration(),
+		},
 	})
 
 	// Build security config from daemon-wide settings (read under lock).

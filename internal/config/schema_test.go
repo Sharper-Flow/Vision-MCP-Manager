@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -229,7 +230,7 @@ func TestServerConfig_Validate(t *testing.T) {
 			} else {
 				if err == nil {
 					t.Errorf("Validate() expected error %v, got nil", tt.wantErr)
-				} else if !containsError(err, tt.wantErr) {
+				} else if !errors.Is(err, tt.wantErr) {
 					t.Errorf("Validate() error = %v, want %v", err, tt.wantErr)
 				}
 			}
@@ -300,8 +301,8 @@ func TestConfig_Validate(t *testing.T) {
 			} else {
 				if err == nil {
 					t.Errorf("Validate() expected error %v, got nil", tt.wantErr)
-				} else if !containsError(err, tt.wantErr) {
-					t.Errorf("Validate() error = %v, want %v", err, tt.wantErr)
+				} else if !errors.Is(err, tt.wantErr) {
+					t.Errorf("Config.Validate() error = %v, want %v", err, tt.wantErr)
 				}
 			}
 		})
@@ -325,6 +326,189 @@ func TestServerConfig_ApplyDefaults(t *testing.T) {
 	if s.SessionTimeout.Duration() != 5*time.Minute {
 		t.Errorf("SessionTimeout = %v, want 5m", s.SessionTimeout)
 	}
+}
+
+func TestServerConfig_HealthCheckInterval(t *testing.T) {
+	t.Run("default is 30s when not set", func(t *testing.T) {
+		s := &ServerConfig{Port: 6276, Command: "echo"}
+		s.ApplyDefaults()
+		if s.HealthCheckInterval.Duration() != 30*time.Second {
+			t.Errorf("HealthCheckInterval = %v, want 30s", s.HealthCheckInterval)
+		}
+	})
+
+	t.Run("custom value is preserved", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                6276,
+			Command:             "echo",
+			HealthCheckInterval: Duration(60 * time.Second),
+		}
+		s.ApplyDefaults()
+		if s.HealthCheckInterval.Duration() != 60*time.Second {
+			t.Errorf("HealthCheckInterval = %v, want 60s", s.HealthCheckInterval)
+		}
+	})
+
+	t.Run("validation rejects interval less than 5s", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                6276,
+			Command:             "echo",
+			HealthCheckInterval: Duration(1 * time.Second),
+		}
+		err := s.Validate("test")
+		if !errors.Is(err, ErrInvalidHealthCheckInterval) {
+			t.Errorf("expected ErrInvalidHealthCheckInterval, got %v", err)
+		}
+	})
+
+	t.Run("validation accepts interval of 5s", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                6276,
+			Command:             "echo",
+			HealthCheckInterval: Duration(5 * time.Second),
+		}
+		err := s.Validate("test")
+		if err != nil {
+			t.Errorf("unexpected validation error for HealthCheckInterval = 5s: %v", err)
+		}
+	})
+
+	t.Run("validation accepts zero (uses default)", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:    6276,
+			Command: "echo",
+		}
+		err := s.Validate("test")
+		if err != nil {
+			t.Errorf("unexpected validation error for zero HealthCheckInterval: %v", err)
+		}
+	})
+}
+
+func TestServerConfig_RequestResilience(t *testing.T) {
+	t.Run("defaults are applied when resilience settings are omitted", func(t *testing.T) {
+		s := &ServerConfig{Port: 6276, Command: "echo"}
+
+		s.ApplyDefaults()
+
+		if s.RequestTimeout.Duration() != 30*time.Second {
+			t.Errorf("RequestTimeout = %v, want 30s", s.RequestTimeout)
+		}
+		if s.Retry == nil {
+			t.Fatal("Retry = nil, want defaults")
+		}
+		if s.Retry.MaxAttempts != 1 {
+			t.Errorf("Retry.MaxAttempts = %d, want 1", s.Retry.MaxAttempts)
+		}
+		if s.Retry.InitialDelay.Duration() != 100*time.Millisecond {
+			t.Errorf("Retry.InitialDelay = %v, want 100ms", s.Retry.InitialDelay)
+		}
+		if s.Retry.MaxDelay.Duration() != 5*time.Second {
+			t.Errorf("Retry.MaxDelay = %v, want 5s", s.Retry.MaxDelay)
+		}
+		if s.CircuitBreaker == nil {
+			t.Fatal("CircuitBreaker = nil, want defaults")
+		}
+		if s.CircuitBreaker.FailureThreshold != 5 {
+			t.Errorf("CircuitBreaker.FailureThreshold = %d, want 5", s.CircuitBreaker.FailureThreshold)
+		}
+		if s.CircuitBreaker.RecoveryTimeout.Duration() != 60*time.Second {
+			t.Errorf("CircuitBreaker.RecoveryTimeout = %v, want 60s", s.CircuitBreaker.RecoveryTimeout)
+		}
+	})
+
+	t.Run("custom resilience settings are preserved", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:           6276,
+			Command:        "echo",
+			RequestTimeout: Duration(45 * time.Second),
+			Retry: &RetryConfig{
+				MaxAttempts:     3,
+				InitialDelay:    Duration(250 * time.Millisecond),
+				MaxDelay:        Duration(12 * time.Second),
+				RetryableErrors: []string{"timeout", "429"},
+			},
+			CircuitBreaker: &CircuitBreakerConfig{
+				FailureThreshold: 3,
+				RecoveryTimeout:  Duration(30 * time.Second),
+			},
+		}
+
+		s.ApplyDefaults()
+
+		if s.RequestTimeout.Duration() != 45*time.Second {
+			t.Errorf("RequestTimeout = %v, want 45s", s.RequestTimeout)
+		}
+		if s.Retry.MaxAttempts != 3 {
+			t.Errorf("Retry.MaxAttempts = %d, want 3", s.Retry.MaxAttempts)
+		}
+		if len(s.Retry.RetryableErrors) != 2 {
+			t.Errorf("Retry.RetryableErrors len = %d, want 2", len(s.Retry.RetryableErrors))
+		}
+		if s.CircuitBreaker.FailureThreshold != 3 {
+			t.Errorf("CircuitBreaker.FailureThreshold = %d, want 3", s.CircuitBreaker.FailureThreshold)
+		}
+	})
+
+	t.Run("validation rejects request timeout less than one second", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:           6276,
+			Command:        "echo",
+			RequestTimeout: Duration(500 * time.Millisecond),
+		}
+
+		err := s.Validate("test")
+		if !errors.Is(err, ErrInvalidRequestTimeout) {
+			t.Errorf("expected ErrInvalidRequestTimeout, got %v", err)
+		}
+	})
+
+	t.Run("validation rejects retry max attempts less than one", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:    6276,
+			Command: "echo",
+			Retry: &RetryConfig{
+				MaxAttempts: 0,
+			},
+		}
+
+		err := s.Validate("test")
+		if !errors.Is(err, ErrInvalidRetryMaxAttempts) {
+			t.Errorf("expected ErrInvalidRetryMaxAttempts, got %v", err)
+		}
+	})
+
+	t.Run("validation rejects retry max delay below initial delay", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:    6276,
+			Command: "echo",
+			Retry: &RetryConfig{
+				MaxAttempts:  2,
+				InitialDelay: Duration(2 * time.Second),
+				MaxDelay:     Duration(1 * time.Second),
+			},
+		}
+
+		err := s.Validate("test")
+		if !errors.Is(err, ErrInvalidRetryDelayRange) {
+			t.Errorf("expected ErrInvalidRetryDelayRange, got %v", err)
+		}
+	})
+
+	t.Run("validation rejects circuit breaker threshold less than one", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:    6276,
+			Command: "echo",
+			CircuitBreaker: &CircuitBreakerConfig{
+				FailureThreshold: 0,
+			},
+		}
+
+		err := s.Validate("test")
+		if !errors.Is(err, ErrInvalidCircuitFailureThreshold) {
+			t.Errorf("expected ErrInvalidCircuitFailureThreshold, got %v", err)
+		}
+	})
 }
 
 func TestSupervisionConfig_ApplyDefaults(t *testing.T) {
@@ -371,24 +555,4 @@ func TestDuration_String(t *testing.T) {
 	if d.String() != "30s" {
 		t.Errorf("Duration.String() = %q, want %q", d.String(), "30s")
 	}
-}
-
-// containsError checks if err wraps or equals target.
-func containsError(err, target error) bool {
-	if err == nil || target == nil {
-		return err == target
-	}
-	// Check if the error message contains the target error message
-	return err.Error() != "" && target.Error() != "" &&
-		(err == target ||
-			err.Error() == target.Error() ||
-			len(err.Error()) > len(target.Error()) &&
-				err.Error()[:len(target.Error())] == target.Error()[:min(len(err.Error()), len(target.Error()))])
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
