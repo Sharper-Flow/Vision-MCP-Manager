@@ -12,6 +12,7 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 ## Installation
 
 1. Ensure Vision daemon is installed and running:
+
    ```bash
    vision daemon start
    ```
@@ -19,22 +20,20 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 2. Add this plugin to your OpenCode configuration:
    ```json
    {
-     "plugins": [
-       "~/dev/vision-plugin/src/index.ts"
-     ]
+     "plugins": ["~/dev/vision-plugin/src/index.ts"]
    }
    ```
 
 ## Available Tools
 
-| Tool | Description |
-|------|-------------|
-| `vision_list` | List all registered MCP servers with status |
-| `vision_add` | Add and start an MCP server |
-| `vision_remove` | Stop and remove a server |
-| `vision_search` | Search for servers by name or capability |
-| `vision_init` | Generate .opencode.json config |
-| `vision_status` | Check daemon health and statistics |
+| Tool            | Description                                 |
+| --------------- | ------------------------------------------- |
+| `vision_list`   | List all registered MCP servers with status |
+| `vision_add`    | Add and start an MCP server                 |
+| `vision_remove` | Stop and remove a server                    |
+| `vision_search` | Search for servers by name or capability    |
+| `vision_init`   | Generate .opencode.json config              |
+| `vision_status` | Check daemon health and statistics          |
 
 ## Architecture
 
@@ -56,6 +55,7 @@ Vision Plugin (this package)
 ```
 
 The plugin is a thin client that:
+
 1. Injects context at session start to solve the "bootstrap problem"
 2. Wraps Admin MCP tool calls for OpenCode tool discovery
 3. Handles daemon-not-running errors gracefully

@@ -17,11 +17,7 @@ export const VisionListArgsSchema = z.object({}).describe("List all registered M
 
 export const VisionAddArgsSchema = z.object({
   name: z.string().describe("Name of the server to add (must exist in registry)"),
-  start: z
-    .boolean()
-    .optional()
-    .default(true)
-    .describe("Whether to start the server after adding"),
+  start: z.boolean().optional().default(true).describe("Whether to start the server after adding"),
 })
 
 export const VisionRemoveArgsSchema = z.object({
@@ -51,9 +47,7 @@ export const VisionInitArgsSchema = z.object({
     .describe("Comma-separated list of server names to include (default: all running)"),
 })
 
-export const VisionStatusArgsSchema = z
-  .object({})
-  .describe("Get Vision daemon status")
+export const VisionStatusArgsSchema = z.object({}).describe("Get Vision daemon status")
 
 // =============================================================================
 // Tool Implementations
@@ -127,7 +121,10 @@ export async function visionInit(args: z.infer<typeof VisionInitArgsSchema>): Pr
   if (err) return err
   // Convert comma-separated servers string to array for the API
   const servers = args.servers
-    ? args.servers.split(",").map((s) => s.trim()).filter((s) => s)
+    ? args.servers
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s)
     : undefined
   return callTool("vision_init", {
     path: args.path,
