@@ -529,13 +529,10 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 		}
 
 		var lastErr error
-		for attempt := 1; attempt <= ps.retryConfig.MaxAttempts; attempt++ {
-			attemptCtx := ctx
-			cancel := func() {}
-			if timeout := effectiveRequestTimeout(ctx, ps.requestTimeout); timeout > 0 {
-				attemptCtx, cancel = context.WithTimeout(ctx, timeout)
-			}
+		requestCtx, requestCancel := withRequestTimeoutBudget(ctx, ps.requestTimeout)
+		defer requestCancel()
 
+		for attempt := 1; attempt <= ps.retryConfig.MaxAttempts; attempt++ {
 			ps.downstreamMu.RLock()
 			ds := ps.downstream
 			closed := ps.downstreamClosed
@@ -547,20 +544,18 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 					slog.Int("attempt", attempt),
 				)
 				var err error
-				ds, err = ps.respawnDownstream(attemptCtx, "tool_call")
+				ds, err = ps.respawnDownstream(requestCtx, "tool_call")
 				if err != nil {
-					cancel()
 					lastErr = ErrDownstreamUnavailable
 				} else {
 					ps.logger.Info("downstream respawned successfully",
 						slog.String("tool", toolName),
 						slog.Int("attempt", attempt),
 					)
-					result, err := ds.CallTool(attemptCtx, &mcp.CallToolParams{
+					result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
 						Name:      req.Params.Name,
 						Arguments: req.Params.Arguments,
 					})
-					cancel()
 					if err == nil {
 						ps.circuitBreaker.recordSuccess()
 						return result, nil
@@ -572,11 +567,10 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 					}
 				}
 			} else {
-				result, err := ds.CallTool(attemptCtx, &mcp.CallToolParams{
+				result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
 					Name:      req.Params.Name,
 					Arguments: req.Params.Arguments,
 				})
-				cancel()
 				if err == nil {
 					ps.circuitBreaker.recordSuccess()
 					return result, nil
@@ -604,13 +598,15 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 				slog.String("error", lastErr.Error()),
 			)
 			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
+			case <-requestCtx.Done():
+				return nil, requestCtx.Err()
 			case <-time.After(delay):
 			}
 		}
 
-		ps.circuitBreaker.recordFailure()
+		if shouldRecordCircuitFailure(lastErr, ps.retryConfig.RetryableErrors) {
+			ps.circuitBreaker.recordFailure()
+		}
 		ps.logger.Error("downstream tool call failed",
 			slog.String("tool", toolName),
 			slog.String("error", lastErr.Error()),

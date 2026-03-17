@@ -176,6 +176,13 @@ func effectiveRequestTimeout(ctx context.Context, fallback time.Duration) time.D
 	return fallback
 }
 
+func withRequestTimeoutBudget(ctx context.Context, fallback time.Duration) (context.Context, context.CancelFunc) {
+	if timeout := effectiveRequestTimeout(ctx, fallback); timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return context.WithCancel(ctx)
+}
+
 func isRetryableToolCallError(err error, patterns []string) bool {
 	if err == nil {
 		return false
@@ -193,6 +200,10 @@ func isRetryableToolCallError(err error, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+func shouldRecordCircuitFailure(err error, patterns []string) bool {
+	return isRetryableToolCallError(err, patterns)
 }
 
 func computeBackoffDelay(attempt int, initialDelay, maxDelay time.Duration) time.Duration {

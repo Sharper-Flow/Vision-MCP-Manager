@@ -36,6 +36,17 @@ func TestEffectiveRequestTimeout(t *testing.T) {
 	})
 }
 
+func TestWithRequestTimeoutBudget(t *testing.T) {
+	ctx, cancel := withRequestTimeoutBudget(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	time.Sleep(30 * time.Millisecond)
+	remaining := effectiveRequestTimeout(ctx, 50*time.Millisecond)
+	if remaining <= 0 || remaining > 20*time.Millisecond {
+		t.Fatalf("remaining timeout budget = %v, want >0 and <=20ms", remaining)
+	}
+}
+
 func TestIsRetryableToolCallError(t *testing.T) {
 	retryable := []string{"timeout", "429", "ECONNRESET"}
 
@@ -49,6 +60,18 @@ func TestIsRetryableToolCallError(t *testing.T) {
 
 	if isRetryableToolCallError(errors.New("invalid params"), retryable) {
 		t.Fatal("expected invalid params to be non-retryable")
+	}
+}
+
+func TestShouldRecordCircuitFailure(t *testing.T) {
+	retryable := []string{"timeout", "429", "ECONNRESET"}
+
+	if !shouldRecordCircuitFailure(context.DeadlineExceeded, retryable) {
+		t.Fatal("expected retryable timeout to count toward the circuit")
+	}
+
+	if shouldRecordCircuitFailure(errors.New("invalid params"), retryable) {
+		t.Fatal("expected invalid params to not count toward the circuit")
 	}
 }
 
