@@ -65,6 +65,24 @@ servers:
     # Maximum concurrent sessions per server (default: 100)
     max_sessions: 100
 
+    # Optional stronger resilience defaults for upstream network-backed tools.
+    # Current values: networked
+    availability_profile: networked
+
+    # Explicitly safe read-only tools that may share results across sessions.
+    shared_read_only_tools:
+      - kagi_search_fetch
+      - kagi_summarizer
+
+    # Cache successful shared read-only results for this long (default: 10s for networked)
+    shared_result_cache_ttl: 10s
+
+    # Max cached shared results per server (default: 128 for networked)
+    shared_result_cache_size: 128
+
+    # Max concurrent downstream tool calls per server (default: 4 for networked)
+    max_in_flight_requests: 4
+
 # Security settings (applied to all Streamable HTTP endpoints)
 security:
   # Bearer token for authentication (optional)
@@ -119,11 +137,13 @@ servers:
 
 ```yaml
 servers:
-  context7:
-    port: 6277
-    command: npx
-    args: ["-y", "@upstash/context7-mcp", "--api-key", "your-api-key-here"]
+  kagi:
+    port: 6279
+    command: uvx
+    args: ["kagimcp"]
     autostart: true
+    availability_profile: networked
+    shared_read_only_tools: ["kagi_search_fetch", "kagi_summarizer"]
 ```
 
 > **Best Practice:** Put API keys directly in `servers.yaml`. This file is local to your machine (`~/.config/vision/servers.yaml`) and is never committed to version control. Hardcoding keys avoids environment variable resolution issues and ensures the daemon always has access to credentials regardless of how it was started.
@@ -198,6 +218,8 @@ Create `.opencode.json` in your project or `~/.opencode.json` globally:
 ```
 
 Generate with: `vision init --client opencode`
+
+`vision_init` now reconciles existing OpenCode JSON instead of blindly replacing it, so stale Vision-managed MCP endpoint mappings can be repaired while preserving unrelated configuration keys.
 
 ## Environment Variable Expansion
 

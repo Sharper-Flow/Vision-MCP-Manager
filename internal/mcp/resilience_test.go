@@ -128,3 +128,37 @@ func TestCircuitBreakerLifecycle(t *testing.T) {
 		t.Fatalf("state after successful probe = %v, want closed", cb.state())
 	}
 }
+
+func TestClassifyToolCallError(t *testing.T) {
+	t.Run("classifies circuit open", func(t *testing.T) {
+		err := classifyToolCallError(&CircuitOpenError{Server: "kagi"}, false, nil)
+		var availabilityErr *AvailabilityError
+		if !errors.As(err, &availabilityErr) || availabilityErr.Category != FailureCategoryCircuitOpen {
+			t.Fatalf("expected circuit_open availability error, got %v", err)
+		}
+	})
+
+	t.Run("classifies provider timeout before retry exhaustion", func(t *testing.T) {
+		err := classifyToolCallError(context.DeadlineExceeded, false, []string{"timeout"})
+		var availabilityErr *AvailabilityError
+		if !errors.As(err, &availabilityErr) || availabilityErr.Category != FailureCategoryProviderTimeout {
+			t.Fatalf("expected provider_timeout availability error, got %v", err)
+		}
+	})
+
+	t.Run("classifies retry exhaustion", func(t *testing.T) {
+		err := classifyToolCallError(errors.New("upstream returned 503"), true, []string{"503"})
+		var availabilityErr *AvailabilityError
+		if !errors.As(err, &availabilityErr) || availabilityErr.Category != FailureCategoryRetryExhausted {
+			t.Fatalf("expected retry_exhausted availability error, got %v", err)
+		}
+	})
+
+	t.Run("classifies config drift or unavailable downstream", func(t *testing.T) {
+		err := classifyToolCallError(ErrDownstreamUnavailable, false, nil)
+		var availabilityErr *AvailabilityError
+		if !errors.As(err, &availabilityErr) || availabilityErr.Category != FailureCategoryConfigDrift {
+			t.Fatalf("expected config_drift availability error, got %v", err)
+		}
+	})
+}

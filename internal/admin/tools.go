@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -685,12 +687,13 @@ func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCal
 
 // InitResponse is the response for vision_init.
 type InitResponse struct {
-	Success    bool     `json:"success"`
-	Path       string   `json:"path"`
-	Servers    []string `json:"servers"`
-	BackedUp   bool     `json:"backed_up,omitempty"`
-	BackupPath string   `json:"backup_path,omitempty"`
-	Error      *string  `json:"error,omitempty"`
+	Success           bool     `json:"success"`
+	Path              string   `json:"path"`
+	Servers           []string `json:"servers"`
+	ReconciledServers []string `json:"reconciled_servers,omitempty"`
+	BackedUp          bool     `json:"backed_up,omitempty"`
+	BackupPath        string   `json:"backup_path,omitempty"`
+	Error             *string  `json:"error,omitempty"`
 }
 
 // toolInit implements vision_init.
@@ -751,20 +754,36 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		return jsonToolResult(response)
 	}
 
-	// Build MCP servers config
-	mcpServers := make(map[string]map[string]string)
 	serverNames := make([]string, 0, len(running))
 	for _, srv := range running {
-		status := srv.Status()
-		mcpServers[srv.Name] = map[string]string{
-			"url": fmt.Sprintf("http://localhost:%d/mcp", status.Port),
-		}
 		serverNames = append(serverNames, srv.Name)
 	}
 
-	config := map[string]interface{}{
-		"mcpServers": mcpServers,
+	existingConfig, existed, err := loadExistingClientConfig(params.Path)
+	if err != nil {
+		errMsg := fmt.Sprintf("Failed to read existing config: %s", err.Error())
+		response := InitResponse{
+			Success: false,
+			Path:    params.Path,
+			Servers: serverNames,
+			Error:   &errMsg,
+		}
+		return jsonToolResult(response)
 	}
+
+	targetKind := detectClientConfigKind(params.Path, existingConfig)
+	generatedEntries := make(map[string]map[string]any, len(running))
+	for _, srv := range running {
+		status := srv.Status()
+		generatedEntries[srv.Name] = buildClientConfigEntry(targetKind, status.Port)
+	}
+	reconciledServers := findReconciledServers(existingConfig, targetKind, generatedEntries)
+
+	config := existingConfig
+	if config == nil {
+		config = make(map[string]any)
+	}
+	mergeClientConfig(config, targetKind, generatedEntries)
 
 	configJSON, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -778,15 +797,21 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	}
 
 	response := InitResponse{
-		Success: true,
-		Path:    params.Path,
-		Servers: serverNames,
+		Success:           true,
+		Path:              params.Path,
+		Servers:           serverNames,
+		ReconciledServers: reconciledServers,
 	}
 
 	// Check if file exists and create backup
-	if _, err := os.Stat(params.Path); err == nil {
+	if existed {
 		backupPath := params.Path + ".backup"
-		if err := os.Rename(params.Path, backupPath); err != nil {
+		if existingBytes, err := os.ReadFile(params.Path); err != nil {
+			errMsg := fmt.Sprintf("Failed to read existing config for backup: %s", err.Error())
+			response.Success = false
+			response.Error = &errMsg
+			return jsonToolResult(response)
+		} else if err := os.WriteFile(backupPath, existingBytes, 0644); err != nil {
 			errMsg := fmt.Sprintf("Failed to create backup: %s", err.Error())
 			response.Success = false
 			response.Error = &errMsg
@@ -796,14 +821,24 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		response.BackupPath = backupPath
 	}
 
-	// Write the new config file
-	if err := os.WriteFile(params.Path, configJSON, 0644); err != nil {
+	// Ensure parent directory exists before atomic write.
+	if err := os.MkdirAll(filepath.Dir(params.Path), 0755); err != nil {
+		errMsg := fmt.Sprintf("Failed to create config directory: %s", err.Error())
+		response.Success = false
+		response.Error = &errMsg
+		return jsonToolResult(response)
+	}
+
+	// Write the new config file atomically.
+	if err := writeJSONFileAtomic(params.Path, configJSON); err != nil {
 		errMsg := fmt.Sprintf("Permission denied: %s", err.Error())
 		response.Success = false
 		response.Error = &errMsg
 		// Try to restore backup if we made one
 		if response.BackedUp {
-			_ = os.Rename(response.BackupPath, params.Path)
+			if backupBytes, readErr := os.ReadFile(response.BackupPath); readErr == nil {
+				_ = os.WriteFile(params.Path, backupBytes, 0644)
+			}
 			response.BackedUp = false
 			response.BackupPath = ""
 		}
@@ -811,6 +846,123 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	}
 
 	return jsonToolResult(response)
+}
+
+type clientConfigKind string
+
+const (
+	clientConfigKindOpenCode clientConfigKind = "opencode"
+	clientConfigKindLegacy   clientConfigKind = "legacy"
+)
+
+func loadExistingClientConfig(path string) (map[string]any, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, true, err
+	}
+	if cfg == nil {
+		cfg = make(map[string]any)
+	}
+	return cfg, true, nil
+}
+
+func detectClientConfigKind(path string, existing map[string]any) clientConfigKind {
+	if existing != nil {
+		if _, ok := existing["mcp"].(map[string]any); ok {
+			return clientConfigKindOpenCode
+		}
+		if _, ok := existing["mcpServers"].(map[string]any); ok {
+			return clientConfigKindLegacy
+		}
+	}
+
+	base := strings.ToLower(filepath.Base(path))
+	if strings.Contains(base, "opencode") {
+		return clientConfigKindOpenCode
+	}
+
+	return clientConfigKindLegacy
+}
+
+func buildClientConfigEntry(kind clientConfigKind, port int) map[string]any {
+	url := fmt.Sprintf("http://localhost:%d/mcp", port)
+	switch kind {
+	case clientConfigKindOpenCode:
+		return map[string]any{
+			"type":    "remote",
+			"url":     url,
+			"enabled": true,
+		}
+	default:
+		return map[string]any{"url": url}
+	}
+}
+
+func mergeClientConfig(config map[string]any, kind clientConfigKind, generated map[string]map[string]any) {
+	key := "mcpServers"
+	if kind == clientConfigKindOpenCode {
+		key = "mcp"
+	}
+
+	current, _ := config[key].(map[string]any)
+	if current == nil {
+		current = make(map[string]any)
+	}
+	for name, entry := range generated {
+		current[name] = entry
+	}
+	config[key] = current
+}
+
+func findReconciledServers(existing map[string]any, kind clientConfigKind, generated map[string]map[string]any) []string {
+	if len(generated) == 0 {
+		return nil
+	}
+	key := "mcpServers"
+	if kind == clientConfigKindOpenCode {
+		key = "mcp"
+	}
+	current, _ := existing[key].(map[string]any)
+	var reconciled []string
+	for name, entry := range generated {
+		if current == nil {
+			reconciled = append(reconciled, name)
+			continue
+		}
+		existingEntry, _ := current[name].(map[string]any)
+		if !reflect.DeepEqual(existingEntry, map[string]any(entry)) {
+			reconciled = append(reconciled, name)
+		}
+	}
+	return reconciled
+}
+
+func writeJSONFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	return os.Rename(tmpPath, path)
 }
 
 // StatusServers is the server counts in StatusResponse.

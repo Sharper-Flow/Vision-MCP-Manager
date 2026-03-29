@@ -48,6 +48,81 @@ var ErrDownstreamUnavailable = errors.New("downstream session unavailable")
 // events after a successful respawn.
 const closeReasonHealthCheck = "health check failed"
 
+type sharedToolCacheEntry struct {
+	result    *mcp.CallToolResult
+	expiresAt time.Time
+	createdAt time.Time
+}
+
+type sharedToolInFlight struct {
+	done   chan struct{}
+	result *mcp.CallToolResult
+	err    error
+}
+
+type inFlightLimiter struct {
+	sem chan struct{}
+}
+
+func newInFlightLimiter(max int) *inFlightLimiter {
+	if max <= 0 {
+		return nil
+	}
+	return &inFlightLimiter{sem: make(chan struct{}, max)}
+}
+
+func (l *inFlightLimiter) acquire(ctx context.Context) (func(), error) {
+	if l == nil {
+		return func() {}, nil
+	}
+	select {
+	case l.sem <- struct{}{}:
+		return func() { <-l.sem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+type sharedToolCoordinator struct {
+	logger     *slog.Logger
+	enabled    map[string]struct{}
+	cacheTTL   time.Duration
+	maxEntries int
+	mu         sync.Mutex
+	inflight   map[string]*sharedToolInFlight
+	cache      map[string]sharedToolCacheEntry
+}
+
+func newSharedToolCoordinator(logger *slog.Logger, tools []string, cacheTTL time.Duration, maxEntries int) *sharedToolCoordinator {
+	if len(tools) == 0 {
+		return nil
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if maxEntries <= 0 {
+		maxEntries = 128
+	}
+	enabled := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		tool = strings.TrimSpace(tool)
+		if tool != "" {
+			enabled[tool] = struct{}{}
+		}
+	}
+	if len(enabled) == 0 {
+		return nil
+	}
+	return &sharedToolCoordinator{
+		logger:     logger,
+		enabled:    enabled,
+		cacheTTL:   cacheTTL,
+		maxEntries: maxEntries,
+		inflight:   make(map[string]*sharedToolInFlight),
+		cache:      make(map[string]sharedToolCacheEntry),
+	}
+}
+
 // ProxyConfig configures a per-session proxy handler.
 type ProxyConfig struct {
 	// ServerName is the name of the MCP server being proxied.
@@ -72,6 +147,22 @@ type ProxyConfig struct {
 
 	// CircuitBreakerConfig controls fast-fail behavior after repeated failures.
 	CircuitBreakerConfig CircuitBreakerConfig
+
+	// SharedReadOnlyTools lists tool names that are safe to coalesce/cache across
+	// concurrent sessions for this server.
+	SharedReadOnlyTools []string
+
+	// SharedResultCacheTTL controls how long successful shared read-only results
+	// stay cached. 0 disables caching while still allowing in-flight coalescing.
+	SharedResultCacheTTL time.Duration
+
+	// SharedResultCacheSize caps cached shared read-only results per server.
+	// 0 uses the default size.
+	SharedResultCacheSize int
+
+	// MaxInFlightRequests caps concurrent downstream tool calls per server.
+	// 0 means unlimited.
+	MaxInFlightRequests int
 }
 
 // NewProxyHandler creates a StreamableHTTPHandler that proxies MCP requests
@@ -89,6 +180,8 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	}
 
 	logger := cfg.Logger.With(slog.String("component", "proxy"), slog.String("server", cfg.ServerName))
+	sharedTools := newSharedToolCoordinator(logger, cfg.SharedReadOnlyTools, cfg.SharedResultCacheTTL, cfg.SharedResultCacheSize)
+	inFlightLimiter := newInFlightLimiter(cfg.MaxInFlightRequests)
 
 	type sessionIndex struct {
 		mu           sync.RWMutex
@@ -120,6 +213,8 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			cfg.ServerName,
 			cfg.SessionManager,
 			logger,
+			sharedTools,
+			inFlightLimiter,
 			cfg.HealthCheckInterval,
 			cfg.RequestTimeout,
 			cfg.RetryConfig,
@@ -250,6 +345,8 @@ type proxySession struct {
 	requestTimeout      time.Duration
 	retryConfig         RetryConfig
 	circuitBreaker      *circuitBreaker
+	sharedTools         *sharedToolCoordinator
+	inFlightLimiter     *inFlightLimiter
 
 	// healthProbeCancel stops the active health probe goroutine.
 	// nil when no probe is running.
@@ -284,6 +381,8 @@ func newPerSessionServer(
 	serverName string,
 	mgr *session.Manager,
 	logger *slog.Logger,
+	sharedTools *sharedToolCoordinator,
+	inFlightLimiter *inFlightLimiter,
 	healthCheckInterval time.Duration,
 	requestTimeout time.Duration,
 	retryConfig RetryConfig,
@@ -304,6 +403,8 @@ func newPerSessionServer(
 		logger:              logger,
 		onClosed:            onClosed,
 		onRespawn:           onRespawn,
+		sharedTools:         sharedTools,
+		inFlightLimiter:     inFlightLimiter,
 		healthCheckInterval: healthCheckInterval,
 		requestTimeout:      requestTimeout,
 		retryConfig:         retryConfig,
@@ -519,54 +620,56 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 			slog.String("tool", toolName),
 		)
 
-		if ps.circuitBreaker != nil && !ps.circuitBreaker.allow() {
-			err := &CircuitOpenError{Server: ps.serverName, RetryIn: ps.circuitBreaker.retryIn()}
-			ps.logger.Warn("circuit breaker open, failing fast",
-				slog.String("tool", toolName),
-				slog.Duration("retry_in", err.RetryIn),
-			)
-			return nil, err
+		if ps.sharedTools != nil && ps.sharedTools.enabledFor(toolName) {
+			return ps.sharedTools.execute(ctx, toolName, req.Params.Arguments, func() (*mcp.CallToolResult, error) {
+				return ps.callDownstreamTool(ctx, req, toolName)
+			})
 		}
 
-		var lastErr error
-		requestCtx, requestCancel := withRequestTimeoutBudget(ctx, ps.requestTimeout)
-		defer requestCancel()
+		return ps.callDownstreamTool(ctx, req, toolName)
+	}
+}
 
-		for attempt := 1; attempt <= ps.retryConfig.MaxAttempts; attempt++ {
-			ps.downstreamMu.RLock()
-			ds := ps.downstream
-			closed := ps.downstreamClosed
-			ps.downstreamMu.RUnlock()
+func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToolRequest, toolName string) (*mcp.CallToolResult, error) {
+	if ps.circuitBreaker != nil && !ps.circuitBreaker.allow() {
+		err := &CircuitOpenError{Server: ps.serverName, RetryIn: ps.circuitBreaker.retryIn()}
+		ps.logger.Warn("circuit breaker open, failing fast",
+			slog.String("tool", toolName),
+			slog.Duration("retry_in", err.RetryIn),
+		)
+		return nil, classifyToolCallError(err, false, ps.retryConfig.RetryableErrors)
+	}
 
-			if closed || ds == nil {
-				ps.logger.Info("downstream unavailable, attempting respawn",
+	release, err := ps.inFlightLimiter.acquire(ctx)
+	if err != nil {
+		return nil, classifyToolCallError(err, false, ps.retryConfig.RetryableErrors)
+	}
+	defer release()
+
+	var lastErr error
+	requestCtx, requestCancel := withRequestTimeoutBudget(ctx, ps.requestTimeout)
+	defer requestCancel()
+
+	for attempt := 1; attempt <= ps.retryConfig.MaxAttempts; attempt++ {
+		ps.downstreamMu.RLock()
+		ds := ps.downstream
+		closed := ps.downstreamClosed
+		ps.downstreamMu.RUnlock()
+
+		if closed || ds == nil {
+			ps.logger.Info("downstream unavailable, attempting respawn",
+				slog.String("tool", toolName),
+				slog.Int("attempt", attempt),
+			)
+			var err error
+			ds, err = ps.respawnDownstream(requestCtx, "tool_call")
+			if err != nil {
+				lastErr = ErrDownstreamUnavailable
+			} else {
+				ps.logger.Info("downstream respawned successfully",
 					slog.String("tool", toolName),
 					slog.Int("attempt", attempt),
 				)
-				var err error
-				ds, err = ps.respawnDownstream(requestCtx, "tool_call")
-				if err != nil {
-					lastErr = ErrDownstreamUnavailable
-				} else {
-					ps.logger.Info("downstream respawned successfully",
-						slog.String("tool", toolName),
-						slog.Int("attempt", attempt),
-					)
-					result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
-						Name:      req.Params.Name,
-						Arguments: req.Params.Arguments,
-					})
-					if err == nil {
-						ps.circuitBreaker.recordSuccess()
-						return result, nil
-					}
-					if isDownstreamClosureError(err) {
-						lastErr = ErrDownstreamUnavailable
-					} else {
-						lastErr = err
-					}
-				}
-			} else {
 				result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
 					Name:      req.Params.Name,
 					Arguments: req.Params.Arguments,
@@ -576,43 +679,152 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 					return result, nil
 				}
 				if isDownstreamClosureError(err) {
-					ps.logger.Debug("downstream closed during tool call",
-						slog.String("tool", toolName),
-						slog.Int("attempt", attempt),
-					)
 					lastErr = ErrDownstreamUnavailable
 				} else {
 					lastErr = err
 				}
 			}
-
-			if !isRetryableToolCallError(lastErr, ps.retryConfig.RetryableErrors) || attempt == ps.retryConfig.MaxAttempts {
-				break
+		} else {
+			result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
+				Name:      req.Params.Name,
+				Arguments: req.Params.Arguments,
+			})
+			if err == nil {
+				ps.circuitBreaker.recordSuccess()
+				return result, nil
 			}
-
-			delay := computeBackoffDelay(attempt, ps.retryConfig.InitialDelay, ps.retryConfig.MaxDelay)
-			ps.logger.Warn("retrying downstream tool call",
-				slog.String("tool", toolName),
-				slog.Int("attempt", attempt),
-				slog.Duration("backoff", delay),
-				slog.String("error", lastErr.Error()),
-			)
-			select {
-			case <-requestCtx.Done():
-				return nil, requestCtx.Err()
-			case <-time.After(delay):
+			if isDownstreamClosureError(err) {
+				ps.logger.Debug("downstream closed during tool call",
+					slog.String("tool", toolName),
+					slog.Int("attempt", attempt),
+				)
+				lastErr = ErrDownstreamUnavailable
+			} else {
+				lastErr = err
 			}
 		}
 
-		if shouldRecordCircuitFailure(lastErr, ps.retryConfig.RetryableErrors) {
-			ps.circuitBreaker.recordFailure()
+		if !isRetryableToolCallError(lastErr, ps.retryConfig.RetryableErrors) || attempt == ps.retryConfig.MaxAttempts {
+			break
 		}
-		ps.logger.Error("downstream tool call failed",
+
+		delay := computeBackoffDelay(attempt, ps.retryConfig.InitialDelay, ps.retryConfig.MaxDelay)
+		ps.logger.Warn("retrying downstream tool call",
 			slog.String("tool", toolName),
+			slog.Int("attempt", attempt),
+			slog.Duration("backoff", delay),
 			slog.String("error", lastErr.Error()),
 		)
-		return nil, lastErr
+		select {
+		case <-requestCtx.Done():
+			return nil, classifyToolCallError(requestCtx.Err(), false, ps.retryConfig.RetryableErrors)
+		case <-time.After(delay):
+		}
 	}
+
+	classifiedErr := classifyToolCallError(lastErr, true, ps.retryConfig.RetryableErrors)
+	if shouldRecordCircuitFailure(lastErr, ps.retryConfig.RetryableErrors) {
+		ps.circuitBreaker.recordFailure()
+	}
+	ps.logger.Error("downstream tool call failed",
+		slog.String("tool", toolName),
+		slog.String("error", classifiedErr.Error()),
+	)
+	return nil, classifiedErr
+}
+
+func (c *sharedToolCoordinator) enabledFor(tool string) bool {
+	if c == nil {
+		return false
+	}
+	_, ok := c.enabled[tool]
+	return ok
+}
+
+func (c *sharedToolCoordinator) execute(ctx context.Context, tool string, args any, fn func() (*mcp.CallToolResult, error)) (*mcp.CallToolResult, error) {
+	if c == nil || !c.enabledFor(tool) {
+		return fn()
+	}
+
+	key, err := sharedToolCacheKey(tool, args)
+	if err != nil {
+		return fn()
+	}
+
+	now := time.Now()
+	c.mu.Lock()
+	if entry, ok := c.cache[key]; ok {
+		if c.cacheTTL > 0 && now.Before(entry.expiresAt) {
+			c.mu.Unlock()
+			c.logger.Debug("shared tool cache hit",
+				slog.String("tool", tool),
+			)
+			return entry.result, nil
+		}
+		delete(c.cache, key)
+	}
+	if call, ok := c.inflight[key]; ok {
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-call.done:
+			return call.result, call.err
+		}
+	}
+
+	call := &sharedToolInFlight{done: make(chan struct{})}
+	c.inflight[key] = call
+	c.mu.Unlock()
+
+	result, callErr := fn()
+
+	c.mu.Lock()
+	delete(c.inflight, key)
+	if callErr == nil && result != nil && c.cacheTTL > 0 {
+		c.cache[key] = sharedToolCacheEntry{
+			result:    result,
+			expiresAt: time.Now().Add(c.cacheTTL),
+			createdAt: time.Now(),
+		}
+		c.trimCacheLocked()
+	}
+	call.result = result
+	call.err = callErr
+	close(call.done)
+	c.mu.Unlock()
+
+	return result, callErr
+}
+
+func (c *sharedToolCoordinator) trimCacheLocked() {
+	if c.maxEntries <= 0 {
+		return
+	}
+	for len(c.cache) > c.maxEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		first := true
+		for key, entry := range c.cache {
+			if first || entry.createdAt.Before(oldestTime) {
+				oldestKey = key
+				oldestTime = entry.createdAt
+				first = false
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(c.cache, oldestKey)
+	}
+}
+
+func sharedToolCacheKey(tool string, args any) (string, error) {
+	payload, err := json.Marshal(args)
+	if err != nil {
+		return "", err
+	}
+	return tool + ":" + string(payload), nil
 }
 
 // respawnDownstream attempts to create a new downstream session after the

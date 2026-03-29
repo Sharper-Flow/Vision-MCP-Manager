@@ -32,7 +32,7 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 | `vision_add`    | Add and start an MCP server                 |
 | `vision_remove` | Stop and remove a server                    |
 | `vision_search` | Search for servers by name or capability    |
-| `vision_init`   | Generate .opencode.json config              |
+| `vision_init`   | Generate or reconcile .opencode.json config |
 | `vision_status` | Check daemon health and statistics          |
 
 ## Architecture

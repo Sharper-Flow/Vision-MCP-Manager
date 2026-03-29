@@ -496,11 +496,15 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 
 	// Create the streamable proxy handler
 	handler := mcp.NewProxyHandler(mcp.ProxyConfig{
-		ServerName:          srv.Name,
-		SessionManager:      mgr,
-		Logger:              d.logger,
-		HealthCheckInterval: srv.Config.HealthCheckInterval.Duration(),
-		RequestTimeout:      srv.Config.RequestTimeout.Duration(),
+		ServerName:            srv.Name,
+		SessionManager:        mgr,
+		Logger:                d.logger,
+		HealthCheckInterval:   srv.Config.HealthCheckInterval.Duration(),
+		RequestTimeout:        srv.Config.RequestTimeout.Duration(),
+		SharedReadOnlyTools:   append([]string(nil), srv.Config.SharedReadOnlyTools...),
+		SharedResultCacheTTL:  srv.Config.SharedResultCacheTTL.Duration(),
+		SharedResultCacheSize: srv.Config.SharedResultCacheSize,
+		MaxInFlightRequests:   srv.Config.MaxInFlightRequests,
 		RetryConfig: mcp.RetryConfig{
 			MaxAttempts:     srv.Config.Retry.MaxAttempts,
 			InitialDelay:    srv.Config.Retry.InitialDelay.Duration(),

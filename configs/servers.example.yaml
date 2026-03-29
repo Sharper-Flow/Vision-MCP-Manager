@@ -51,13 +51,15 @@ servers:
     restart_policy: on-failure
 
   # Example: Python-based MCP server via uvx
-  # my-python-server:
+  # kagi:
   #   port: 6279
   #   command: uvx
-  #   args: ["my-mcp-server"]
+  #   args: ["kagimcp"]
   #   env:
-  #     MY_CONFIG: "/path/to/config"
+  #     KAGI_API_KEY: "your-kagi-api-key-here"
   #   autostart: true
+  #   availability_profile: networked
+  #   shared_read_only_tools: ["kagi_search_fetch", "kagi_summarizer"]
 
   #############################################################################
   # HTTP SERVERS (Native Streamable HTTP)
@@ -98,6 +100,11 @@ servers:
   #   stateful: true           # Spawn new process per session
   #   session_timeout: 5m      # Kill idle sessions after 5 minutes
   #   max_sessions: 10         # Limit concurrent sessions
+  #
+  # Availability tuning notes:
+  # - `availability_profile: networked` applies stronger timeout/retry/circuit defaults
+  # - `shared_read_only_tools` opt specific tool names into cross-session coalescing/cache
+  # - `max_in_flight_requests` caps real downstream work per server
 
 # Global supervision settings
 supervision:

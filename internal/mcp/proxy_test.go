@@ -65,6 +65,52 @@ rl.on('line', (line) => {
 });
 `
 
+const slowEchoMCPServerJS = `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === 'initialize') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id: msg.id,
+        result: {
+          protocolVersion: '2025-03-26',
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: { name: 'slow-echo-test', version: '1.0.0' }
+        }
+      }) + '\n');
+    } else if (msg.method === 'notifications/initialized') {
+      // no response
+    } else if (msg.method === 'tools/list') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id: msg.id,
+        result: {
+          tools: [{
+            name: 'echo',
+            description: 'Echoes input back slowly',
+            inputSchema: { type: 'object', properties: { message: { type: 'string' } } }
+          }]
+        }
+      }) + '\n');
+    } else if (msg.method === 'tools/call') {
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({
+          jsonrpc: '2.0', id: msg.id,
+          result: {
+            content: [{ type: 'text', text: 'echo: ' + (msg.params?.arguments?.message || '') + ' pid=' + process.pid }]
+          }
+        }) + '\n');
+      }, 200);
+    } else if (msg.id) {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }) + '\n');
+    }
+  } catch (e) {
+    process.stderr.write('Error: ' + e.message + '\n');
+  }
+});
+`
+
 func skipIfNoNode(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("node"); err != nil {
@@ -78,14 +124,204 @@ func testLogger(t *testing.T) *slog.Logger {
 }
 
 func testServerConfig() *config.ServerConfig {
+	return testServerConfigWithScript(echoMCPServerJS)
+}
+
+func testServerConfigWithScript(script string) *config.ServerConfig {
 	return &config.ServerConfig{
 		Command:        "node",
-		Args:           []string{"-e", echoMCPServerJS},
+		Args:           []string{"-e", script},
 		Port:           16290,
 		Autostart:      true,
 		RestartPolicy:  config.RestartOnFailure,
 		SessionTimeout: config.Duration(30 * time.Second),
 		MaxSessions:    10,
+	}
+}
+
+func extractTextContent(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	if result == nil || len(result.Content) == 0 {
+		t.Fatal("expected non-empty tool result content")
+	}
+	tc, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	return tc.Text
+}
+
+func TestProxyHandler_CoalescesConcurrentReadOnlyCalls(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfigWithScript(slowEchoMCPServerJS)
+	mgr := session.NewManager("test-proxy-coalesce", cfg, logger)
+	defer mgr.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:            "test-proxy-coalesce",
+		SessionManager:        mgr,
+		Logger:                logger,
+		SharedReadOnlyTools:   []string{"echo"},
+		SharedResultCacheTTL:  time.Second,
+		SharedResultCacheSize: 8,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	clientA := mcp.NewClient(&mcp.Implementation{Name: "client-a", Version: "1.0.0"}, nil)
+	clientB := mcp.NewClient(&mcp.Implementation{Name: "client-b", Version: "1.0.0"}, nil)
+	sessA, err := clientA.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("clientA.Connect failed: %v", err)
+	}
+	defer sessA.Close()
+	sessB, err := clientB.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("clientB.Connect failed: %v", err)
+	}
+	defer sessB.Close()
+
+	results := make([]string, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		callResult, err := sessA.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "shared"}})
+		if err != nil {
+			t.Errorf("sessA.CallTool failed: %v", err)
+			return
+		}
+		results[0] = extractTextContent(t, callResult)
+	}()
+	go func() {
+		defer wg.Done()
+		callResult, err := sessB.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "shared"}})
+		if err != nil {
+			t.Errorf("sessB.CallTool failed: %v", err)
+			return
+		}
+		results[1] = extractTextContent(t, callResult)
+	}()
+	wg.Wait()
+
+	if results[0] == "" || results[1] == "" {
+		t.Fatalf("expected both results non-empty, got %q and %q", results[0], results[1])
+	}
+	if results[0] != results[1] {
+		t.Fatalf("expected coalesced results to match, got %q and %q", results[0], results[1])
+	}
+}
+
+func TestProxyHandler_CachesReadOnlyCallsAcrossSessions(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfig()
+	mgr := session.NewManager("test-proxy-cache", cfg, logger)
+	defer mgr.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:            "test-proxy-cache",
+		SessionManager:        mgr,
+		Logger:                logger,
+		SharedReadOnlyTools:   []string{"echo"},
+		SharedResultCacheTTL:  2 * time.Second,
+		SharedResultCacheSize: 8,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	clientA := mcp.NewClient(&mcp.Implementation{Name: "client-a", Version: "1.0.0"}, nil)
+	clientB := mcp.NewClient(&mcp.Implementation{Name: "client-b", Version: "1.0.0"}, nil)
+	sessA, err := clientA.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("clientA.Connect failed: %v", err)
+	}
+	defer sessA.Close()
+	sessB, err := clientB.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("clientB.Connect failed: %v", err)
+	}
+	defer sessB.Close()
+
+	first, err := sessA.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "cache-me"}})
+	if err != nil {
+		t.Fatalf("sessA.CallTool failed: %v", err)
+	}
+	second, err := sessB.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "cache-me"}})
+	if err != nil {
+		t.Fatalf("sessB.CallTool failed: %v", err)
+	}
+
+	textA := extractTextContent(t, first)
+	textB := extractTextContent(t, second)
+	if textA != textB {
+		t.Fatalf("expected cached result reuse across sessions, got %q and %q", textA, textB)
+	}
+}
+
+func TestProxyHandler_EnforcesInFlightConcurrencyLimit(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfigWithScript(slowEchoMCPServerJS)
+	mgr := session.NewManager("test-proxy-limit", cfg, logger)
+	defer mgr.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:          "test-proxy-limit",
+		SessionManager:      mgr,
+		Logger:              logger,
+		MaxInFlightRequests: 1,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	clientA := mcp.NewClient(&mcp.Implementation{Name: "client-a", Version: "1.0.0"}, nil)
+	clientB := mcp.NewClient(&mcp.Implementation{Name: "client-b", Version: "1.0.0"}, nil)
+	sessA, err := clientA.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("clientA.Connect failed: %v", err)
+	}
+	defer sessA.Close()
+	sessB, err := clientB.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("clientB.Connect failed: %v", err)
+	}
+	defer sessB.Close()
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := sessA.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "first"}})
+		if err != nil {
+			t.Errorf("sessA.CallTool failed: %v", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		_, err := sessB.CallTool(ctx, &mcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "second"}})
+		if err != nil {
+			t.Errorf("sessB.CallTool failed: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	if elapsed := time.Since(start); elapsed < 350*time.Millisecond {
+		t.Fatalf("expected serialized execution due to in-flight limit, elapsed = %v", elapsed)
 	}
 }
 

@@ -41,6 +41,15 @@ const (
 	RestartNever     RestartPolicy = "never"
 )
 
+// AvailabilityProfile defines opinionated resilience defaults for a server.
+type AvailabilityProfile string
+
+const (
+	// AvailabilityProfileNetworked applies stronger timeout/retry/circuit defaults
+	// for servers whose tool calls depend on upstream network providers.
+	AvailabilityProfileNetworked AvailabilityProfile = "networked"
+)
+
 // ServerConfig defines a single MCP server's configuration.
 type ServerConfig struct {
 	// Port is the HTTP port Vision exposes this server on (6276-6300).
@@ -77,6 +86,9 @@ type ServerConfig struct {
 	// Stateful enables process-per-session mode for isolated state.
 	Stateful bool `yaml:"stateful,omitempty" env:"STATEFUL" env-default:"false"`
 
+	// AvailabilityProfile selects opinionated resilience defaults for the server.
+	AvailabilityProfile AvailabilityProfile `yaml:"availability_profile,omitempty" env:"AVAILABILITY_PROFILE"`
+
 	// SessionTimeout is how long an idle session lives (for stateful servers).
 	SessionTimeout Duration `yaml:"session_timeout,omitempty" env:"SESSION_TIMEOUT" env-default:"5m"`
 
@@ -102,6 +114,22 @@ type ServerConfig struct {
 
 	// CircuitBreaker configures fast-fail behavior after repeated downstream failures.
 	CircuitBreaker *CircuitBreakerConfig `yaml:"circuit_breaker,omitempty"`
+
+	// SharedReadOnlyTools lists tool names that are safe to coalesce/cache across
+	// concurrent sessions for this server.
+	SharedReadOnlyTools []string `yaml:"shared_read_only_tools,omitempty"`
+
+	// SharedResultCacheTTL is how long successful shared read-only results stay cached.
+	// 0 disables caching while still allowing in-flight coalescing.
+	SharedResultCacheTTL Duration `yaml:"shared_result_cache_ttl,omitempty" env:"SHARED_RESULT_CACHE_TTL"`
+
+	// SharedResultCacheSize caps cached shared read-only results per server.
+	// 0 uses the default for the selected profile.
+	SharedResultCacheSize int `yaml:"shared_result_cache_size,omitempty" env:"SHARED_RESULT_CACHE_SIZE"`
+
+	// MaxInFlightRequests caps concurrent downstream tool calls per server.
+	// 0 means unlimited.
+	MaxInFlightRequests int `yaml:"max_in_flight_requests,omitempty" env:"MAX_IN_FLIGHT_REQUESTS"`
 }
 
 // RetryConfig controls retry behavior for retryable downstream failures.
@@ -200,6 +228,7 @@ var (
 	ErrConflictingConfig              = errors.New("config: cannot specify both 'command' and 'url'")
 	ErrInvalidTransport               = errors.New("config: invalid transport type")
 	ErrInvalidRestartPolicy           = errors.New("config: invalid restart_policy (must be 'always', 'on-failure', or 'never')")
+	ErrInvalidAvailabilityProfile     = errors.New("config: invalid availability_profile")
 	ErrInvalidHTTPURL                 = errors.New("config: http transport url must end with '/mcp'")
 	ErrInvalidHealthCheckInterval     = errors.New("config: health_check_interval must be >= 5s")
 	ErrInvalidRequestTimeout          = errors.New("config: request_timeout must be >= 1s")
@@ -209,6 +238,8 @@ var (
 	ErrInvalidRetryDelayRange         = errors.New("config: retry.max_delay must be >= retry.initial_delay")
 	ErrInvalidCircuitFailureThreshold = errors.New("config: circuit_breaker.failure_threshold must be >= 1")
 	ErrInvalidCircuitRecoveryTimeout  = errors.New("config: circuit_breaker.recovery_timeout must be >= 1s")
+	ErrInvalidSharedResultCacheSize   = errors.New("config: shared_result_cache_size must be >= 0")
+	ErrInvalidMaxInFlightRequests     = errors.New("config: max_in_flight_requests must be >= 0")
 )
 
 // InferTransport determines the transport type from config fields.
@@ -314,12 +345,27 @@ func (s *ServerConfig) Validate(name string) error {
 		}
 	}
 
+	if s.SharedResultCacheSize < 0 {
+		return fmt.Errorf("%w: server %q has shared_result_cache_size %d", ErrInvalidSharedResultCacheSize, name, s.SharedResultCacheSize)
+	}
+	if s.MaxInFlightRequests < 0 {
+		return fmt.Errorf("%w: server %q has max_in_flight_requests %d", ErrInvalidMaxInFlightRequests, name, s.MaxInFlightRequests)
+	}
+
 	// Restart policy validation
 	switch s.RestartPolicy {
 	case "", RestartAlways, RestartOnFailure, RestartNever:
 		// valid (empty defaults to on-failure)
 	default:
 		return fmt.Errorf("%w: server %q has restart_policy %q", ErrInvalidRestartPolicy, name, s.RestartPolicy)
+	}
+
+	// Availability profile validation
+	switch s.AvailabilityProfile {
+	case "", AvailabilityProfileNetworked:
+		// valid
+	default:
+		return fmt.Errorf("%w: server %q has availability_profile %q", ErrInvalidAvailabilityProfile, name, s.AvailabilityProfile)
 	}
 
 	return nil
@@ -353,6 +399,8 @@ func (c *Config) Validate() error {
 
 // ApplyDefaults sets default values for missing optional fields.
 func (s *ServerConfig) ApplyDefaults() {
+	s.applyAvailabilityProfileDefaults()
+
 	if s.RestartPolicy == "" {
 		s.RestartPolicy = RestartOnFailure
 	}
@@ -391,6 +439,54 @@ func (s *ServerConfig) ApplyDefaults() {
 	}
 	if s.CircuitBreaker.RecoveryTimeout == 0 {
 		s.CircuitBreaker.RecoveryTimeout = Duration(60 * time.Second)
+	}
+}
+
+func (s *ServerConfig) applyAvailabilityProfileDefaults() {
+	switch s.AvailabilityProfile {
+	case AvailabilityProfileNetworked:
+		if s.SessionTimeout == 0 {
+			s.SessionTimeout = Duration(30 * time.Minute)
+		}
+		if s.HealthCheckInterval == 0 {
+			s.HealthCheckInterval = Duration(60 * time.Second)
+		}
+		if s.RequestTimeout == 0 {
+			s.RequestTimeout = Duration(60 * time.Second)
+		}
+		if s.Retry == nil {
+			s.Retry = &RetryConfig{}
+		}
+		if s.Retry.MaxAttempts == 0 {
+			s.Retry.MaxAttempts = 2
+		}
+		if s.Retry.InitialDelay == 0 {
+			s.Retry.InitialDelay = Duration(500 * time.Millisecond)
+		}
+		if s.Retry.MaxDelay == 0 {
+			s.Retry.MaxDelay = Duration(5 * time.Second)
+		}
+		if len(s.Retry.RetryableErrors) == 0 {
+			s.Retry.RetryableErrors = []string{"timeout", "429", "502", "503", "504", "ECONNRESET", "ECONNREFUSED", "ENETUNREACH"}
+		}
+		if s.CircuitBreaker == nil {
+			s.CircuitBreaker = &CircuitBreakerConfig{}
+		}
+		if s.CircuitBreaker.FailureThreshold == 0 {
+			s.CircuitBreaker.FailureThreshold = 3
+		}
+		if s.CircuitBreaker.RecoveryTimeout == 0 {
+			s.CircuitBreaker.RecoveryTimeout = Duration(45 * time.Second)
+		}
+		if s.SharedResultCacheTTL == 0 {
+			s.SharedResultCacheTTL = Duration(10 * time.Second)
+		}
+		if s.SharedResultCacheSize == 0 {
+			s.SharedResultCacheSize = 128
+		}
+		if s.MaxInFlightRequests == 0 {
+			s.MaxInFlightRequests = 4
+		}
 	}
 }
 

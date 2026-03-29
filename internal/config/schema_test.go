@@ -511,6 +511,80 @@ func TestServerConfig_RequestResilience(t *testing.T) {
 	})
 }
 
+func TestServerConfig_AvailabilityProfile(t *testing.T) {
+	t.Run("networked profile applies stronger availability defaults", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                6279,
+			Command:             "uvx",
+			AvailabilityProfile: AvailabilityProfileNetworked,
+		}
+
+		s.ApplyDefaults()
+
+		if s.RequestTimeout.Duration() != 60*time.Second {
+			t.Errorf("RequestTimeout = %v, want 60s", s.RequestTimeout)
+		}
+		if s.HealthCheckInterval.Duration() != 60*time.Second {
+			t.Errorf("HealthCheckInterval = %v, want 60s", s.HealthCheckInterval)
+		}
+		if s.SessionTimeout.Duration() != 30*time.Minute {
+			t.Errorf("SessionTimeout = %v, want 30m", s.SessionTimeout)
+		}
+		if s.Retry == nil {
+			t.Fatal("Retry = nil, want defaults")
+		}
+		if s.Retry.MaxAttempts != 2 {
+			t.Errorf("Retry.MaxAttempts = %d, want 2", s.Retry.MaxAttempts)
+		}
+		if s.Retry.InitialDelay.Duration() != 500*time.Millisecond {
+			t.Errorf("Retry.InitialDelay = %v, want 500ms", s.Retry.InitialDelay)
+		}
+		if s.CircuitBreaker == nil {
+			t.Fatal("CircuitBreaker = nil, want defaults")
+		}
+		if s.CircuitBreaker.FailureThreshold != 3 {
+			t.Errorf("CircuitBreaker.FailureThreshold = %d, want 3", s.CircuitBreaker.FailureThreshold)
+		}
+		if s.CircuitBreaker.RecoveryTimeout.Duration() != 45*time.Second {
+			t.Errorf("CircuitBreaker.RecoveryTimeout = %v, want 45s", s.CircuitBreaker.RecoveryTimeout)
+		}
+	})
+
+	t.Run("validation rejects unknown availability profile", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                6279,
+			Command:             "uvx",
+			AvailabilityProfile: "mystery",
+		}
+
+		err := s.Validate("kagi")
+		if !errors.Is(err, ErrInvalidAvailabilityProfile) {
+			t.Errorf("expected ErrInvalidAvailabilityProfile, got %v", err)
+		}
+	})
+
+	t.Run("validation rejects negative shared cache or concurrency limits", func(t *testing.T) {
+		s := &ServerConfig{
+			Port:                  6279,
+			Command:               "uvx",
+			AvailabilityProfile:   AvailabilityProfileNetworked,
+			SharedResultCacheSize: -1,
+		}
+
+		err := s.Validate("kagi")
+		if !errors.Is(err, ErrInvalidSharedResultCacheSize) {
+			t.Fatalf("expected ErrInvalidSharedResultCacheSize, got %v", err)
+		}
+
+		s.SharedResultCacheSize = 1
+		s.MaxInFlightRequests = -1
+		err = s.Validate("kagi")
+		if !errors.Is(err, ErrInvalidMaxInFlightRequests) {
+			t.Fatalf("expected ErrInvalidMaxInFlightRequests, got %v", err)
+		}
+	})
+}
+
 func TestSupervisionConfig_ApplyDefaults(t *testing.T) {
 	sup := &SupervisionConfig{}
 

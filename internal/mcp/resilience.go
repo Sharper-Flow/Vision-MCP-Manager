@@ -37,6 +37,39 @@ type CircuitOpenError struct {
 	RetryIn time.Duration
 }
 
+type FailureCategory string
+
+const (
+	FailureCategoryConfigDrift     FailureCategory = "config_drift"
+	FailureCategoryProviderTimeout FailureCategory = "provider_timeout"
+	FailureCategoryRetryExhausted  FailureCategory = "retry_exhausted"
+	FailureCategoryCircuitOpen     FailureCategory = "circuit_open"
+)
+
+// AvailabilityError exposes an operational failure category while retaining the
+// original underlying error for callers that need to inspect or unwrap it.
+type AvailabilityError struct {
+	Category FailureCategory
+	Err      error
+}
+
+func (e *AvailabilityError) Error() string {
+	if e == nil {
+		return "availability error"
+	}
+	if e.Err == nil {
+		return string(e.Category)
+	}
+	return fmt.Sprintf("%s: %s", e.Category, e.Err.Error())
+}
+
+func (e *AvailabilityError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 func (e *CircuitOpenError) Error() string {
 	if e == nil {
 		return "downstream circuit breaker open"
@@ -204,6 +237,30 @@ func isRetryableToolCallError(err error, patterns []string) bool {
 
 func shouldRecordCircuitFailure(err error, patterns []string) bool {
 	return isRetryableToolCallError(err, patterns)
+}
+
+func classifyToolCallError(err error, attemptsExhausted bool, patterns []string) error {
+	if err == nil {
+		return nil
+	}
+	var availabilityErr *AvailabilityError
+	if errors.As(err, &availabilityErr) {
+		return err
+	}
+	var circuitErr *CircuitOpenError
+	if errors.As(err, &circuitErr) {
+		return &AvailabilityError{Category: FailureCategoryCircuitOpen, Err: err}
+	}
+	if errors.Is(err, ErrDownstreamUnavailable) {
+		return &AvailabilityError{Category: FailureCategoryConfigDrift, Err: err}
+	}
+	if attemptsExhausted && isRetryableToolCallError(err, patterns) {
+		return &AvailabilityError{Category: FailureCategoryRetryExhausted, Err: err}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return &AvailabilityError{Category: FailureCategoryProviderTimeout, Err: err}
+	}
+	return err
 }
 
 func computeBackoffDelay(attempt int, initialDelay, maxDelay time.Duration) time.Duration {

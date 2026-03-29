@@ -151,6 +151,8 @@ servers:
     env:
       KAGI_API_KEY: "your-kagi-api-key-here"
     autostart: true
+    availability_profile: networked
+    shared_read_only_tools: ["kagi_search_fetch", "kagi_summarizer"]
 
   # Time - Timezone utilities
   time:
@@ -162,11 +164,13 @@ servers:
 
 > **Session lifecycle:** Idle sessions are reaped after `session_timeout` (default 5m). If a tool call arrives after the session is reaped, Vision automatically respawns a fresh subprocess — no error is returned to the agent.
 
+> **Availability profiles:** Set `availability_profile: networked` for servers backed by upstream web/API providers. Vision applies stronger timeout, retry, circuit-breaker, cache, and in-flight limit defaults while still keeping per-session downstream isolation by default.
+
 > **Best Practice:** Put API keys directly in `servers.yaml`. This file is local (`~/.config/vision/`) and never committed to git.
 
 ### OpenCode Integration
 
-Add Vision to your OpenCode config (`~/.config/opencode/opencode.jsonc`):
+Add Vision to your OpenCode config (`~/.config/opencode/opencode.json`):
 
 ```json
 {
