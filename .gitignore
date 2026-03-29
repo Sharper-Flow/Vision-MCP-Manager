@@ -57,3 +57,6 @@ logs/
 # ADV (Advance) plugin files - project-specific, not part of Vision
 .specdb/
 project.json
+
+# Local OpenCode workspace artifacts
+.opencode/
