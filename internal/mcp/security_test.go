@@ -3,6 +3,8 @@ package mcp
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -59,6 +61,21 @@ func TestSecurityMiddleware_BearerAuth_WrongToken(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestValidBearerToken_UsesConstantTimeCompare(t *testing.T) {
+	src, err := os.ReadFile("security.go")
+	if err != nil {
+		t.Fatalf("read security.go: %v", err)
+	}
+
+	content := string(src)
+	if !strings.Contains(content, "subtle.ConstantTimeCompare") {
+		t.Fatal("expected validBearerToken to use subtle.ConstantTimeCompare")
+	}
+	if strings.Contains(content, "strings.TrimPrefix(header, prefix) == expected") {
+		t.Fatal("expected validBearerToken to stop using direct string equality")
 	}
 }
 

@@ -225,8 +225,15 @@ func TestSave(t *testing.T) {
 	}
 
 	// Verify file exists
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
 		t.Fatal("Save() did not create file")
+	}
+	if err != nil {
+		t.Fatalf("Stat() after Save() error: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("permissions = %o, want 600", got)
 	}
 
 	// Load and verify

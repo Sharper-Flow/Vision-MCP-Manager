@@ -250,7 +250,7 @@ func Save(cfg *Config, path string) error {
 	}
 
 	// Set appropriate permissions
-	if err := os.Chmod(tmpPath, 0644); err != nil {
+	if err := os.Chmod(tmpPath, 0600); err != nil {
 		return fmt.Errorf("config: chmod temp file: %w", err)
 	}
 

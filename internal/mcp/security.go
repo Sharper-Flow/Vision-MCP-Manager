@@ -11,6 +11,7 @@
 package mcp
 
 import (
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -126,5 +127,6 @@ func validBearerToken(header, expected string) bool {
 	if !strings.HasPrefix(header, prefix) {
 		return false
 	}
-	return strings.TrimPrefix(header, prefix) == expected
+	token := strings.TrimPrefix(header, prefix)
+	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
 }
