@@ -17,8 +17,8 @@ const (
 	DefaultConfigDir = ".config/vision"
 	// DefaultConfigFile is the default filename
 	DefaultConfigFile = "servers.yaml"
-	// DefaultEnvFile is the default environment file
-	DefaultEnvFile = "env"
+	// DefaultEnvFile is the default environment file (dot-prefixed per dotenv convention)
+	DefaultEnvFile = ".env"
 )
 
 var (
@@ -41,7 +41,7 @@ func DefaultConfigPath() string {
 	return filepath.Join(home, DefaultConfigDir, DefaultConfigFile)
 }
 
-// DefaultEnvPath returns the default env file path: ~/.config/vision/env
+// DefaultEnvPath returns the default env file path: ~/.config/vision/.env
 func DefaultEnvPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -106,7 +106,7 @@ func LoadEnvFile(path string) error {
 // Load reads and parses a config file from the given path.
 // If path is empty, it uses DefaultConfigPath().
 // Environment variables in the format ${VAR} or ${VAR:-default} are expanded.
-// The env file (~/.config/vision/env) is loaded first if it exists.
+// The env file (~/.config/vision/.env) is loaded first if it exists.
 func Load(path string) (*Config, error) {
 	if path == "" {
 		path = DefaultConfigPath()

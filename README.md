@@ -136,23 +136,21 @@ servers:
   # Context7 - Library documentation lookup
   context7:
     port: 6276
-    command: npx
-    args: ["-y", "@upstash/context7-mcp@latest"]
+    command: context7-mcp
+    args: []
     env:
-      CONTEXT7_API_KEY: "your-api-key-here"
+      CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
     autostart: true
     session_timeout: 30m   # How long idle sessions live (default: 5m)
 
   # Kagi - Web search and summarization
   kagi:
-    port: 6284
+    port: 6279
     command: uvx
-    args: ["kagimcp"]
+    args: ["--python", "3.12", "kagimcp"]
     env:
-      KAGI_API_KEY: "your-kagi-api-key-here"
+      KAGI_API_KEY: "${KAGI_API_KEY}"
     autostart: true
-    availability_profile: networked
-    shared_read_only_tools: ["kagi_search_fetch", "kagi_summarizer"]
 
   # Time - Timezone utilities
   time:
@@ -166,7 +164,31 @@ servers:
 
 > **Availability profiles:** Set `availability_profile: networked` for servers backed by upstream web/API providers. Vision applies stronger timeout, retry, circuit-breaker, cache, and in-flight limit defaults while still keeping per-session downstream isolation by default.
 
-> **Best Practice:** Put API keys directly in `servers.yaml`. This file is local (`~/.config/vision/`) and never committed to git.
+### API Keys and Secrets
+
+Store API keys in `~/.config/vision/.env` and reference them via `${VAR}` in `servers.yaml`:
+
+```bash
+# ~/.config/vision/.env (0600 permissions)
+CONTEXT7_API_KEY=your-context7-key
+KAGI_API_KEY=your-kagi-key
+```
+
+```yaml
+# ~/.config/vision/servers.yaml
+env:
+  CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+```
+
+Vision loads `.env` before parsing the config, so `${VAR}` expansion works regardless of how the daemon is started (foreground, background, systemd). The `.env` file should have `0600` permissions since it contains secrets.
+
+For tools that resolve tokens dynamically (e.g. `gh auth token`), use a bash wrapper:
+
+```yaml
+grep-app:
+  command: bash
+  args: ["-c", "export GITHUB_TOKEN=$(gh auth token) && exec node /path/to/server.js"]
+```
 
 ### OpenCode Integration
 

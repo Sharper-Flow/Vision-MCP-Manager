@@ -223,29 +223,63 @@ Generate with: `vision init --client opencode`
 
 ## Environment Variable Expansion
 
-Vision supports environment variable expansion for values already set in your shell environment:
+Vision supports `${VAR}` and `${VAR:-default}` expansion in `servers.yaml`:
 
 ```yaml
 servers:
   my-server:
     env:
-      # Expand from shell environment
+      # Expand from .env file or shell environment
       API_KEY: "${MY_API_KEY}"
       
       # With default value if not set
       DEBUG: "${DEBUG:-false}"
 ```
 
-However, the simplest approach is to put API keys directly in the config file since `~/.config/vision/servers.yaml` is never committed to version control.
+### Secrets Management
+
+Store API keys and tokens in `~/.config/vision/.env` (dot-prefixed, per dotenv convention). Vision loads this file before parsing the config, so `${VAR}` expansion works regardless of how the daemon is started — foreground, background, or systemd.
+
+```bash
+# ~/.config/vision/.env
+CONTEXT7_API_KEY=your-context7-key
+KAGI_API_KEY=your-kagi-key
+FIRECRAWL_API_KEY=your-firecrawl-key
+```
+
+```bash
+# Set restrictive permissions
+chmod 600 ~/.config/vision/.env
+```
+
+Reference them in `servers.yaml`:
+
+```yaml
+servers:
+  context7:
+    env:
+      CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+```
+
+For tools that resolve tokens dynamically from CLI tools (e.g. `gh auth token`), use a bash wrapper:
+
+```yaml
+servers:
+  grep-app:
+    command: bash
+    args: ["-c", "export GITHUB_TOKEN=$(gh auth token) && exec node /path/to/server.js"]
+```
 
 ## File Permissions
 
-When Vision saves `servers.yaml` (e.g. via `vision add`), the file is written with **owner-only permissions** (`0600`). This prevents other users on the system from reading secrets such as `bearer_token` values or API keys stored in the configuration.
+Vision enforces owner-only permissions on sensitive files:
 
-If you create the file manually, ensure its permissions are restricted:
+- **`servers.yaml`** — Written with `0600` permissions when saved via `vision add` or `vision config`. Prevents other users from reading `bearer_token` values or other config secrets.
+- **`.env`** — Should be manually set to `0600` since it contains API keys.
 
 ```bash
 chmod 600 ~/.config/vision/servers.yaml
+chmod 600 ~/.config/vision/.env
 ```
 
 ## Validation
