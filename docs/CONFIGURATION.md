@@ -238,6 +238,16 @@ servers:
 
 However, the simplest approach is to put API keys directly in the config file since `~/.config/vision/servers.yaml` is never committed to version control.
 
+## File Permissions
+
+When Vision saves `servers.yaml` (e.g. via `vision add`), the file is written with **owner-only permissions** (`0600`). This prevents other users on the system from reading secrets such as `bearer_token` values or API keys stored in the configuration.
+
+If you create the file manually, ensure its permissions are restricted:
+
+```bash
+chmod 600 ~/.config/vision/servers.yaml
+```
+
 ## Validation
 
 Validate your configuration:
