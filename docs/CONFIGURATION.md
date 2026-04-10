@@ -240,6 +240,8 @@ servers:
 
 Store API keys and tokens in `~/.config/vision/.env` (dot-prefixed, per dotenv convention). Vision loads this file before parsing the config, so `${VAR}` expansion works regardless of how the daemon is started — foreground, background, or systemd.
 
+After updating `.env`, prefer restarting the daemon (or the affected downstream server/session) before validation. A config reload updates future spawns, but already-running MCP subprocesses may continue using the old environment until they are restarted.
+
 ```bash
 # ~/.config/vision/.env
 CONTEXT7_API_KEY=your-context7-key

@@ -182,6 +182,8 @@ env:
 
 Vision loads `.env` before parsing the config, so `${VAR}` expansion works regardless of how the daemon is started (foreground, background, systemd). The `.env` file should have `0600` permissions since it contains secrets.
 
+> **Important:** After changing `.env`, reload is not always sufficient for already-running downstream subprocesses. New spawns will use the updated values, but long-lived MCP server processes may keep the old environment until they are restarted. After rotating API keys or tokens, prefer a full `vision daemon restart` flow (`vision daemon stop` → `vision daemon start`) or restart the affected server/session before validating the change.
+
 For tools that resolve tokens dynamically (e.g. `gh auth token`), use a bash wrapper:
 
 ```yaml
