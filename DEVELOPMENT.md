@@ -48,7 +48,7 @@ Before modifying global config:
 - [ ] Manual testing complete with test configs
 - [ ] User explicitly approves global config changes
 - [ ] Backup existing configs if they exist
-- [ ] Migration from Jarvis/MCPM tested (if applicable)
+- [ ] Migration from legacy MCPM tested (if applicable)
 
 ### Config Flag Implementation
 

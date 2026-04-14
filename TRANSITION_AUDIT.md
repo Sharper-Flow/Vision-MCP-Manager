@@ -1,18 +1,15 @@
-# Jarvis → Vision Transition Audit
+# Legacy MCPM → Vision Transition Audit
 
 **Date:** 2026-01-19  
-**Purpose:** Ensure complete and correct migration from Jarvis/MCPM to Vision
+**Purpose:** Ensure complete and correct migration from the legacy MCPM stack to Vision
 
 ---
 
 ## 1. Architecture Comparison
 
-### Jarvis/MCPM Architecture
+### Legacy MCPM Architecture
 ```
 Claude Code Config (~/.claude.json)
-    │
-    ├── jarvis (stdio) ─────────────► Jarvis CLI binary
-    │                                  └── Management tools (jarvis_*)
     │
     └── HTTP Profiles ──────────────► MCPM Docker Container (mcp-daemon)
         ├── essentials:6276             ├── time
@@ -46,7 +43,7 @@ Claude Code Config (~/.claude.json)
 
 ## 2. Port Mapping Comparison
 
-### Current (Jarvis/MCPM)
+### Current (Legacy MCPM)
 | Profile | Port | Servers |
 |---------|------|---------|
 | essentials | 6276 | time, fetch-mcp |
@@ -65,14 +62,20 @@ Claude Code Config (~/.claude.json)
 | kagimcp | 6279 | ✅ Configured |
 | arxiv-mcp | 6280 | ✅ Configured |
 | firecrawl | 6281 | ✅ Configured |
+| time | 6282 | ✅ Configured |
+| basic-memory | 6284 | ✅ Configured |
+| lgrep | 6285 | ✅ Configured |
+| sentry | 6289 | ✅ Configured |
+| pokeedge-data-ops | 6290 | ✅ Configured |
+| pokeedge-sync-ops | 6291 | ✅ Configured |
 
 ### ⚠️ GAPS IDENTIFIED
 
-| Server | In Jarvis | In Vision | Action Needed |
+| Server | In Legacy MCPM | In Vision | Action Needed |
 |--------|-----------|-----------|---------------|
-| time | ✅ (essentials) | ❌ Missing | Add to Vision |
-| fetch-mcp | ✅ (essentials) | ❌ Missing | Add to Vision |
-| basic-memory | ✅ (memory) | ❌ Missing | Add to Vision |
+| time | ✅ (essentials) | ✅ Configured | None |
+| fetch-mcp | ✅ (essentials) | ❌ Missing | Optional / add only if needed |
+| basic-memory | ✅ (memory) | ✅ Configured | None |
 | mem0-mcp | ✅ (memory) | ❌ Missing | Optional |
 | mcp-server-qdrant | ✅ (data) | ❌ Missing | Add to Vision |
 | figma-mcp | ✅ (frontend) | ❌ Missing | Optional |
@@ -83,14 +86,10 @@ Claude Code Config (~/.claude.json)
 
 ## 3. Claude Code Config Update Required
 
-### Current Config (`~/.claude.json`)
+### Legacy Config (`~/.claude.json`)
 ```json
 {
   "mcpServers": {
-    "jarvis": {
-      "command": "/home/jrede/dev/MCP/Jarvis/jarvis",
-      "args": []
-    },
     "essentials": {
       "url": "http://localhost:6276/mcp",
       "type": "http"
@@ -225,7 +224,7 @@ Claude Code Config (~/.claude.json)
 ## 6. Transition Checklist
 
 ### Before Go-Live
-- [ ] Add missing essential servers to Vision config (time, fetch-mcp, basic-memory)
+- [ ] Add any still-needed optional servers to Vision config (for example fetch-mcp, qdrant, mem0-mcp)
 - [ ] Add QDRANT_URL to env file
 - [ ] Update Claude Code config with Vision servers
 - [ ] Test Vision daemon starts without errors
@@ -239,7 +238,7 @@ Claude Code Config (~/.claude.json)
 ### Post Go-Live
 - [ ] Monitor logs: `journalctl --user -u vision -f`
 - [ ] Verify all tools respond
-- [ ] Remove Jarvis from Claude Code config (optional, for cleanup)
+- [ ] Remove legacy MCPM endpoints from Claude Code config (optional, for cleanup)
 
 ---
 
@@ -267,7 +266,7 @@ docker start mcp-daemon
 
 ### Files Prepared
 - ✅ `~/.config/vision/servers.yaml` - 10 servers configured
-- ✅ `~/.claude.json.backup-jarvis` - Backup of current config
+- ✅ `~/.claude.json.backup-legacy` - Backup of current config
 - ✅ `~/.claude.json.vision` - New config ready to apply
 
 ### Go-Live Commands
@@ -293,8 +292,8 @@ curl http://localhost:6275/health
 # Stop Vision
 systemctl --user stop vision
 
-# Restore Jarvis OpenCode config
-cp ~/.config/opencode/opencode.json.backup-jarvis ~/.config/opencode/opencode.json
+# Restore previous OpenCode config
+cp ~/.config/opencode/opencode.json.backup-legacy ~/.config/opencode/opencode.json
 
 # Restart MCPM
 docker start mcp-daemon

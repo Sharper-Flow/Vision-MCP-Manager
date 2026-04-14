@@ -1,10 +1,10 @@
-# Migrating from Jarvis/MCPM to Vision
+# Migrating from MCPM to Vision
 
-This guide helps you migrate from the Jarvis/MCPM architecture to Vision.
+This guide helps you migrate from the legacy MCPM architecture to Vision.
 
 ## Overview
 
-Vision is a complete replacement for the Jarvis/MCPM stack:
+Vision is a complete replacement for the legacy MCPM stack:
 
 | Component | Before | After |
 |-----------|--------|-------|
@@ -21,7 +21,7 @@ Vision is a complete replacement for the Jarvis/MCPM stack:
 
 ## Migration Steps
 
-### Step 1: Stop Jarvis/MCPM
+### Step 1: Stop MCPM
 
 ```bash
 # Stop the mcpm daemon
@@ -91,7 +91,7 @@ sudo systemctl start vision
 
 **Claude Code:**
 
-Old (Jarvis):
+Old (MCPM profiles):
 ```json
 {
   "mcpServers": {
@@ -239,10 +239,10 @@ If migration fails:
 # Stop Vision
 vision daemon stop
 
-# Restart Jarvis/MCPM
+# Restart MCPM
 docker compose -f ~/dev/MCP/docker-compose.yaml up -d
 
-# Restore client configs to use Jarvis endpoints
+# Restore client configs to use previous MCPM endpoints
 ```
 
 Your MCPM configuration was backed up during migration and can be restored.
