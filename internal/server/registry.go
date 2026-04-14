@@ -128,7 +128,7 @@ func (r *Registry) Remove(name string) error {
 		return fmt.Errorf("%w: %s", ErrServerNotFound, name)
 	}
 
-	if srv.State == StateRunning || srv.State == StateStarting {
+	if srv.State == StateRunning || srv.State == StateStarting || srv.State == StateStopping {
 		return fmt.Errorf("%w: %s (state: %s)", ErrServerRunning, name, srv.State)
 	}
 
@@ -204,7 +204,30 @@ func (r *Registry) Start(name string) error {
 	srv.StartedAt = time.Now()
 	r.mu.Unlock()
 
-	// Register with supervisor (which will start the process)
+	// For stdio transport, skip supervisor registration — session.Manager is
+	// the sole lifecycle owner for stdio subprocesses. This prevents the leak
+	// where unused daemon-scoped children accumulate across restart generations.
+	if srv.Config.InferTransport() == config.TransportStdio {
+		r.mu.Lock()
+		srv.Process = nil
+		srv.State = StateRunning
+		r.mu.Unlock()
+
+		r.logger.Info("server started (stdio, no supervisor process)",
+			slog.String("name", name),
+			slog.Int("port", srv.Config.Port),
+		)
+
+		r.fireEvent(ServerEvent{
+			Type:   EventServerStarted,
+			Name:   name,
+			Server: srv,
+		})
+
+		return nil
+	}
+
+	// Non-stdio transports use the supervisor normally
 	proc, err := r.supervisor.AddServer(name, srv.Config)
 	if err != nil {
 		r.mu.Lock()
@@ -251,13 +274,16 @@ func (r *Registry) Stop(name string) error {
 	srv.State = StateStopping
 	r.mu.Unlock()
 
-	// Remove from supervisor (which will stop the process)
-	if err := r.supervisor.RemoveServer(name); err != nil {
-		// Log but don't fail - server might already be gone
-		r.logger.Debug("remove from supervisor failed",
-			slog.String("name", name),
-			slog.String("error", err.Error()),
-		)
+	// For stdio servers (where Process is nil), skip supervisor removal.
+	// For non-stdio servers, remove from supervisor (which stops the process).
+	if srv.Process != nil {
+		if err := r.supervisor.RemoveServer(name); err != nil {
+			// Log but don't fail - server might already be gone
+			r.logger.Debug("remove from supervisor failed",
+				slog.String("name", name),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 
 	r.mu.Lock()

@@ -152,9 +152,6 @@ func (d *Daemon) Start() error {
 		}
 	}
 
-	// Give servers a moment to initialize their stdio pipes
-	time.Sleep(500 * time.Millisecond)
-
 	// Set up HTTP proxies for stdio servers
 	if err := d.setupHTTPProxies(); err != nil {
 		d.logger.Warn("some HTTP proxies failed to start", slog.String("error", err.Error()))
@@ -280,6 +277,8 @@ func (d *Daemon) Reload() error {
 	}
 
 	// Remove deleted servers
+	var reloadErrs []error
+
 	for _, name := range toRemove {
 		d.logger.Info("removing server", slog.String("name", name))
 		if err := d.registry.Stop(name); err != nil {
@@ -287,12 +286,14 @@ func (d *Daemon) Reload() error {
 				slog.String("name", name),
 				slog.String("error", err.Error()),
 			)
+			reloadErrs = append(reloadErrs, fmt.Errorf("stop %s: %w", name, err))
 		}
 		if err := d.registry.Remove(name); err != nil {
 			d.logger.Warn("failed to remove server",
 				slog.String("name", name),
 				slog.String("error", err.Error()),
 			)
+			reloadErrs = append(reloadErrs, fmt.Errorf("remove %s: %w", name, err))
 		}
 	}
 
@@ -311,6 +312,7 @@ func (d *Daemon) Reload() error {
 				slog.String("name", name),
 				slog.String("error", err.Error()),
 			)
+			reloadErrs = append(reloadErrs, fmt.Errorf("add %s: %w", name, err))
 			continue
 		}
 		if cfg.Autostart {
@@ -319,6 +321,16 @@ func (d *Daemon) Reload() error {
 					slog.String("name", name),
 					slog.String("error", err.Error()),
 				)
+				reloadErrs = append(reloadErrs, fmt.Errorf("start %s: %w", name, err))
+				// Rollback: remove the added-but-not-started server to keep
+				// the registry consistent. Ignore remove errors since the
+				// server may be in a transitional state.
+				if rmErr := d.registry.Remove(name); rmErr != nil {
+					d.logger.Debug("rollback remove failed",
+						slog.String("name", name),
+						slog.String("error", rmErr.Error()),
+					)
+				}
 			}
 		}
 	}
@@ -336,6 +348,7 @@ func (d *Daemon) Reload() error {
 				slog.String("name", name),
 				slog.String("error", err.Error()),
 			)
+			reloadErrs = append(reloadErrs, fmt.Errorf("update-stop %s: %w", name, err))
 			continue
 		}
 		if err := d.registry.Remove(name); err != nil {
@@ -343,6 +356,7 @@ func (d *Daemon) Reload() error {
 				slog.String("name", name),
 				slog.String("error", err.Error()),
 			)
+			reloadErrs = append(reloadErrs, fmt.Errorf("update-remove %s: %w", name, err))
 			continue
 		}
 
@@ -352,6 +366,7 @@ func (d *Daemon) Reload() error {
 				slog.String("name", name),
 				slog.String("error", err.Error()),
 			)
+			reloadErrs = append(reloadErrs, fmt.Errorf("update-add %s: %w", name, err))
 			continue
 		}
 		if wasRunning || cfg.Autostart {
@@ -360,6 +375,7 @@ func (d *Daemon) Reload() error {
 					slog.String("name", name),
 					slog.String("error", err.Error()),
 				)
+				reloadErrs = append(reloadErrs, fmt.Errorf("update-start %s: %w", name, err))
 			}
 		}
 	}
@@ -370,7 +386,7 @@ func (d *Daemon) Reload() error {
 		slog.Int("updated", len(toUpdate)),
 	)
 
-	return nil
+	return errors.Join(reloadErrs...)
 }
 
 // Status returns the current daemon status.
@@ -420,8 +436,6 @@ func (d *Daemon) setupHTTPProxies() error {
 func (d *Daemon) handleServerEvent(event server.ServerEvent) {
 	switch event.Type {
 	case server.EventServerStarted:
-		// Small delay to ensure stdio pipes are ready
-		time.Sleep(100 * time.Millisecond)
 		if err := d.setupProxyForServer(event.Server); err != nil {
 			d.logger.Warn("failed to setup proxy for server",
 				slog.String("server", event.Name),

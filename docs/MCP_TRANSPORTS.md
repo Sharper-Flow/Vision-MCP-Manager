@@ -157,6 +157,24 @@ Vision:
 3. Proxies MCP requests between the upstream HTTP session and the downstream stdio subprocess
 4. On session teardown, terminates only that session's subprocess
 
+### Subprocess Lifecycle Ownership
+
+Vision has **two independent subprocess lifecycles** for the same configured server. The design branches by transport type to avoid unnecessary accumulation:
+
+**stdio transport:**
+- `registry.Start()` skips the supervisor — no daemon-scoped subprocess is created
+- `session.Manager` is the **sole lifecycle owner** for stdio subprocesses
+- Each upstream session gets its own isolated subprocess via `SpawnSession()`
+- Subprocesses are spawned **lazily** on first HTTP session connect, not at daemon startup
+- Subprocesses are cleaned up by the session reaper (idle timeout / TTL) or on session close
+
+**HTTP/SSE transport:**
+- `registry.Start()` registers the server with the supervisor
+- The supervisor owns the subprocess lifecycle, with automatic restart on crash
+- `session.Manager` forwards requests to the existing server process (no per-session subprocess)
+
+This distinction matters for process accounting: stdio servers report `PID=0` in registry status because no daemon-scoped process exists. This is **correct and expected** — it means "the proxy endpoint is active, but subprocess lifecycle is managed per-session by the session manager."
+
 ### Transport Detection
 
 When `transport` is not specified, Vision infers it from the config:
@@ -171,10 +189,12 @@ When `transport` is not specified, Vision infers it from the config:
 
 | Package | Responsibility |
 |---------|---------------|
-| `internal/session` | `Manager` — per-session subprocess lifecycle (spawn, track, teardown) |
+| `internal/server` | `Registry` — server registration; `Start()`/`Stop()` branch by transport type to skip supervisor for stdio servers; `ManagedServer` — per-server state |
+| `internal/session` | `Manager` — per-session subprocess lifecycle (spawn, track, teardown), reaper |
 | `internal/mcp` | `NewProxyHandler` — creates `StreamableHTTPHandler` with per-session proxy; `PortManager` — manages HTTP listeners per server |
 | `internal/admin` | Admin MCP server on port 6275 with `vision_*` management tools |
 | `internal/daemon` | Orchestrates config, registry, supervisor, and proxy setup |
+| `internal/supervisor` | Suture-based process supervisor for non-stdio transports (HTTP/SSE); not used for stdio servers |
 
 ## References
 

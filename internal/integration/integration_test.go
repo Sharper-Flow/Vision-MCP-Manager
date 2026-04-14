@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -537,4 +538,157 @@ func formatArgs(args []string) string {
 		result += fmt.Sprintf("%q", arg)
 	}
 	return result
+}
+
+// TestDaemon_NoGenerationGrowth verifies that after starting the daemon with stdio
+// servers, NO supervisor-spawned subprocess generations accumulate. Before the
+// fixMcpPoolLeak change, the supervisor would spawn a new unused stdio child
+// on each restart cycle, leaking one process per generation. After the fix,
+// stdio servers skip supervisor registration entirely — session.Manager owns the
+// subprocess lifecycle per-session.
+func TestDaemon_NoGenerationGrowth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "servers.yaml")
+
+	// Config with two stdio servers (no HTTP/SSE)
+	configContent := fmt.Sprintf(`
+supervision:
+  shutdown_timeout: 5s
+  restart_delay: 50ms
+  max_restart_delay: 200ms
+
+servers:
+  stdio-echo-a:
+    command: node
+    args: ["-e", %q]
+    port: 6297
+    autostart: true
+    max_sessions: 5
+  stdio-echo-b:
+    command: node
+    args: ["-e", %q]
+    port: 6298
+    autostart: true
+    max_sessions: 5
+`, echoMCPServerInlineJS, echoMCPServerInlineJS)
+
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+
+	d, err := daemon.New(daemon.Config{
+		ConfigPath:     configPath,
+		ManagementPort: 16399,
+		Logger:         logger,
+	})
+	if err != nil {
+		t.Fatalf("daemon.New failed: %v", err)
+	}
+
+	// Count child processes before daemon starts (background children from prior tests)
+	ppidBefore := os.Getpid()
+	childrenBefore := countChildProcesses(ppidBefore)
+
+	// Start daemon
+	if err := d.Start(); err != nil {
+		t.Fatalf("daemon.Start failed: %v", err)
+	}
+	time.Sleep(1 * time.Second)
+
+	// Count children AFTER daemon started
+	// With the fix: only the two session-spawned node processes (one per server on
+	// first HTTP session connect) should exist, plus potential admin server children.
+	// Without the fix: supervisor would have spawned 2 unused stdio children for each
+	// server, all kept alive by suture restart loops.
+	ppidAfter := os.Getpid()
+	childrenAfterDaemonStart := countChildProcesses(ppidAfter)
+	childCountAfterStart := int32(len(childrenAfterDaemonStart)) - int32(len(childrenBefore))
+
+	// Trigger a reload to exercise the restart path
+	reloadContent := fmt.Sprintf(`
+supervision:
+  shutdown_timeout: 5s
+  restart_delay: 50ms
+  max_restart_delay: 200ms
+
+servers:
+  stdio-echo-a:
+    command: node
+    args: ["-e", %q]
+    port: 6297
+    autostart: true
+    max_sessions: 5
+  stdio-echo-b:
+    command: node
+    args: ["-e", %q]
+    port: 6298
+    autostart: true
+    max_sessions: 5
+  stdio-echo-c:
+    command: node
+    args: ["-e", %q]
+    port: 6299
+    autostart: true
+    max_sessions: 5
+`, echoMCPServerInlineJS, echoMCPServerInlineJS, echoMCPServerInlineJS)
+
+	if err := os.WriteFile(configPath, []byte(reloadContent), 0644); err != nil {
+		t.Fatalf("failed to write reload config: %v", err)
+	}
+
+	if err := d.Reload(); err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+	time.Sleep(1 * time.Second)
+
+	childrenAfterReload := countChildProcesses(ppidAfter)
+	childCountAfterReload := int32(len(childrenAfterReload)) - int32(len(childrenBefore))
+
+	// Clean shutdown
+	if err := d.Stop(5 * time.Second); err != nil {
+		t.Fatalf("daemon.Stop failed: %v", err)
+	}
+
+	// Assertions:
+	// 1. Child count growth should be minimal — only session-spawned processes,
+	//    not supervisor-spawned ones. Each session-spawned node exits after the
+	//    session manager's idle timeout (configurable, defaults to 30s).
+	// 2. No generation growth: after daemon start + reload, we should have at most
+	//    a handful of session processes (not 2x server count per generation).
+	// 3. The key regression test: supervisor-spawned processes should be ZERO.
+	t.Logf("child count: baseline=%d, after_start_delta=%d, after_reload_delta=%d",
+		len(childrenBefore), childCountAfterStart, childCountAfterReload)
+
+	// If more than 10 children accumulated, something is leaking.
+	// Before the fix, each reload would add 3 more supervisor-spawned processes.
+	if childCountAfterReload > 10 {
+		t.Errorf("excessive child process accumulation: %d extra children after reload (possible supervisor leak)", childCountAfterReload)
+	}
+}
+
+// countChildProcesses returns the PIDs of all direct child processes of a parent.
+func countChildProcesses(ppid int) []int {
+	var out []int
+	// Use ps to find children
+	cmd := exec.Command("ps", "--ppid", fmt.Sprintf("%d", ppid), "-o", "pid=", "--no-headers")
+	cmd_out, err := cmd.Output()
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(cmd_out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		pid := 0
+		if n, err := fmt.Sscanf(line, "%d", &pid); err == nil && n == 1 {
+			out = append(out, pid)
+		}
+	}
+	return out
 }

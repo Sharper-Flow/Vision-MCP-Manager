@@ -420,6 +420,35 @@ func TestRegistry_RemoveRunning(t *testing.T) {
 	}
 }
 
+// TestRegistry_RemoveStopping verifies that Remove() is rejected while a server
+// is mid-Stop() (StateStopping). This prevents a race where Remove() deletes
+// the server entry while Stop() is still transitioning state.
+func TestRegistry_RemoveStopping(t *testing.T) {
+	reg, _ := newTestRegistry()
+
+	cfg := &config.ServerConfig{
+		Port:    6276,
+		Command: "echo",
+	}
+
+	reg.Add("test", cfg)
+
+	// Manually set state to StateStopping (simulating mid-Stop)
+	srv := reg.Get("test")
+	srv.State = StateStopping
+
+	err := reg.Remove("test")
+	if err == nil {
+		t.Error("Remove() should fail for server in StateStopping")
+	}
+
+	// After transition to Stopped, Remove should succeed
+	srv.State = StateStopped
+	if err := reg.Remove("test"); err != nil {
+		t.Errorf("Remove() after StateStopped error: %v", err)
+	}
+}
+
 func TestRegistry_StartAllStopAll(t *testing.T) {
 	reg, sup := newTestRegistry()
 
@@ -590,5 +619,142 @@ func TestRegistry_EventHandler_Replace(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Error("Timeout waiting for handler2")
+	}
+}
+
+// TestRegistry_StdioStart_SkipsSupervisor verifies that stdio transport servers
+// skip supervisor registration and do not accumulate generations of subprocesses.
+func TestRegistry_StdioStart_SkipsSupervisor(t *testing.T) {
+	reg, sup := newTestRegistry()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.Serve(ctx)
+
+	cfg := &config.ServerConfig{
+		Port:    6281,
+		Command: "sleep",
+		Args:    []string{"60"},
+	}
+
+	reg.Add("stdio-skip", cfg)
+
+	// Start stdio server
+	if err := reg.Start("stdio-skip"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	srv := reg.Get("stdio-skip")
+	if srv == nil {
+		t.Fatal("Get() returned nil for added server")
+	}
+
+	// State should be Running
+	if srv.State != StateRunning {
+		t.Errorf("State = %q, want %q", srv.State, StateRunning)
+	}
+
+	// Process should be nil (no supervisor process)
+	if srv.Process != nil {
+		t.Errorf("Process = %v, want nil (stdio servers skip supervisor)", srv.Process)
+	}
+
+	// PID should be 0
+	if pid := srv.PID(); pid != 0 {
+		t.Errorf("PID() = %d, want 0 for stdio server", pid)
+	}
+
+	// Supervisor should not have registered this server
+	if sup.GetServer("stdio-skip") != nil {
+		t.Error("Supervisor.GetServer() should return nil for stdio server (skipped supervisor)")
+	}
+
+	// Clean up
+	if err := reg.Stop("stdio-skip"); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	if srv.State != StateStopped {
+		t.Errorf("State after Stop = %q, want %q", srv.State, StateStopped)
+	}
+}
+
+// TestRegistry_StdioStop_NoSupervisor verifies that Stop() handles nil Process
+// gracefully (no supervisor RemoveServer call needed).
+func TestRegistry_StdioStop_NoSupervisor(t *testing.T) {
+	reg, sup := newTestRegistry()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.Serve(ctx)
+
+	cfg := &config.ServerConfig{
+		Port:    6282,
+		Command: "sleep",
+		Args:    []string{"60"},
+	}
+
+	reg.Add("stdio-stop", cfg)
+
+	// Start and stop (both skip supervisor)
+	if err := reg.Start("stdio-stop"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	srv := reg.Get("stdio-stop")
+	if srv.Process != nil {
+		t.Fatalf("Process = %v, want nil before Stop", srv.Process)
+	}
+
+	// Stop should succeed even though Process is nil
+	if err := reg.Stop("stdio-stop"); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+
+	// State should be Stopped
+	if srv.State != StateStopped {
+		t.Errorf("State after Stop = %q, want %q", srv.State, StateStopped)
+	}
+
+	// Server should still be in registry (not removed)
+	if reg.Get("stdio-stop") == nil {
+		t.Error("Server should still be in registry after Stop")
+	}
+}
+
+// TestRegistry_HttpStart_UsesSupervisor verifies that HTTP transport servers
+// still use the supervisor normally (control group for stdio skip behavior).
+func TestRegistry_HttpStart_UsesSupervisor(t *testing.T) {
+	reg, sup := newTestRegistry()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go sup.Serve(ctx)
+
+	cfg := &config.ServerConfig{
+		Port:      6283,
+		URL:       "http://localhost:9999/mcp",
+		Transport: config.TransportHTTP,
+	}
+
+	reg.Add("http-server", cfg)
+
+	if err := reg.Start("http-server"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	srv := reg.Get("http-server")
+	if srv == nil {
+		t.Fatal("Get() returned nil for added server")
+	}
+
+	// HTTP servers should still have a supervisor process
+	if srv.Process == nil {
+		t.Error("Process should not be nil for HTTP server (uses supervisor)")
+	}
+
+	// Clean up
+	if err := reg.Stop("http-server"); err != nil {
+		t.Fatalf("Stop() error: %v", err)
 	}
 }
