@@ -86,6 +86,20 @@ func (s *Server) getTools() []Tool {
 			},
 		},
 		{
+			Name:        "vision_restart",
+			Description: "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
+			InputSchema: InputSchema{
+				Type: "object",
+				Properties: map[string]Property{
+					"name": {
+						Type:        "string",
+						Description: "Name of the server to restart",
+					},
+				},
+				Required: []string{"name"},
+			},
+		},
+		{
 			Name:        "vision_search",
 			Description: "Search the registry for MCP servers by name, capability tags, or description",
 			InputSchema: InputSchema{
@@ -256,6 +270,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		return s.toolAdd(ctx, args)
 	case "vision_remove":
 		return s.toolRemove(ctx, args)
+	case "vision_restart":
+		return s.toolRestart(ctx, args)
 	case "vision_search":
 		return s.toolSearch(ctx, args)
 	case "vision_init":
@@ -620,6 +636,66 @@ func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCal
 		Name:    params.Name,
 	}
 	return jsonToolResult(response)
+}
+
+// RestartResponse is the response for vision_restart.
+type RestartResponse struct {
+	Success bool    `json:"success"`
+	Name    string  `json:"name"`
+	Status  string  `json:"status,omitempty"`
+	Port    *int    `json:"port,omitempty"`
+	Error   *string `json:"error,omitempty"`
+}
+
+// toolRestart implements vision_restart.
+// Restarts a server that is already configured in the runtime registry, preserving
+// its port assignment. Unlike vision_remove + vision_add, this never re-allocates
+// the port, so servers defined in servers.yaml keep their fixed port after restart.
+func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
+	var params struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, NewValidationError("invalid arguments: " + err.Error())
+	}
+
+	if params.Name == "" {
+		return nil, NewValidationError("name is required")
+	}
+
+	if s.registry == nil {
+		errMsg := "Registry not initialized"
+		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg})
+	}
+
+	srv := s.registry.Get(params.Name)
+	if srv == nil {
+		errMsg := fmt.Sprintf("Server '%s' is not configured", params.Name)
+		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg})
+	}
+
+	if err := s.registry.Restart(params.Name); err != nil {
+		errMsg := fmt.Sprintf("Failed to restart server: %s", err.Error())
+		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg})
+	}
+
+	srv = s.registry.Get(params.Name)
+	if srv != nil {
+		status := srv.Status()
+		port := status.Port
+		response := RestartResponse{
+			Success: true,
+			Name:    params.Name,
+			Status:  mapStateToStatus(string(status.State)),
+			Port:    &port,
+		}
+		if status.LastError != "" {
+			response.Error = &status.LastError
+		}
+		return jsonToolResult(response)
+	}
+
+	return jsonToolResult(RestartResponse{Success: true, Name: params.Name, Status: "stopped"})
 }
 
 // SearchResultEntry represents a server in search results.

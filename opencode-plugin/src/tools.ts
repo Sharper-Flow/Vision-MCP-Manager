@@ -24,6 +24,10 @@ export const VisionRemoveArgsSchema = z.object({
   name: z.string().describe("Name of the server to remove"),
 })
 
+export const VisionRestartArgsSchema = z.object({
+  name: z.string().describe("Name of the server to restart"),
+})
+
 export const VisionSearchArgsSchema = z.object({
   query: z
     .string()
@@ -97,6 +101,19 @@ export async function visionRemove(args: z.infer<typeof VisionRemoveArgsSchema>)
   const err = await checkDaemonRunning()
   if (err) return err
   return callTool("vision_remove", {
+    name: args.name,
+  })
+}
+
+/**
+ * Restart a configured MCP server in-place, preserving its port assignment.
+ * Use this instead of vision_remove + vision_add to avoid port drift on
+ * servers defined in servers.yaml.
+ */
+export async function visionRestart(args: z.infer<typeof VisionRestartArgsSchema>): Promise<string> {
+  const err = await checkDaemonRunning()
+  if (err) return err
+  return callTool("vision_restart", {
     name: args.name,
   })
 }

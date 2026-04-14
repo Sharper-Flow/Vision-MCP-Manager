@@ -294,3 +294,107 @@ func TestAdminServer_SecurityMiddleware(t *testing.T) {
 		t.Fatalf("disallowed origin preflight status = %d, want 403", preResp.StatusCode)
 	}
 }
+
+func TestAdminServer_VisionRestart(t *testing.T) {
+	srv := admin.NewServer(admin.Config{Port: 16278})
+	ctx := context.Background()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	time.Sleep(50 * time.Millisecond)
+	url := "http://127.0.0.1:16278/mcp"
+
+	// Initialize session
+	initResp, initRPC := postMCP(t, url, "", rpcRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "initialize",
+		Params: map[string]any{
+			"protocolVersion": "2025-06-18",
+			"capabilities":    map[string]any{},
+			"clientInfo":      map[string]any{"name": "test", "version": "1.0.0"},
+		},
+	})
+	if initResp.StatusCode != http.StatusOK {
+		t.Fatalf("initialize status = %d, want 200", initResp.StatusCode)
+	}
+	if initRPC.Error != nil {
+		t.Fatalf("initialize error = %+v", *initRPC.Error)
+	}
+	sessionID := initResp.Header.Get("Mcp-Session-Id")
+
+	// 1. vision_restart must appear in tools/list
+	_, listRPC := postMCP(t, url, sessionID, rpcRequest{
+		JSONRPC: "2.0", ID: 2, Method: "tools/list", Params: map[string]any{},
+	})
+	if listRPC.Error != nil {
+		t.Fatalf("tools/list error = %+v", *listRPC.Error)
+	}
+	var listResult struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(listRPC.Result, &listResult); err != nil {
+		t.Fatalf("unmarshal tools/list: %v", err)
+	}
+	found := false
+	for _, tool := range listResult.Tools {
+		if tool.Name == "vision_restart" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("vision_restart not found in tools/list")
+	}
+
+	// 2. Calling vision_restart with no name returns a protocol-level error (validation)
+	_, noNameRPC := postMCP(t, url, sessionID, rpcRequest{
+		JSONRPC: "2.0", ID: 3, Method: "tools/call",
+		Params: map[string]any{"name": "vision_restart", "arguments": map[string]any{}},
+	})
+	if noNameRPC.Error == nil {
+		t.Fatal("expected error for missing name, got nil")
+	}
+
+	// 3. Calling vision_restart with an unknown server returns success:false (not a protocol error)
+	_, unknownRPC := postMCP(t, url, sessionID, rpcRequest{
+		JSONRPC: "2.0", ID: 4, Method: "tools/call",
+		Params: map[string]any{
+			"name":      "vision_restart",
+			"arguments": map[string]any{"name": "nonexistent-server"},
+		},
+	})
+	if unknownRPC.Error != nil {
+		t.Fatalf("unexpected protocol error for unknown server: %+v", *unknownRPC.Error)
+	}
+	var restartResult struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(unknownRPC.Result, &restartResult); err != nil {
+		t.Fatalf("unmarshal restart result: %v", err)
+	}
+	if len(restartResult.Content) == 0 {
+		t.Fatal("restart result has no content")
+	}
+	var restartPayload struct {
+		Success bool    `json:"success"`
+		Error   *string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(restartResult.Content[0].Text), &restartPayload); err != nil {
+		t.Fatalf("unmarshal restart payload: %v", err)
+	}
+	if restartPayload.Success {
+		t.Fatal("expected success:false for unknown server, got true")
+	}
+	if restartPayload.Error == nil || *restartPayload.Error == "" {
+		t.Fatal("expected non-empty error message for unknown server")
+	}
+}

@@ -21,11 +21,13 @@ import {
   visionList,
   visionAdd,
   visionRemove,
+  visionRestart,
   visionSearch,
   visionInit,
   visionStatus,
   VisionAddArgsSchema,
   VisionRemoveArgsSchema,
+  VisionRestartArgsSchema,
   VisionSearchArgsSchema,
   VisionInitArgsSchema,
 } from "./tools"
@@ -46,6 +48,7 @@ Use these tools to manage MCP servers:
 - **vision_list** - List all registered servers with status
 - **vision_add** - Add and start an MCP server
 - **vision_remove** - Stop and remove a server
+- **vision_restart** - Restart a server in-place (preserves port — use instead of remove+add)
 - **vision_search** - Search for servers by name or capability
 - **vision_init** - Generate .opencode.json config
 - **vision_status** - Check daemon health
@@ -197,6 +200,16 @@ const VisionPlugin: Plugin = async () => {
         parameters: VisionRemoveArgsSchema,
         execute: async (args: z.infer<typeof VisionRemoveArgsSchema>) => {
           const result = await visionRemove(args)
+          return { content: result }
+        },
+      },
+      {
+        name: "vision_restart",
+        description:
+          "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
+        parameters: VisionRestartArgsSchema,
+        execute: async (args: z.infer<typeof VisionRestartArgsSchema>) => {
+          const result = await visionRestart(args)
           return { content: result }
         },
       },
