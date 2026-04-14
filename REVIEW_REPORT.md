@@ -162,7 +162,7 @@ The daemon includes a catalog of well-known MCP servers:
 |----------|---------|
 | Documentation | context7, svelte |
 | Web/Scraping | firecrawl, fetch, puppeteer |
-| Search | kagi, arxiv, grep-app |
+| Search | kagi, arxiv, gh_grep |
 | Database | postgres, sqlite, qdrant |
 | Utility | time, fetch, filesystem |
 | Memory | basic-memory |

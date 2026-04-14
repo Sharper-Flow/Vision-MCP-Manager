@@ -183,7 +183,7 @@ When `transport` is not specified, Vision infers it from the config:
 |------------|-------------------|
 | `command` | `stdio` |
 
-> **Future:** HTTP and SSE proxy transports may be added for remote/legacy MCP servers.
+> **Current support:** Vision already supports HTTP and SSE proxy transports for remote/native MCP servers. Use `transport: http` or `transport: sse` with `url:` when you intentionally want Vision in front of an upstream MCP endpoint.
 
 ## Internal Packages
 

@@ -184,13 +184,7 @@ Vision loads `.env` before parsing the config, so `${VAR}` expansion works regar
 
 > **Important:** After changing `.env`, reload is not always sufficient for already-running downstream subprocesses. New spawns will use the updated values, but long-lived MCP server processes may keep the old environment until they are restarted. After rotating API keys or tokens, prefer a full `vision daemon restart` flow (`vision daemon stop` → `vision daemon start`) or restart the affected server/session before validating the change.
 
-For tools that resolve tokens dynamically (e.g. `gh auth token`), use a bash wrapper:
-
-```yaml
-grep-app:
-  command: bash
-  args: ["-c", "export GITHUB_TOKEN=$(gh auth token) && exec node /path/to/server.js"]
-```
+For producer-owned remote MCPs like Grep by Vercel, prefer configuring the official remote endpoint directly in your client instead of wrapping it in a local subprocess. If you intentionally want Vision to proxy a remote MCP, use `transport: http` with `url:` in `servers.yaml`.
 
 ### OpenCode Integration
 
@@ -211,8 +205,14 @@ Add Vision to your OpenCode config (`~/.config/opencode/opencode.json`):
     },
     "kagi": {
       "type": "remote",
-      "url": "http://localhost:6284/mcp",
+      "url": "http://localhost:6279/mcp",
       "enabled": true
+    },
+    "gh_grep": {
+      "type": "remote",
+      "url": "https://mcp.grep.app",
+      "enabled": true,
+      "timeout": 20000
     }
   }
 }

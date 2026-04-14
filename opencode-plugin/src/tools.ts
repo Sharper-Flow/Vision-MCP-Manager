@@ -110,7 +110,9 @@ export async function visionRemove(args: z.infer<typeof VisionRemoveArgsSchema>)
  * Use this instead of vision_remove + vision_add to avoid port drift on
  * servers defined in servers.yaml.
  */
-export async function visionRestart(args: z.infer<typeof VisionRestartArgsSchema>): Promise<string> {
+export async function visionRestart(
+  args: z.infer<typeof VisionRestartArgsSchema>
+): Promise<string> {
   const err = await checkDaemonRunning()
   if (err) return err
   return callTool("vision_restart", {

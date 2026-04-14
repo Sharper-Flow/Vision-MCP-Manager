@@ -3,11 +3,8 @@
     "context7": {
       "url": "http://localhost:6276/mcp"
     },
-    "fetch-mcp": {
-      "url": "http://localhost:6283/mcp"
-    },
-    "grep-app": {
-      "url": "http://localhost:6288/mcp"
+    "gh_grep": {
+      "url": "https://mcp.grep.app"
     },
     "kagi": {
       "url": "http://localhost:6279/mcp"

@@ -77,7 +77,7 @@ Claude Code Config (~/.claude.json)
 | mcp-server-qdrant | ✅ (data) | ❌ Missing | Add to Vision |
 | figma-mcp | ✅ (frontend) | ❌ Missing | Optional |
 | playwright | ✅ (frontend) | ❌ Missing | Optional |
-| grep-app | ✅ | ❌ Missing | Add to Vision |
+| gh_grep | ✅ | ✅ Direct remote MCP | Configure directly in OpenCode |
 
 ---
 
@@ -147,17 +147,13 @@ Claude Code Config (~/.claude.json)
       "url": "http://localhost:6282/mcp",
       "type": "http"
     },
-    "fetch-mcp": {
-      "url": "http://localhost:6283/mcp",
-      "type": "http"
-    },
     "basic-memory": {
       "url": "http://localhost:6284/mcp",
       "type": "http"
     },
-    "grep-app": {
-      "url": "http://localhost:6285/mcp",
-      "type": "http"
+    "gh_grep": {
+      "url": "https://mcp.grep.app",
+      "type": "remote"
     }
   }
 }
@@ -179,14 +175,6 @@ Claude Code Config (~/.claude.json)
       - "--local-timezone=America/New_York"
     autostart: true
 
-  fetch-mcp:
-    port: 6283
-    command: npx
-    args:
-      - "-y"
-      - "mcp-fetch-server"
-    autostart: true
-
   basic-memory:
     port: 6284
     command: uvx
@@ -195,11 +183,6 @@ Claude Code Config (~/.claude.json)
       - "mcp"
     autostart: true
 
-  grep-app:
-    port: 6285
-    transport: http
-    url: "https://mcp.grep.app"
-    autostart: true
 ```
 
 ### Priority 2: Data (If Needed)
@@ -277,9 +260,10 @@ docker start mcp-daemon
 
 ### Servers Added to Vision
 - ✅ time (port 6282)
-- ✅ fetch-mcp (port 6283)
 - ✅ basic-memory (port 6284)
-- ✅ grep-app (port 6285, HTTP transport)
+
+### Remote MCPs Configured Directly In OpenCode
+- ✅ gh_grep (`https://mcp.grep.app`)
 
 ### Files Prepared
 - ✅ `~/.config/vision/servers.yaml` - 10 servers configured
@@ -332,6 +316,4 @@ docker start mcp-daemon
 | arxiv-mcp | 6280 | stdio→http | ✅ |
 | firecrawl | 6281 | stdio→http | ✅ |
 | time | 6282 | stdio→http | ✅ |
-| fetch-mcp | 6283 | stdio→http | ✅ |
 | basic-memory | 6284 | stdio→http | - |
-| grep-app | 6285 | http | - |

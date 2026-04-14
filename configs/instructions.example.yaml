@@ -54,12 +54,12 @@ servers:
       - "Find React docs: resolve-library-id libraryName='react' query='hooks'"
       - "Query Next.js routing: query-docs libraryId='/vercel/next.js' query='app router'"
 
-  # grep.app - Code search across GitHub
-  grep-app:
+  # gh_grep - Official Grep by Vercel MCP for code search across GitHub
+  gh_grep:
     priority: high
     guidance: |
-      grep.app searches public code on GitHub for real-world usage examples.
-      Use searchCode to find how others implement specific patterns or use APIs.
+      Grep by Vercel searches public code on GitHub for real-world usage examples.
+      Use searchGitHub to find how others implement specific patterns or use APIs.
       Great for finding examples when documentation is unclear.
     prefer_for:
       - code examples
@@ -70,8 +70,8 @@ servers:
       - documentation (use context7)
       - web search (use kagi)
     examples:
-      - "Find TypeScript examples: searchCode query='useEffect cleanup' langFilter='TypeScript'"
-      - "Search specific repo: searchCode query='authentication' repoFilter='facebook/react'"
+      - "Find TypeScript examples: searchGitHub query='useEffect cleanup' language=['TypeScript']"
+      - "Search specific repo: searchGitHub query='authentication' repo='facebook/react'"
 
   # Firecrawl - Web scraping and extraction
   firecrawl:

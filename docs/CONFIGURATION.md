@@ -212,6 +212,11 @@ Create `.opencode.json` in your project or `~/.opencode.json` globally:
     "context7": {
       "type": "remote",
       "url": "http://localhost:6277/mcp"
+    },
+    "gh_grep": {
+      "type": "remote",
+      "url": "https://mcp.grep.app",
+      "timeout": 20000
     }
   }
 }
@@ -263,13 +268,28 @@ servers:
       CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
 ```
 
-For tools that resolve tokens dynamically from CLI tools (e.g. `gh auth token`), use a bash wrapper:
+For producer-owned remote MCPs like Grep by Vercel, prefer configuring the official remote endpoint directly in the client:
+
+```json
+{
+  "mcp": {
+    "gh_grep": {
+      "type": "remote",
+      "url": "https://mcp.grep.app",
+      "timeout": 20000
+    }
+  }
+}
+```
+
+If you intentionally want Vision to proxy a remote MCP, use native HTTP proxy mode instead of a local wrapper:
 
 ```yaml
 servers:
-  grep-app:
-    command: bash
-    args: ["-c", "export GITHUB_TOKEN=$(gh auth token) && exec node /path/to/server.js"]
+  gh_grep:
+    port: 6288
+    transport: http
+    url: "https://mcp.grep.app"
 ```
 
 ## File Permissions

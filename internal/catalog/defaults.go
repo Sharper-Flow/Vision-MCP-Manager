@@ -192,17 +192,17 @@ func Default() *Catalog {
 
 	// Code Search
 	c.Add(&Entry{
-		Name:        "grep-app",
-		Description: "Search code across GitHub repositories using grep.app",
+		Name:        "gh_grep",
+		Description: "Official Grep by Vercel MCP for searching code across GitHub repositories",
 		Capabilities: []string{
 			"code-search",
 			"github",
 			"grep",
 			"search",
 		},
-		Command: "npx",
-		Args:    []string{"-y", "@anthropic/mcp-grep-app"},
-		Source:  "https://github.com/anthropics/mcp-servers",
+		URL:       "https://mcp.grep.app",
+		Transport: "http",
+		Source:    "https://mcp.grep.app",
 	})
 
 	// Browser Automation
@@ -250,7 +250,7 @@ func CapabilityCategories() map[string][]string {
 			"firecrawl", "fetch", "puppeteer",
 		},
 		"search": {
-			"kagi", "arxiv", "grep-app",
+			"kagi", "arxiv", "gh_grep",
 		},
 		"database": {
 			"postgres", "sqlite", "qdrant",
