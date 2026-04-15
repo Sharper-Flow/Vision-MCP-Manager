@@ -1,6 +1,6 @@
 {
   "name": "vision-plugin",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "OpenCode plugin for Vision MCP daemon - enables AI agents to discover and configure MCP servers",
   "type": "module",
   "main": "src/index.ts",
