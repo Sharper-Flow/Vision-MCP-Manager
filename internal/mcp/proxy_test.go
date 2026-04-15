@@ -885,6 +885,92 @@ func TestProxyHandler_NotificationRelay(t *testing.T) {
 	t.Logf("notification relay test passed: %d -> %d -> %d tools", len(initialTools.Tools), len(updatedTools.Tools), len(postRemovalTools.Tools))
 }
 
+// TestProxySession_DownstreamNotificationsDoNotTouchSession is a regression
+// test for the Vision per-session subprocess leak (see LEAK_REPORT.md).
+//
+// Background: previously, handleToolListChanged, handleLoggingMessage, and
+// handleProgress all called ps.touch(), which updates Manager.LastActivity.
+// Because lgrep and other downstream servers can emit notifications even
+// when the upstream client is dead, this kept idle sessions perpetually
+// "fresh" and prevented the reaper from ever killing orphans. Vision
+// accumulated 11 lgrep zombies (~21 GB RSS) under load.
+//
+// This test asserts that downstream-initiated notifications do NOT bump
+// LastActivity, so the reaper can do its job.
+func TestProxySession_DownstreamNotificationsDoNotTouchSession(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfig()
+
+	mgr := session.NewManager("test-no-touch", cfg, logger)
+	defer mgr.CloseAll()
+
+	const sessionID = "sess-no-touch"
+	if _, err := mgr.SpawnSession(ctx, sessionID); err != nil {
+		t.Fatalf("SpawnSession failed: %v", err)
+	}
+
+	tracked := mgr.GetSession(sessionID)
+	if tracked == nil {
+		t.Fatal("session not tracked after spawn")
+	}
+	initialActivity := tracked.LastActivity
+
+	// Construct a proxySession bound to the spawned tracked session.
+	// upstreamSession is intentionally nil — handleLoggingMessage and
+	// handleProgress early-return, exercising only their entry path
+	// (which previously called ps.touch()).
+	ps := &proxySession{
+		serverName: "test-no-touch",
+		sessionID:  sessionID,
+		mgr:        mgr,
+		logger:     logger,
+	}
+
+	// Sleep long enough that any LastActivity bump would be observable.
+	time.Sleep(50 * time.Millisecond)
+
+	// Fire downstream-style notifications repeatedly.
+	for i := 0; i < 5; i++ {
+		ps.handleLoggingMessage(ctx, &mcp.LoggingMessageParams{
+			Level: "info",
+			Data:  "downstream chatter",
+		})
+		ps.handleProgress(ctx, &mcp.ProgressNotificationParams{
+			ProgressToken: "tok",
+			Progress:      float64(i),
+		})
+	}
+
+	// LastActivity must be unchanged. Allow exact equality because
+	// TouchSession is the only writer and it should never have been called.
+	got := mgr.GetSession(sessionID)
+	if got == nil {
+		t.Fatal("session disappeared")
+	}
+	if !got.LastActivity.Equal(initialActivity) {
+		t.Errorf(
+			"LastActivity was bumped by downstream notifications: initial=%v got=%v (delta=%v). "+
+				"This regression re-introduces the per-session subprocess leak.",
+			initialActivity, got.LastActivity, got.LastActivity.Sub(initialActivity),
+		)
+	}
+
+	// Sanity: a real touch DOES update LastActivity.
+	time.Sleep(20 * time.Millisecond)
+	ps.touch()
+	got = mgr.GetSession(sessionID)
+	if !got.LastActivity.After(initialActivity) {
+		t.Errorf(
+			"explicit ps.touch() did not bump LastActivity: initial=%v got=%v",
+			initialActivity, got.LastActivity,
+		)
+	}
+}
+
 // TestProxyHandler_ConcurrentInitCallDelete hammers the proxy with multiple
 // goroutines each performing initialize → call → close in parallel.
 // This test is specifically designed to surface data races under -race.

@@ -744,9 +744,14 @@ func newPerSessionServer(
 // handleToolListChanged is called when the downstream server notifies that
 // its tool list has changed. It re-discovers tools and updates the upstream
 // server, which automatically sends tools/list_changed to the upstream client.
+//
+// NOTE: We deliberately do NOT call ps.touch() here. This handler runs in
+// response to a *downstream-initiated* notification, not client activity.
+// Touching on server-initiated traffic resets the idle reaper indefinitely
+// and was the root cause of orphaned per-session subprocesses surviving
+// long after the upstream client process exited (see LEAK_REPORT.md).
 func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	ps.logger.Info("downstream tools/list_changed, re-discovering tools")
-	ps.touch()
 
 	// Snapshot downstream under read lock; attempt respawn if closed.
 	ps.downstreamMu.RLock()
@@ -815,8 +820,10 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 }
 
 // handleLoggingMessage relays a logging notification from downstream to upstream.
+//
+// Does NOT touch the session — this is downstream-initiated traffic, not
+// client activity. See handleToolListChanged for rationale.
 func (ps *proxySession) handleLoggingMessage(ctx context.Context, params *mcp.LoggingMessageParams) {
-	ps.touch()
 	ps.mu.Lock()
 	ss := ps.upstreamSession
 	ps.mu.Unlock()
@@ -834,8 +841,10 @@ func (ps *proxySession) handleLoggingMessage(ctx context.Context, params *mcp.Lo
 }
 
 // handleProgress relays a progress notification from downstream to upstream.
+//
+// Does NOT touch the session — this is downstream-initiated traffic, not
+// client activity. See handleToolListChanged for rationale.
 func (ps *proxySession) handleProgress(ctx context.Context, params *mcp.ProgressNotificationParams) {
-	ps.touch()
 	ps.mu.Lock()
 	ss := ps.upstreamSession
 	ps.mu.Unlock()
