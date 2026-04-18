@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/jrede/vision/internal/admin"
 	"github.com/jrede/vision/internal/config"
 	"github.com/jrede/vision/internal/daemon"
 )
@@ -23,6 +24,13 @@ var (
 	commit    = "unknown"
 	buildTime = "unknown"
 )
+
+func init() {
+	// Propagate build-time version metadata to the admin package so
+	// GET /version reflects the running binary's actual version.
+	admin.Version = version
+	admin.BuildInfo = commit + " " + buildTime
+}
 
 // Global flags
 var (

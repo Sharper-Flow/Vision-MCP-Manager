@@ -314,18 +314,43 @@ func (r *Registry) Restart(name string) error {
 	return r.Start(name)
 }
 
+// RequiredStartupError is returned by StartAll when one or more servers
+// with Autostart=true AND Required=true failed to start. Callers can
+// differentiate this from advisory best-effort errors via errors.As so
+// that daemon startup can exit non-zero only for the required failures.
+type RequiredStartupError struct {
+	Failures []string // server names that failed required startup
+	Joined   error    // underlying joined start errors (all startup errors)
+}
+
+func (e *RequiredStartupError) Error() string {
+	return fmt.Sprintf("required servers failed to start: %v: %v", e.Failures, e.Joined)
+}
+
+func (e *RequiredStartupError) Unwrap() error { return e.Joined }
+
 // StartAll starts all servers that have autostart enabled.
+//
+// Best-effort by default: advisory (Required=false) failures are
+// logged + joined but do not fail the whole operation from the caller's
+// perspective (caller decides). When a server has Autostart=true AND
+// Required=true and its start fails, StartAll returns a
+// *RequiredStartupError that wraps the joined error plus the list of
+// required failures — daemon startup should treat this as fatal.
 func (r *Registry) StartAll(ctx context.Context) error {
 	r.mu.RLock()
 	var toStart []string
+	required := make(map[string]bool, len(r.servers))
 	for name, srv := range r.servers {
 		if srv.Config.Autostart {
 			toStart = append(toStart, name)
+			required[name] = srv.Config.Required
 		}
 	}
 	r.mu.RUnlock()
 
 	var errs []error
+	var requiredFailures []string
 	for _, name := range toStart {
 		select {
 		case <-ctx.Done():
@@ -334,14 +359,21 @@ func (r *Registry) StartAll(ctx context.Context) error {
 		}
 
 		if err := r.Start(name); err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			if required[name] {
+				requiredFailures = append(requiredFailures, name)
+			}
 		}
 	}
 
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	if len(errs) == 0 {
+		return nil
 	}
-	return nil
+	joined := errors.Join(errs...)
+	if len(requiredFailures) > 0 {
+		return &RequiredStartupError{Failures: requiredFailures, Joined: joined}
+	}
+	return joined
 }
 
 // StopAll stops all running servers.

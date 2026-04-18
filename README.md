@@ -224,6 +224,40 @@ Or generate automatically:
 vision init --global --client opencode
 ```
 
+## External Configuration Tools
+
+Vision's `~/.config/vision/servers.yaml` is designed to be written by external
+configuration tools as well as edited by hand. A tool such as
+[OpenCode Advance](https://github.com/Sharper-Flow/Opencode-Advance) can render
+a complete `servers.yaml` from its own declarative source of truth and hand it
+to Vision.
+
+**Contract for external writers:**
+
+- `servers.yaml` is **authoritative** on reload. Vision does not merge with
+  prior state — what's in the file is what runs.
+- Use atomic writes (write to a temp file in the same directory, then rename).
+- Validate against the documented schema (`internal/config/schema.go`) before
+  writing.
+- Preserve unknown but reserved fields (e.g. `source`, `description`,
+  `retry.*`, `circuit_breaker.*`) on round-trip when re-rendering from a
+  higher-level source.
+- The admin HTTP surface at `http://127.0.0.1:6275` exposes stable
+  integration endpoints: `GET /version` (capability contract), `GET /health`
+  (aggregate status), `GET /v1/servers` (per-server status), and
+  `GET /v1/servers/{name}` (single server detail).
+- Check `GET /version` for the `api.*` capability flags before calling
+  endpoints — this lets external tools feature-detect without pinning Vision
+  versions.
+
+**Non-contract (intentionally):**
+
+- Vision does not read secrets referenced via `env_file` paths during config
+  parse; those are resolved at server-spawn time. External tools may record
+  paths as-is without materializing the files.
+- Vision does not interpret `source` or `description` beyond preserving them
+  on round-trip.
+
 ## Agent Self-Management
 
 Vision's killer feature: **agents can manage their own tools**.

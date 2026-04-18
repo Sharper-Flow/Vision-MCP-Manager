@@ -102,6 +102,8 @@ func (s *ManagedServer) Status() ServerStatus {
 		restartCount = s.Process.RestartCount()
 	}
 
+	required := s.Config != nil && s.Config.Required
+
 	return ServerStatus{
 		Name:         s.Name,
 		State:        s.State,
@@ -112,6 +114,7 @@ func (s *ManagedServer) Status() ServerStatus {
 		RestartCount: restartCount,
 		LastError:    lastErr,
 		Autostart:    s.Config != nil && s.Config.Autostart,
+		Required:     required,
 	}
 }
 
@@ -126,4 +129,8 @@ type ServerStatus struct {
 	RestartCount int                  `json:"restart_count"`
 	LastError    string               `json:"last_error,omitempty"`
 	Autostart    bool                 `json:"autostart"`
+	// Required reflects the config.ServerConfig.Required flag. External
+	// tools such as OCA doctor use this combined with State to surface
+	// required-but-not-running servers as errors (rather than warnings).
+	Required bool `json:"required"`
 }

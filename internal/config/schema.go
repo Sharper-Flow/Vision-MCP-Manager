@@ -130,6 +130,25 @@ type ServerConfig struct {
 	// MaxInFlightRequests caps concurrent downstream tool calls per server.
 	// 0 means unlimited.
 	MaxInFlightRequests int `yaml:"max_in_flight_requests,omitempty" env:"MAX_IN_FLIGHT_REQUESTS"`
+
+	// Required indicates the server MUST be running for Vision (and any
+	// dependent agent) to function correctly. When both Autostart and
+	// Required are true, initial-start failure is fatal to daemon startup
+	// (daemon.StartAll returns a non-nil error). When Required is true but
+	// Autostart is false, the field is informational only — external tools
+	// such as OCA may surface it in doctor output.
+	Required bool `yaml:"required,omitempty" env:"REQUIRED" env-default:"false"`
+
+	// Source is an informational URL describing where this server comes
+	// from (homepage, repo). Accepted and preserved on round-trip; not
+	// interpreted by Vision. Populated by external configuration tools
+	// such as OpenCode Advance.
+	Source string `yaml:"source,omitempty"`
+
+	// Description is a short human-readable summary of the server.
+	// Accepted and preserved on round-trip; not interpreted by Vision.
+	// Populated by external configuration tools.
+	Description string `yaml:"description,omitempty"`
 }
 
 // RetryConfig controls retry behavior for retryable downstream failures.

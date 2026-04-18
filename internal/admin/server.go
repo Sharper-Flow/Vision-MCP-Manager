@@ -108,9 +108,15 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	mux.Handle("/mcp", visionmcp.SecurityMiddleware(secCfg)(streamable))
 
-	// Health endpoint
+	// Health endpoints
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+
+	// Version + capability contract (OCA integration — V5)
+	mux.HandleFunc("GET /version", s.handleVersion)
+
+	// V1 admin endpoints (OCA integration): /v1/servers, /v1/servers/{name}
+	s.registerV1Routes(mux)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	s.httpSrv = &http.Server{
