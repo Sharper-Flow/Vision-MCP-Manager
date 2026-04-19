@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# vision-clean — restart the Vision daemon to clear stale MCP connections.
+#
+# Usage: vision-clean [--quiet]
+#   --quiet   Suppress status output; still prints errors to stderr.
+
+set -euo pipefail
+
+QUIET=""
+if [[ "${1:-}" == "--quiet" ]]; then
+    QUIET=1
+fi
+
+vision_pid_file() {
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
+        printf '%s\n' "$XDG_RUNTIME_DIR/vision.pid"
+    else
+        printf '%s\n' "/tmp/vision.pid"
+    fi
+}
+
+vision_running() {
+    local pid_file pid
+    pid_file="$(vision_pid_file)"
+    [[ -r "$pid_file" ]] || return 1
+    pid="$(cat "$pid_file" 2>/dev/null || true)"
+    [[ -n "$pid" ]] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+if ! command -v vision >/dev/null 2>&1; then
+    echo "ERROR: vision binary not found on PATH" >&2
+    echo "       Install it first: bash ~/dev/vision/scripts/install.sh" >&2
+    exit 1
+fi
+
+if [[ -z "$QUIET" ]]; then
+    echo "Stopping Vision daemon..."
+fi
+if ! vision daemon stop; then
+    echo "ERROR: 'vision daemon stop' failed; aborting before restart" >&2
+    exit 1
+fi
+
+attempts=0
+max_attempts=20
+while true; do
+    if ! vision_running; then
+        break
+    fi
+    attempts=$((attempts + 1))
+    if (( attempts >= max_attempts )); then
+        echo "ERROR: daemon did not stop within timeout; aborting before restart" >&2
+        echo "pid file: $(vision_pid_file)" >&2
+        exit 1
+    fi
+    sleep 1
+done
+
+if [[ -z "$QUIET" ]]; then
+    echo "Starting Vision daemon..."
+fi
+vision daemon start
+
+if [[ -z "$QUIET" ]]; then
+    echo "Status:"
+    vision daemon status
+fi

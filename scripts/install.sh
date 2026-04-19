@@ -207,6 +207,23 @@ YAML
     log_success "Created default config"
 }
 
+install_aux_scripts() {
+    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local dest_dir="$INSTALL_DIR"
+    local src="$script_dir/vision-clean"
+    local dest="$dest_dir/vision-clean"
+
+    if [[ ! -f "$src" ]]; then
+        log_warn "Aux script not found: $src"
+        return
+    fi
+
+    mkdir -p "$dest_dir"
+    chmod +x "$src"
+    ln -sfn "$src" "$dest"
+    log_success "Installed auxiliary script to $dest"
+}
+
 install_systemd_user() {
     local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local service_file="${script_dir}/vision-user.service"
@@ -389,6 +406,9 @@ main() {
     
     # Install default config
     install_config
+
+    # Install helper scripts
+    install_aux_scripts
     
     # Install systemd service
     if ! $skip_service; then
