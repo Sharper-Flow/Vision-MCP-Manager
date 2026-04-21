@@ -154,6 +154,7 @@ func extractTextContent(t *testing.T, result *mcp.CallToolResult) string {
 }
 
 type testSelector struct {
+	mu         sync.Mutex
 	atCapacity bool
 	current    int
 	max        int
@@ -164,18 +165,52 @@ type testSelector struct {
 }
 
 func (s *testSelector) CloseAll() {}
-func (s *testSelector) AdmissionStatus() (bool, int, int) { return s.atCapacity, s.current, s.max }
+func (s *testSelector) AdmissionStatus() (bool, int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.atCapacity, s.current, s.max
+}
 func (s *testSelector) SelectForNewSession(ctx context.Context, upstreamSessionID string) (*session.Manager, error) {
+	s.mu.Lock()
 	s.selected = append(s.selected, upstreamSessionID)
-	if s.mgr == nil {
+	mgr := s.mgr
+	s.mu.Unlock()
+	if mgr == nil {
 		return nil, errors.New("not implemented in admission-only test")
 	}
-	return s.mgr, nil
+	return mgr, nil
 }
-func (s *testSelector) Rebind(oldKey, newKey string) { s.rebound = append(s.rebound, [2]string{oldKey, newKey}) }
+func (s *testSelector) Rebind(oldKey, newKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rebound = append(s.rebound, [2]string{oldKey, newKey})
+}
 func (s *testSelector) ReportSpawnResult(sessionKey string, err error) {}
 func (s *testSelector) SetOnSessionRemoved(fn func(sessionID string)) {}
-func (s *testSelector) Release(upstreamSessionID string) { s.released = append(s.released, upstreamSessionID) }
+func (s *testSelector) Release(upstreamSessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.released = append(s.released, upstreamSessionID)
+}
+
+// snapshots used by tests to read observed calls safely under -race.
+func (s *testSelector) selectedLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.selected)
+}
+func (s *testSelector) reboundSnapshot() [][2]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([][2]string, len(s.rebound))
+	copy(out, s.rebound)
+	return out
+}
+func (s *testSelector) releasedLen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.released)
+}
 
 func TestNewProxyHandler_PanicsWhenSelectorAndSessionManagerBothSet(t *testing.T) {
 	defer func() {
@@ -253,14 +288,15 @@ func TestProxyHandler_SelectorLifecycle(t *testing.T) {
 		t.Fatalf("client.Connect failed: %v", err)
 	}
 
-	if len(selector.selected) != 1 {
-		t.Fatalf("selector selected count = %d, want 1", len(selector.selected))
+	if selector.selectedLen() != 1 {
+		t.Fatalf("selector selected count = %d, want 1", selector.selectedLen())
 	}
-	if len(selector.rebound) != 1 {
-		t.Fatalf("selector rebound count = %d, want 1", len(selector.rebound))
+	rebound := selector.reboundSnapshot()
+	if len(rebound) != 1 {
+		t.Fatalf("selector rebound count = %d, want 1", len(rebound))
 	}
-	if selector.rebound[0][0] == "" || selector.rebound[0][1] == "" {
-		t.Fatalf("selector rebound keys should both be non-empty: %#v", selector.rebound)
+	if rebound[0][0] == "" || rebound[0][1] == "" {
+		t.Fatalf("selector rebound keys should both be non-empty: %#v", rebound)
 	}
 
 	if err := sess.Close(); err != nil {
@@ -268,10 +304,10 @@ func TestProxyHandler_SelectorLifecycle(t *testing.T) {
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	for len(selector.released) == 0 && time.Now().Before(deadline) {
+	for selector.releasedLen() == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if len(selector.released) == 0 {
+	if selector.releasedLen() == 0 {
 		t.Fatal("selector Release was not called")
 	}
 }
