@@ -6,7 +6,7 @@ Vision is designed to be the central hub for AI agents interacting with the Mode
 
 Agents typically interact with Vision in two ways:
 
-1.  **Consuming Tools**: The agent connects to Vision-managed HTTP endpoints (ports 6276-6300) to use specific MCP tools (e.g., Google Search, Filesystem, Time).
+1.  **Consuming Tools**: The agent connects to Vision-managed HTTP endpoints (ports 6276-6325) to use specific MCP tools (e.g., Google Search, Filesystem, Time).
 2.  **Managing Infrastructure**: The agent connects to Vision's Admin MCP server (port 6275) to manage the toolset itself—adding new servers, restarting failed ones, or searching for new capabilities.
 
 ## Admin MCP Tools (Port 6275)

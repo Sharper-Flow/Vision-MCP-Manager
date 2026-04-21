@@ -644,6 +644,58 @@ func TestServerConfig_SlotMetadataIgnoredByDefaults(t *testing.T) {
 	}
 }
 
+func TestServerConfig_PortsAbove6300ValidateThrough6325(t *testing.T) {
+	cases := []struct {
+		name string
+		port int
+		err  error
+	}{
+		{"boundary 6300 ok", 6300, nil},
+		{"extended 6301 ok", 6301, nil},
+		{"extended 6325 ok", 6325, nil},
+		{"extended 6326 rejected", 6326, ErrInvalidPort},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := ServerConfig{Port: tc.port, Command: "echo"}
+			err := cfg.Validate("test")
+			if tc.err == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !errors.Is(err, tc.err) {
+				t.Fatalf("err = %v, want %v", err, tc.err)
+			}
+		})
+	}
+}
+
+func TestExpandSlotGroups_AllowsBasePortInExtendedRange(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{},
+		SlotGroups: map[string]*SlotGroupConfig{
+			"pool": {
+				Template:  "pool-slot",
+				BasePort:  6315,
+				Count:     4,
+				GroupPort: 6314,
+				Defaults:  &ServerConfig{Command: "echo"},
+			},
+		},
+	}
+	if err := expandSlotGroups(cfg); err != nil {
+		t.Fatalf("expandSlotGroups() error: %v", err)
+	}
+	if got := cfg.Servers["pool-slot-4"].Port; got != 6318 {
+		t.Fatalf("pool-slot-4 port = %d, want 6318", got)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+}
+
 func TestConfig_AllowsSlotGroupsField(t *testing.T) {
 	cfg := &Config{
 		Servers: map[string]*ServerConfig{

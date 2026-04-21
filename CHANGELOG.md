@@ -1,6 +1,20 @@
 # Changelog
 
-## 2026-04-21
+## 2026-04-21 (v1.1.1)
+
+### Port range expansion for slot groups
+
+#### What changed
+- `MaxPort` expanded from `6300` to `6325` (range doubled from 25 to 50 ports).
+- Existing configs using ports in the original 6276–6300 range continue to validate unchanged.
+
+#### Why
+- v1.1.0 slot groups consume `count + 1` ports per group (N slots plus one virtual port). Realistic deployments with 3–4 stateful pools hit the original 25-port ceiling before the feature could be adopted.
+
+#### Migration
+- No action required for existing configs. Ports 6301–6325 are now available for new servers or slot-group expansion.
+
+## 2026-04-21 (v1.1.0)
 
 ### Slot groups: transparent load-balanced MCP server pools
 

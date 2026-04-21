@@ -80,4 +80,4 @@ OpenCode supports two MCP transport types:
 - **Never commit `.opencode.json`** - User-specific configuration
 - Environment variables like `${CONTEXT7_API_KEY}` are expanded at runtime
 - Port numbers in client configs must match the server registry
-- Each Vision-managed server gets a dedicated port (6276-6300)
+- Each Vision-managed server gets a dedicated port (6276-6325)

@@ -4,7 +4,7 @@
 # This file defines all MCP servers available on this machine.
 # Each server gets a dedicated port for security isolation.
 #
-# Port allocation: 6276-6300 (Management API uses 6275)
+# Port allocation: 6276-6325 (Management API uses 6275)
 
 servers:
   #############################################################################

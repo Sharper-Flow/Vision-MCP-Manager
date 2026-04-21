@@ -9,10 +9,15 @@ import (
 	"time"
 )
 
-// Port range allocated for Vision MCP servers
+// Port range allocated for Vision MCP servers.
+//
+// The range is 6276–6325 (50 ports). It was originally 6276–6300 (25 ports)
+// before slot groups existed; v1.1.1 doubled the range to give realistic
+// deployments enough headroom for multiple slot groups (each group consumes
+// count + 1 ports: slots + virtual group port).
 const (
 	MinPort = 6276
-	MaxPort = 6300
+	MaxPort = 6325
 )
 
 // TransportType defines how Vision connects to an MCP server.
@@ -261,7 +266,7 @@ func (d Duration) String() string {
 
 // Validation errors
 var (
-	ErrInvalidPort                    = errors.New("config: port must be between 6276 and 6300")
+	ErrInvalidPort                    = errors.New("config: port must be between 6276 and 6325")
 	ErrDuplicatePort                  = errors.New("config: duplicate port assignment")
 	ErrMissingCommand                 = errors.New("config: stdio transport requires 'command' field")
 	ErrEmptyCommand                   = errors.New("config: command cannot be empty string")

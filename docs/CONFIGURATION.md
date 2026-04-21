@@ -25,7 +25,7 @@ You can override this with:
 # Server definitions
 servers:
   <server-name>:
-    # HTTP port for this server (required, range: 6276-6300)
+    # HTTP port for this server (required, range: 6276-6325)
     port: 6276
     
     # Transport type (auto-detected if not specified)
@@ -199,14 +199,14 @@ slot_groups:
     template: <string>           # required
 
     # Port assigned to the first slot. Subsequent slots get
-    # base_port+1, base_port+2, etc. All must fall within 6276-6300.
+    # base_port+1, base_port+2, etc. All must fall within 6276-6325.
     base_port: <int>             # required
 
     # Number of identical slots to create. Minimum: 2.
     count: <int>                 # required, >= 2
 
     # Port for the virtual group endpoint that agents connect to.
-    # Also must be within 6276-6300 and not overlap with any
+    # Also must be within 6276-6325 and not overlap with any
     # slot ports or other servers.
     group_port: <int>            # required
 
@@ -300,7 +300,7 @@ In the OpenCode client config, point Playwright at the virtual group port:
 
 - `count` must be ≥ 2.
 - Synthesized server names (`<template>-1`, etc.) must not collide with existing `servers:` keys.
-- All generated ports (`base_port` through `base_port + count - 1`) must be unique and within 6276–6300.
+- All generated ports (`base_port` through `base_port + count - 1`) must be unique and within 6276–6325.
 - `group_port` must not overlap with any slot port or other server port.
 
 #### Save / round-trip behavior
@@ -447,7 +447,7 @@ vision config validate
 This checks:
 - YAML syntax
 - Required fields
-- Port range (6276-6300)
+- Port range (6276-6325)
 - No port conflicts
 - Transport configuration consistency
 
@@ -471,11 +471,11 @@ On reload, Vision:
 
 ## Port Allocation
 
-Vision allocates ports 6276-6300 for MCP servers:
+Vision allocates ports 6276-6325 for MCP servers:
 
 | Port | Purpose |
 |------|---------|
 | 6275 | Management API |
-| 6276-6300 | MCP servers |
+| 6276-6325 | MCP servers |
 
 Each server MUST have a unique port. The CLI will automatically allocate the next available port when adding servers.

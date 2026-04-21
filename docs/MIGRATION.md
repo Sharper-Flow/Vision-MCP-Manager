@@ -203,7 +203,7 @@ journalctl -u vision -f
 
 ### Port already in use
 
-Vision uses ports 6275-6300. If you have conflicts:
+Vision uses ports 6275-6325. If you have conflicts:
 ```bash
 # Find what's using the port
 lsof -i :6276
