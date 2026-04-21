@@ -4,6 +4,20 @@
 // subprocess is spawned via session.Manager, and tool handlers are registered
 // that forward calls to the downstream ClientSession.
 //
+// Routing modes:
+//   - Fixed manager: ProxyConfig.SessionManager is set. Every upstream session
+//     spawns a downstream through that single manager. Used by single-server
+//     stdio proxies.
+//   - Slot-group selector: ProxyConfig.Selector is set. On each new upstream
+//     session, the selector picks which underlying manager should own the
+//     session (least-loaded healthy slot). The chosen manager is stored on the
+//     resulting proxySession so respawn and stale-session recovery stay on the
+//     same slot. Used by the virtual group listener built by the daemon for
+//     transparent multi-slot routing.
+//
+// Exactly one of SessionManager or Selector must be set; NewProxyHandler panics
+// otherwise.
+//
 // Downstream-to-upstream notification relay:
 //   - tools/list_changed: re-discovers tools from downstream and updates upstream server
 //   - logging/message: relayed via ServerSession.Log()
@@ -131,6 +145,11 @@ type ProxyConfig struct {
 	// SessionManager manages downstream subprocess lifecycle.
 	SessionManager *session.Manager
 
+	// Selector chooses which session manager should own a new upstream session.
+	// Used by slot groups for transparent routing. When nil, SessionManager is
+	// used directly.
+	Selector ManagerSelector
+
 	// Logger for proxy operations.
 	Logger *slog.Logger
 
@@ -165,6 +184,14 @@ type ProxyConfig struct {
 	MaxInFlightRequests int
 }
 
+// hasExactlyOneManagerSource reports whether exactly one of SessionManager or
+// Selector is set. NewProxyHandler requires this invariant.
+func (cfg ProxyConfig) hasExactlyOneManagerSource() bool {
+	hasManager := cfg.SessionManager != nil
+	hasSelector := cfg.Selector != nil
+	return hasManager != hasSelector
+}
+
 // NewProxyHandler creates a StreamableHTTPHandler that proxies MCP requests
 // to per-session downstream subprocesses.
 //
@@ -175,6 +202,9 @@ type ProxyConfig struct {
 //  4. The server is returned to handle the session
 //  5. Notifications from downstream are relayed to the upstream client
 func NewProxyHandler(cfg ProxyConfig) http.Handler {
+	if !cfg.hasExactlyOneManagerSource() {
+		panic("mcp: exactly one of SessionManager or Selector must be set")
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -225,13 +255,36 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				ps.closeDownstream("session removed by manager")
 			}
 		})
+	} else if cfg.Selector != nil {
+		cfg.Selector.SetOnSessionRemoved(func(sessionID string) {
+			idx.mu.RLock()
+			ps := idx.byDownstream[sessionID]
+			idx.mu.RUnlock()
+			if ps != nil {
+				ps.closeDownstream("session removed by manager")
+			}
+		})
 	}
 
 	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		mgr := cfg.SessionManager
+		pendingKey := ""
+		if cfg.Selector != nil {
+			pendingKey = fmt.Sprintf("selector-%s-%d", cfg.ServerName, nextSessionID())
+			selectedMgr, err := cfg.Selector.SelectForNewSession(r.Context(), pendingKey)
+			if err != nil {
+				logger.Warn("failed to select session manager",
+					slog.String("error", err.Error()),
+				)
+				return nil
+			}
+			mgr = selectedMgr
+		}
+
 		srv, err := newPerSessionServer(
 			r.Context(),
 			cfg.ServerName,
-			cfg.SessionManager,
+			mgr,
 			logger,
 			sharedTools,
 			inFlightLimiter,
@@ -240,12 +293,22 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			cfg.RetryConfig,
 			cfg.CircuitBreakerConfig,
 			func(upstreamSessionID string, ps *proxySession) {
+				if cfg.Selector != nil && pendingKey != "" {
+					cfg.Selector.Rebind(pendingKey, upstreamSessionID)
+				}
 				idx.mu.Lock()
 				idx.byUpstream[upstreamSessionID] = ps
 				idx.byDownstream[ps.sessionID] = ps
 				idx.mu.Unlock()
 			},
 			func(upstreamSessionID string) {
+				if cfg.Selector != nil {
+					if upstreamSessionID != "" {
+						cfg.Selector.Release(upstreamSessionID)
+					} else if pendingKey != "" {
+						cfg.Selector.Release(pendingKey)
+					}
+				}
 				idx.mu.Lock()
 				ps := idx.byUpstream[upstreamSessionID]
 				delete(idx.byUpstream, upstreamSessionID)
@@ -272,17 +335,30 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			},
 		)
 		if err != nil {
+			if cfg.Selector != nil && pendingKey != "" {
+				cfg.Selector.ReportSpawnResult(pendingKey, err)
+				cfg.Selector.Release(pendingKey)
+			}
 			logger.Warn("failed to create per-session proxy server",
 				slog.String("error", err.Error()),
 			)
 			return nil
 		}
+		if cfg.Selector != nil && pendingKey != "" {
+			cfg.Selector.ReportSpawnResult(pendingKey, nil)
+		}
 		return srv
 	}, nil)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" && isInitializeRequest(r) && cfg.SessionManager != nil {
-			if atCapacity, current, max := cfg.SessionManager.AdmissionStatus(); atCapacity {
+		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" && isInitializeRequest(r) {
+			var admission AdmissionStatuser
+			if cfg.Selector != nil {
+				admission = cfg.Selector
+			} else {
+				admission = cfg.SessionManager
+			}
+			if atCapacity, current, max := admission.AdmissionStatus(); atCapacity {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]any{

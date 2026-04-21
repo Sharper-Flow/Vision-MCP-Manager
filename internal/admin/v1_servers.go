@@ -101,6 +101,8 @@ func (s *Server) handleV1ServerDetail(w http.ResponseWriter, r *http.Request) {
 func (s *Server) registerV1Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/servers", s.handleV1Servers)
 	mux.HandleFunc("GET /v1/servers/{name}", s.handleV1ServerDetail)
+	mux.HandleFunc("GET /v1/slots", s.handleV1Slots)
+	mux.HandleFunc("GET /v1/slots/{group}", s.handleV1SlotsGroup)
 }
 
 // scrubSecrets redacts common secret patterns from error messages before

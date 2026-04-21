@@ -175,6 +175,138 @@ servers:
     session_ttl: 1h
 ```
 
+### Slot Groups
+
+Slot groups let you define a pool of identical MCP servers behind a single virtual endpoint. Vision transparently routes each incoming session to the least-loaded healthy slot — agents connect to one port and never know how many backing processes exist.
+
+**When to use:** Servers that need process-per-session isolation but can't share a single process across concurrent clients. The canonical example is Playwright MCP, where each slot holds its own `BrowserContext` and browser page state.
+
+#### How it works
+
+1. You declare a `slot_groups` section in `servers.yaml` with a template name, base port, count, and a group port.
+2. Vision expands each group into `count` flat server entries at load time, naming them `<template>-1`, `<template>-2`, …, `<template>-<count>`.
+3. Each slot gets a sequential port starting from `base_port`.
+4. A virtual listener on `group_port` receives all MCP traffic. The multiplexer selects the slot with the fewest active sessions (pending + established), skipping unhealthy or at-capacity slots. Ties break by slot index (lower wins).
+5. Once an upstream session is bound to a slot, it stays on that slot for its entire lifetime (sticky routing).
+
+#### Schema
+
+```yaml
+slot_groups:
+  <group-name>:
+    # Prefix for synthesized server names (<template>-1, <template>-2, ...).
+    # Must not collide with any key in the servers: map.
+    template: <string>           # required
+
+    # Port assigned to the first slot. Subsequent slots get
+    # base_port+1, base_port+2, etc. All must fall within 6276-6300.
+    base_port: <int>             # required
+
+    # Number of identical slots to create. Minimum: 2.
+    count: <int>                 # required, >= 2
+
+    # Port for the virtual group endpoint that agents connect to.
+    # Also must be within 6276-6300 and not overlap with any
+    # slot ports or other servers.
+    group_port: <int>            # required
+
+    # Defaults applied to every synthesized server. Supports all
+    # ServerConfig fields except port (set automatically).
+    defaults:                    # optional
+      command: npx
+      args: ["-y", "@anthropic/mcp-server"]
+      autostart: true
+      stateful: true
+      max_sessions: 1
+      # ... any valid ServerConfig field
+```
+
+#### Example: 8-slot Playwright pool
+
+This creates 8 Playwright MCP processes (`playwright-1` through `playwright-8` on ports 6284–6291) behind a single virtual endpoint on port 6283. Agents connect to `http://localhost:6283/mcp` and Vision routes each session to the least-loaded slot.
+
+```yaml
+slot_groups:
+  playwright:
+    template: playwright
+    base_port: 6284
+    count: 8
+    group_port: 6283
+    defaults:
+      command: npx
+      args:
+        - "-y"
+        - "@anthropic/mcp-playwright"
+        - "--browser"
+        - "chromium"
+      autostart: true
+      stateful: true
+      max_sessions: 1
+      session_timeout: 30m
+      session_ttl: 2h
+```
+
+In the OpenCode client config, point Playwright at the virtual group port:
+
+```json
+{
+  "mcp": {
+    "playwright": {
+      "type": "remote",
+      "url": "http://localhost:6283/mcp"
+    }
+  }
+}
+```
+
+#### Routing semantics
+
+| Behavior | Detail |
+|----------|--------|
+| **Selection** | Least-loaded healthy slot (sessions + pending in-flight initializations) |
+| **Tie-breaking** | Lowest slot index wins |
+| **Stickiness** | An upstream session is bound to one slot for its full lifetime |
+| **Health awareness** | Slots whose backing process is not `running` are skipped; slots that recently failed initialization are quarantined for 2 seconds |
+| **Capacity** | If every bounded slot has reached its `max_sessions` and no unlimited slot exists, new sessions receive a max-sessions error |
+| **Direct access** | Individual slot ports remain accessible — you can connect directly to `playwright-3` on port 6286 for debugging |
+
+#### Observability
+
+**MCP tool** — Call `vision_slot_status` from the admin MCP server (port 6275) to see per-slot session counts:
+
+```json
+{
+  "groups": [
+    {
+      "group_name": "playwright",
+      "slot_count": 8,
+      "slots": [
+        { "name": "playwright-1", "port": 6284, "active_sessions": 1, "max_sessions": 1 },
+        { "name": "playwright-2", "port": 6285, "active_sessions": 0, "max_sessions": 1 }
+      ]
+    }
+  ]
+}
+```
+
+**HTTP endpoints** — The admin HTTP surface also exposes slot status:
+
+| Endpoint | Returns |
+|----------|---------|
+| `GET /v1/slots` | All slot groups with per-slot detail |
+| `GET /v1/slots/{group}` | Single group detail (404 if unknown) |
+
+#### Validation rules
+
+- `count` must be ≥ 2.
+- Synthesized server names (`<template>-1`, etc.) must not collide with existing `servers:` keys.
+- All generated ports (`base_port` through `base_port + count - 1`) must be unique and within 6276–6300.
+- `group_port` must not overlap with any slot port or other server port.
+
+#### Save / round-trip behavior
+
+When `vision config save` (or any write-back path) persists the config, it preserves the `slot_groups:` section and omits the synthesized slot entries. On the next load, expansion runs again. This means you can safely edit the `slot_groups:` block and reload — your hand-written `servers:` entries are never overwritten.
+
 ## Client Configurations
 
 ### Claude Code

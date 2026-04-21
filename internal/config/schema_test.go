@@ -624,6 +624,50 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	}
 }
 
+func TestServerConfig_SlotMetadataIgnoredByDefaults(t *testing.T) {
+	cfg := &ServerConfig{
+		Command:   "echo",
+		SlotGroup: "playwright",
+		SlotIndex: 3,
+	}
+
+	cfg.ApplyDefaults()
+
+	if cfg.SlotGroup != "playwright" {
+		t.Fatalf("SlotGroup = %q, want %q", cfg.SlotGroup, "playwright")
+	}
+	if cfg.SlotIndex != 3 {
+		t.Fatalf("SlotIndex = %d, want %d", cfg.SlotIndex, 3)
+	}
+	if cfg.RestartPolicy != RestartOnFailure {
+		t.Fatalf("RestartPolicy = %q, want %q", cfg.RestartPolicy, RestartOnFailure)
+	}
+}
+
+func TestConfig_AllowsSlotGroupsField(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{
+			"playwright-slot-1": {Command: "echo", SlotGroup: "playwright", SlotIndex: 1},
+		},
+		SlotGroups: map[string]*SlotGroupConfig{
+			"playwright": {
+				Template:  "playwright-slot",
+				BasePort:  6287,
+				Count:     8,
+				GroupPort: 6286,
+				Defaults:  &ServerConfig{Command: "echo"},
+			},
+		},
+	}
+
+	if got := cfg.SlotGroups["playwright"].Template; got != "playwright-slot" {
+		t.Fatalf("Template = %q, want %q", got, "playwright-slot")
+	}
+	if got := cfg.Servers["playwright-slot-1"].SlotGroup; got != "playwright" {
+		t.Fatalf("SlotGroup = %q, want %q", got, "playwright")
+	}
+}
+
 func TestDuration_String(t *testing.T) {
 	d := Duration(30 * time.Second)
 	if d.String() != "30s" {

@@ -149,6 +149,24 @@ type ServerConfig struct {
 	// Accepted and preserved on round-trip; not interpreted by Vision.
 	// Populated by external configuration tools.
 	Description string `yaml:"description,omitempty"`
+
+	// SlotGroup is internal metadata set when this server was synthesized from a
+	// slot_groups entry. It is not persisted to YAML.
+	SlotGroup string `yaml:"-"`
+
+	// SlotIndex is the 1-based position of the synthesized server within its
+	// slot group. It is not persisted to YAML.
+	SlotIndex int `yaml:"-"`
+}
+
+// SlotGroupConfig defines a pool of identical servers plus one virtual group
+// endpoint that routes sessions to the least-loaded healthy slot.
+type SlotGroupConfig struct {
+	Template  string        `yaml:"template"`
+	BasePort  int           `yaml:"base_port"`
+	Count     int           `yaml:"count"`
+	GroupPort int           `yaml:"group_port"`
+	Defaults  *ServerConfig `yaml:"defaults,omitempty"`
 }
 
 // RetryConfig controls retry behavior for retryable downstream failures.
@@ -197,6 +215,10 @@ type SecurityConfig struct {
 type Config struct {
 	// Servers maps server names to their configurations.
 	Servers map[string]*ServerConfig `yaml:"servers"`
+
+	// SlotGroups declaratively define pools of identical servers that may be
+	// expanded into flat server entries at load time.
+	SlotGroups map[string]*SlotGroupConfig `yaml:"slot_groups,omitempty"`
 
 	// Security holds daemon-wide security settings for MCP endpoints.
 	Security SecurityConfig `yaml:"security"`

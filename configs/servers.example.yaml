@@ -106,6 +106,41 @@ servers:
   # - `shared_read_only_tools` opt specific tool names into cross-session coalescing/cache
   # - `max_in_flight_requests` caps real downstream work per server
 
+  #############################################################################
+  # SLOT GROUPS (Transparent Load-Balanced Pools)
+  # Define a pool of identical servers behind one virtual port.
+  # Vision routes each session to the least-loaded healthy slot.
+  #############################################################################
+
+  # Example: 4-slot Playwright pool for concurrent browser automation
+  # Creates playwright-slot-{1..4} on ports 6284-6287.
+  # Agents connect to the virtual port 6283 — Vision handles routing.
+  #
+  # slot_groups:
+  #   playwright:
+  #     template: playwright-slot       # Synthesized names: playwright-slot-1, -2, -3, -4
+  #     base_port: 6284                 # First slot port; subsequent = 6285, 6286, 6287
+  #     count: 4                        # Number of identical slots (minimum: 2)
+  #     group_port: 6283                # Virtual endpoint agents connect to
+  #     defaults:
+  #       command: npx
+  #       args: ["-y", "@anthropic/mcp-playwright", "--browser", "chromium"]
+  #       autostart: true
+  #       stateful: true               # Each slot runs its own subprocess
+  #       max_sessions: 1              # One session per slot (one browser context)
+  #       session_timeout: 30m
+  #       session_ttl: 2h
+  #
+  # In your OpenCode config, point at the virtual group port:
+  #   "playwright": { "type": "remote", "url": "http://localhost:6283/mcp" }
+  #
+  # Check slot status via admin API:
+  #   curl http://localhost:6275/v1/slots
+  #   curl http://localhost:6275/v1/slots/playwright
+
+# Slot groups are preserved on config save; synthesized slot entries are not
+# persisted. You can safely reload after editing slot_groups.
+
 # Global supervision settings
 supervision:
   # How often to check server health

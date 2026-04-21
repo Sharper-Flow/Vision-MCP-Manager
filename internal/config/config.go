@@ -132,6 +132,9 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrConfigParse, err)
 	}
+	if err := expandSlotGroups(&cfg); err != nil {
+		return nil, err
+	}
 
 	// Apply defaults for missing values
 	cfg.ApplyDefaults()
@@ -215,8 +218,13 @@ func ExpandEnvVars(input string) string {
 // Save writes a config to the given path using atomic write.
 // It writes to a temp file first, then renames for atomicity.
 func Save(cfg *Config, path string) error {
+	configToSave := cfg
+	if cfg != nil {
+		configToSave = cfg.configForSave()
+	}
+
 	// Marshal config to YAML
-	data, err := yaml.Marshal(cfg)
+	data, err := yaml.Marshal(configToSave)
 	if err != nil {
 		return fmt.Errorf("config: marshal error: %w", err)
 	}
@@ -265,6 +273,41 @@ func Save(cfg *Config, path string) error {
 	return nil
 }
 
+func (c *Config) configForSave() *Config {
+	if c == nil {
+		return nil
+	}
+
+	clone := &Config{
+		Servers:     make(map[string]*ServerConfig, len(c.Servers)),
+		SlotGroups:  make(map[string]*SlotGroupConfig, len(c.SlotGroups)),
+		Security:    c.Security,
+		Supervision: c.Supervision,
+	}
+
+	for name, server := range c.Servers {
+		if server == nil || server.SlotGroup != "" {
+			continue
+		}
+		serverCopy := *server
+		clone.Servers[name] = &serverCopy
+	}
+
+	for name, group := range c.SlotGroups {
+		if group == nil {
+			continue
+		}
+		groupCopy := *group
+		if group.Defaults != nil {
+			defaultsCopy := *group.Defaults
+			groupCopy.Defaults = &defaultsCopy
+		}
+		clone.SlotGroups[name] = &groupCopy
+	}
+
+	return clone
+}
+
 // MustLoad loads a config file, panicking on error.
 // Useful for tests and initialization where errors should be fatal.
 func MustLoad(path string) *Config {
@@ -283,6 +326,9 @@ func ParseYAML(data string) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrConfigParse, err)
+	}
+	if err := expandSlotGroups(&cfg); err != nil {
+		return nil, err
 	}
 
 	cfg.ApplyDefaults()

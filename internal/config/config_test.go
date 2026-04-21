@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -202,6 +203,200 @@ servers:
 	}
 }
 
+func TestExpandSlotGroups_ExpandsSlotGroups(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{},
+		SlotGroups: map[string]*SlotGroupConfig{
+			"playwright": {
+				Template:  "playwright-slot",
+				BasePort:  6287,
+				Count:     2,
+				GroupPort: 6286,
+				Defaults: &ServerConfig{
+					Command: "npx",
+					Args:    []string{"@playwright/mcp@latest", "--isolated"},
+				},
+			},
+		},
+	}
+
+	err := expandSlotGroups(cfg)
+	if err != nil {
+		t.Fatalf("expandSlotGroups() error: %v", err)
+	}
+
+	if got := len(cfg.Servers); got != 2 {
+		t.Fatalf("len(cfg.Servers) = %d, want 2", got)
+	}
+	if cfg.SlotGroups["playwright"] == nil {
+		t.Fatal("SlotGroups[playwright] missing")
+	}
+
+	first := cfg.GetServer("playwright-slot-1")
+	if first == nil {
+		t.Fatal("playwright-slot-1 missing")
+	}
+	if first.Port != 6287 {
+		t.Fatalf("playwright-slot-1 port = %d, want 6287", first.Port)
+	}
+	if first.SlotGroup != "playwright" {
+		t.Fatalf("playwright-slot-1 SlotGroup = %q, want playwright", first.SlotGroup)
+	}
+	if first.SlotIndex != 1 {
+		t.Fatalf("playwright-slot-1 SlotIndex = %d, want 1", first.SlotIndex)
+	}
+	if first.Command != "npx" {
+		t.Fatalf("playwright-slot-1 Command = %q, want npx", first.Command)
+	}
+
+	second := cfg.GetServer("playwright-slot-2")
+	if second == nil {
+		t.Fatal("playwright-slot-2 missing")
+	}
+	if second.Port != 6288 {
+		t.Fatalf("playwright-slot-2 port = %d, want 6288", second.Port)
+	}
+	if second.SlotGroup != "playwright" {
+		t.Fatalf("playwright-slot-2 SlotGroup = %q, want playwright", second.SlotGroup)
+	}
+	if second.SlotIndex != 2 {
+		t.Fatalf("playwright-slot-2 SlotIndex = %d, want 2", second.SlotIndex)
+	}
+}
+
+func TestExpandSlotGroups_SlotGroupTemplateCollision(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{
+			"playwright-slot-1": {Port: 6287, Command: "echo"},
+		},
+		SlotGroups: map[string]*SlotGroupConfig{
+			"playwright": {
+				Template:  "playwright-slot",
+				BasePort:  6288,
+				Count:     2,
+				GroupPort: 6286,
+				Defaults:  &ServerConfig{Command: "npx"},
+			},
+		},
+	}
+
+	err := expandSlotGroups(cfg)
+	if err == nil {
+		t.Fatal("expandSlotGroups() expected slot-group collision error, got nil")
+	}
+}
+
+func TestExpandSlotGroups_AssignsContiguousPortsFromBasePort(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{},
+		SlotGroups: map[string]*SlotGroupConfig{
+			"playwright": {
+				Template:  "playwright-slot",
+				BasePort:  6290,
+				Count:     3,
+				GroupPort: 6289,
+				Defaults:  &ServerConfig{Command: "echo"},
+			},
+		},
+	}
+
+	if err := expandSlotGroups(cfg); err != nil {
+		t.Fatalf("expandSlotGroups() error: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		port int
+	}{
+		{"playwright-slot-1", 6290},
+		{"playwright-slot-2", 6291},
+		{"playwright-slot-3", 6292},
+	}
+	for _, tc := range cases {
+		srv, ok := cfg.Servers[tc.name]
+		if !ok {
+			t.Fatalf("missing synthesized server %q", tc.name)
+		}
+		if srv.Port != tc.port {
+			t.Fatalf("%s port = %d, want %d", tc.name, srv.Port, tc.port)
+		}
+	}
+}
+
+func TestExpandSlotGroups_SlotGroupCountMustBeAtLeastTwo(t *testing.T) {
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{},
+		SlotGroups: map[string]*SlotGroupConfig{
+			"playwright": {
+				Template:  "playwright-slot",
+				BasePort:  6287,
+				Count:     1,
+				GroupPort: 6286,
+				Defaults:  &ServerConfig{Command: "npx"},
+			},
+		},
+	}
+
+	err := expandSlotGroups(cfg)
+	if err == nil {
+		t.Fatal("expandSlotGroups() expected slot-group count error, got nil")
+	}
+}
+
+func TestParseYAML_WiresExpandSlotGroups(t *testing.T) {
+	yaml := `
+slot_groups:
+  playwright:
+    template: playwright-slot
+    base_port: 6287
+    count: 2
+    group_port: 6286
+    defaults:
+      command: npx
+`
+
+	cfg, err := ParseYAML(yaml)
+	if err != nil {
+		t.Fatalf("ParseYAML() error: %v", err)
+	}
+	if got := len(cfg.Servers); got != 2 {
+		t.Fatalf("len(cfg.Servers) = %d, want 2", got)
+	}
+	if cfg.GetServer("playwright-slot-2") == nil {
+		t.Fatal("playwright-slot-2 missing after ParseYAML wiring")
+	}
+}
+
+func TestLoad_WiresExpandSlotGroups(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "slot-groups.yaml")
+
+	data := `
+slot_groups:
+  playwright:
+    template: playwright-slot
+    base_port: 6287
+    count: 2
+    group_port: 6286
+    defaults:
+      command: npx
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if got := len(cfg.Servers); got != 2 {
+		t.Fatalf("len(cfg.Servers) = %d, want 2", got)
+	}
+	if cfg.GetServer("playwright-slot-1") == nil {
+		t.Fatal("playwright-slot-1 missing after Load wiring")
+	}
+}
+
 func TestSave(t *testing.T) {
 	// Create temp directory
 	tmpDir := t.TempDir()
@@ -251,6 +446,70 @@ func TestSave(t *testing.T) {
 	}
 	if test.Command != "echo" {
 		t.Errorf("Command = %q after reload, want %q", test.Command, "echo")
+	}
+}
+
+func TestSave_RoundTripsSlotGroupsWithoutExpandedServers(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "slot-groups-config.yaml")
+
+	cfg := &Config{
+		Servers: map[string]*ServerConfig{
+			"playwright-slot-1": {
+				Port:      6287,
+				Command:   "npx",
+				Args:      []string{"@playwright/mcp@latest", "--isolated"},
+				SlotGroup: "playwright",
+				SlotIndex: 1,
+			},
+			"playwright-slot-2": {
+				Port:      6288,
+				Command:   "npx",
+				Args:      []string{"@playwright/mcp@latest", "--isolated"},
+				SlotGroup: "playwright",
+				SlotIndex: 2,
+			},
+		},
+		SlotGroups: map[string]*SlotGroupConfig{
+			"playwright": {
+				Template:  "playwright-slot",
+				BasePort:  6287,
+				Count:     2,
+				GroupPort: 6286,
+				Defaults: &ServerConfig{
+					Command: "npx",
+					Args:    []string{"@playwright/mcp@latest", "--isolated"},
+				},
+			},
+		},
+	}
+	cfg.ApplyDefaults()
+
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "slot_groups:") {
+		t.Fatalf("saved config missing slot_groups section:\n%s", text)
+	}
+	if strings.Contains(text, "playwright-slot-1:") {
+		t.Fatalf("saved config should not persist expanded slot server entries:\n%s", text)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() after Save() error: %v", err)
+	}
+	if len(loaded.Servers) != 2 {
+		t.Fatalf("len(loaded.Servers) = %d, want 2", len(loaded.Servers))
+	}
+	if loaded.SlotGroups["playwright"] == nil {
+		t.Fatal("SlotGroups[playwright] missing after reload")
 	}
 }
 

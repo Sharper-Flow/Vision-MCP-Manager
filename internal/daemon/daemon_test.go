@@ -4,12 +4,15 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/jrede/vision/internal/config"
+	visionmcp "github.com/jrede/vision/internal/mcp"
+	"github.com/jrede/vision/internal/session"
 )
 
 // --- PID File Tests ---
@@ -261,6 +264,114 @@ func TestReload_AggregatesErrors(t *testing.T) {
 
 	if err := d.Reload(); err != nil {
 		t.Fatalf("Reload should succeed for valid config: %v", err)
+	}
+}
+
+func TestSetupSlotGroupProxies_RegistersVirtualGroupListener(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pm := visionmcp.NewPortManager(logger)
+	d := &Daemon{
+		cfg: &config.Config{
+			Servers: map[string]*config.ServerConfig{
+				"playwright-slot-1": {Port: 6287, Command: "echo", SlotGroup: "playwright", SlotIndex: 1},
+				"playwright-slot-2": {Port: 6288, Command: "echo", SlotGroup: "playwright", SlotIndex: 2},
+			},
+			SlotGroups: map[string]*config.SlotGroupConfig{
+				"playwright": {Template: "playwright-slot", BasePort: 6287, Count: 2, GroupPort: 6286},
+			},
+		},
+		portManager: pm,
+		logger:      logger,
+	}
+
+	if err := pm.AddStreamable("playwright-slot-1", 0, http.NotFoundHandler(), session.NewManager("playwright-slot-1", &config.ServerConfig{Command: "echo"}, logger)); err != nil {
+		t.Fatalf("AddStreamable(slot-1): %v", err)
+	}
+	if err := pm.AddStreamable("playwright-slot-2", 0, http.NotFoundHandler(), session.NewManager("playwright-slot-2", &config.ServerConfig{Command: "echo"}, logger)); err != nil {
+		t.Fatalf("AddStreamable(slot-2): %v", err)
+	}
+	defer pm.Close()
+
+	if err := d.setupSlotGroupProxies(); err != nil {
+		t.Fatalf("setupSlotGroupProxies(): %v", err)
+	}
+
+	listener := pm.Get("slot_group:playwright")
+	if listener == nil {
+		t.Fatal("expected virtual slot-group listener to be registered")
+	}
+	if listener.Port != 6286 {
+		t.Fatalf("listener.Port = %d, want 6286", listener.Port)
+	}
+}
+
+func TestSyncSlotGroupProxies_RecreatesChangedGroupListener(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pm := visionmcp.NewPortManager(logger)
+	oldCfg := &config.Config{
+		Servers: map[string]*config.ServerConfig{
+			"playwright-slot-1": {Port: 6287, Command: "echo", SlotGroup: "playwright", SlotIndex: 1},
+			"playwright-slot-2": {Port: 6288, Command: "echo", SlotGroup: "playwright", SlotIndex: 2},
+		},
+		SlotGroups: map[string]*config.SlotGroupConfig{
+			"playwright": {Template: "playwright-slot", BasePort: 6287, Count: 2, GroupPort: 6286},
+		},
+	}
+	newCfg := &config.Config{
+		Servers: oldCfg.Servers,
+		SlotGroups: map[string]*config.SlotGroupConfig{
+			"playwright": {Template: "playwright-slot", BasePort: 6287, Count: 2, GroupPort: 6290},
+		},
+	}
+	d := &Daemon{cfg: newCfg, portManager: pm, logger: logger}
+
+	if err := pm.AddStreamable("playwright-slot-1", 0, http.NotFoundHandler(), session.NewManager("playwright-slot-1", &config.ServerConfig{Command: "echo"}, logger)); err != nil {
+		t.Fatalf("AddStreamable(slot-1): %v", err)
+	}
+	if err := pm.AddStreamable("playwright-slot-2", 0, http.NotFoundHandler(), session.NewManager("playwright-slot-2", &config.ServerConfig{Command: "echo"}, logger)); err != nil {
+		t.Fatalf("AddStreamable(slot-2): %v", err)
+	}
+	if err := pm.AddStreamable("slot_group:playwright", 6286, http.NotFoundHandler(), nil); err != nil {
+		t.Fatalf("AddStreamable(old-group): %v", err)
+	}
+	defer pm.Close()
+
+	if err := d.syncSlotGroupProxies(oldCfg, newCfg); err != nil {
+		t.Fatalf("syncSlotGroupProxies(): %v", err)
+	}
+	if pm.Get("slot_group:playwright") != nil {
+		t.Fatal("expected changed slot group listener to be removed before re-add")
+	}
+	if err := d.setupSlotGroupProxies(); err != nil {
+		t.Fatalf("setupSlotGroupProxies(): %v", err)
+	}
+	listener := pm.Get("slot_group:playwright")
+	if listener == nil || listener.Port != 6290 {
+		t.Fatalf("recreated listener missing or wrong port: %#v", listener)
+	}
+}
+
+func TestSyncSlotGroupProxies_RemovesDeletedGroupListener(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pm := visionmcp.NewPortManager(logger)
+	oldCfg := &config.Config{
+		SlotGroups: map[string]*config.SlotGroupConfig{
+			"playwright": {Template: "playwright-slot", BasePort: 6287, Count: 2, GroupPort: 6286},
+		},
+	}
+	newCfg := &config.Config{SlotGroups: map[string]*config.SlotGroupConfig{}}
+	d := &Daemon{cfg: newCfg, portManager: pm, logger: logger}
+
+	if err := pm.AddStreamable("slot_group:playwright", 6286, http.NotFoundHandler(), nil); err != nil {
+		t.Fatalf("AddStreamable(old-group): %v", err)
+	}
+	defer pm.Close()
+
+	if err := d.syncSlotGroupProxies(oldCfg, newCfg); err != nil {
+		t.Fatalf("syncSlotGroupProxies(): %v", err)
+	}
+	if pm.Get("slot_group:playwright") != nil {
+		t.Fatal("expected deleted slot group listener to be removed")
 	}
 }
 

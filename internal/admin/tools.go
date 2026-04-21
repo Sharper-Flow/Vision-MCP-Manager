@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -159,6 +162,14 @@ func (s *Server) getTools() []Tool {
 				},
 			},
 		},
+		{
+			Name:        "vision_slot_status",
+			Description: "List all slot groups with per-slot session details: name, port, active_sessions, max_sessions. Read-only operator tool for monitoring slot-group routing health.",
+			InputSchema: InputSchema{
+				Type:       "object",
+				Properties: map[string]Property{},
+			},
+		},
 	}
 }
 
@@ -280,6 +291,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		return s.toolStatus(ctx, args)
 	case "vision_guidance":
 		return s.toolGuidance(ctx, args)
+	case "vision_slot_status":
+		return s.toolSlotStatus(ctx, args)
 	default:
 		// Should never reach here due to isValidTool check
 		return nil, fmt.Errorf("unknown tool: %s", name)
@@ -298,9 +311,17 @@ type ListServerEntry struct {
 	Error  *string `json:"error"`
 }
 
+// SlotGroupEntry describes one slot group in the vision_list response.
+type SlotGroupEntry struct {
+	Name      string   `json:"name"`
+	GroupPort int      `json:"group_port"`
+	Slots     []string `json:"slots"`
+}
+
 // ListResponse is the response for vision_list.
 type ListResponse struct {
-	Servers []ListServerEntry `json:"servers"`
+	Servers    []ListServerEntry `json:"servers"`
+	SlotGroups []SlotGroupEntry  `json:"slot_groups"`
 }
 
 // toolList implements vision_list.
@@ -348,6 +369,9 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 		response.Servers = append(response.Servers, info)
 	}
 
+	// Populate slot_groups from daemon config (additive — does not alter servers).
+	response.SlotGroups = s.buildSlotGroups()
+
 	// Serialize to JSON
 	jsonBytes, err := json.Marshal(response)
 	if err != nil {
@@ -359,6 +383,109 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 			{Type: "text", Text: string(jsonBytes)},
 		},
 	}, nil
+}
+
+// buildSlotGroups produces the slot_groups section for vision_list. It reads
+// the declarative SlotGroups from the daemon config and resolves each group's
+// slot membership by scanning cfg.Servers for entries whose SlotGroup field
+// matches the group name.
+func (s *Server) buildSlotGroups() []SlotGroupEntry {
+	if s.daemonConfig == nil || len(s.daemonConfig.SlotGroups) == 0 {
+		return []SlotGroupEntry{}
+	}
+
+	groups := make([]SlotGroupEntry, 0, len(s.daemonConfig.SlotGroups))
+	for name, sg := range s.daemonConfig.SlotGroups {
+		entry := SlotGroupEntry{
+			Name:      name,
+			GroupPort: sg.GroupPort,
+		}
+
+		// Collect slot members from the expanded servers map.
+		for srvName, srvCfg := range s.daemonConfig.Servers {
+			if srvCfg != nil && srvCfg.SlotGroup == name {
+				entry.Slots = append(entry.Slots, srvName)
+			}
+		}
+		sort.Strings(entry.Slots)
+
+		groups = append(groups, entry)
+	}
+
+	// Sort groups by name for deterministic output.
+	slices.SortFunc(groups, func(a, b SlotGroupEntry) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
+
+	return groups
+}
+
+// SlotSessionAccessor provides active session counts for slot servers.
+// The daemon wires a concrete implementation; when nil, active_sessions is 0.
+type SlotSessionAccessor interface {
+	ActiveSessionCount(slotName string) int
+}
+
+// SlotStatusResponse is the response for vision_slot_status.
+type SlotStatusResponse struct {
+	Groups []SlotGroupStatus `json:"groups"`
+}
+
+// SlotGroupStatus describes one slot group with per-slot session detail.
+type SlotGroupStatus struct {
+	GroupName string       `json:"group_name"`
+	SlotCount int          `json:"slot_count"`
+	Slots     []SlotDetail `json:"slots"`
+}
+
+// SlotDetail describes one slot within a group.
+type SlotDetail struct {
+	Name           string `json:"name"`
+	Port           int    `json:"port"`
+	ActiveSessions int    `json:"active_sessions"`
+	MaxSessions    int    `json:"max_sessions"`
+}
+
+// toolSlotStatus implements vision_slot_status.
+func (s *Server) toolSlotStatus(_ context.Context, _ json.RawMessage) (*ToolCallResult, error) {
+	if s.daemonConfig == nil || len(s.daemonConfig.SlotGroups) == 0 {
+		return jsonToolResult(SlotStatusResponse{Groups: []SlotGroupStatus{}})
+	}
+
+	groups := make([]SlotGroupStatus, 0, len(s.daemonConfig.SlotGroups))
+	for groupName := range s.daemonConfig.SlotGroups {
+		g := SlotGroupStatus{GroupName: groupName}
+
+		for srvName, srvCfg := range s.daemonConfig.Servers {
+			if srvCfg == nil || srvCfg.SlotGroup != groupName {
+				continue
+			}
+			slot := SlotDetail{
+				Name:        srvName,
+				Port:        srvCfg.Port,
+				MaxSessions: srvCfg.MaxSessions,
+			}
+			if s.slotSessionAccessor != nil {
+				slot.ActiveSessions = s.slotSessionAccessor.ActiveSessionCount(srvName)
+			}
+			g.Slots = append(g.Slots, slot)
+		}
+
+		// Sort slots by name for deterministic output.
+		slices.SortFunc(g.Slots, func(a, b SlotDetail) int {
+			return cmp.Compare(a.Name, b.Name)
+		})
+
+		g.SlotCount = len(g.Slots)
+		groups = append(groups, g)
+	}
+
+	// Sort groups by name for deterministic output.
+	slices.SortFunc(groups, func(a, b SlotGroupStatus) int {
+		return cmp.Compare(a.GroupName, b.GroupName)
+	})
+
+	return jsonToolResult(SlotStatusResponse{Groups: groups})
 }
 
 // mapStateToStatus maps internal state names to spec status values.

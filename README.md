@@ -164,6 +164,8 @@ servers:
 
 > **Availability profiles:** Set `availability_profile: networked` for servers backed by upstream web/API providers. Vision applies stronger timeout, retry, circuit-breaker, cache, and in-flight limit defaults while still keeping per-session downstream isolation by default.
 
+> **Slot groups:** For servers that need concurrent process-per-session isolation (e.g. Playwright browser automation), declare a `slot_groups` pool in `servers.yaml`. Vision expands the pool into identical slots behind a single virtual port and transparently routes each session to the least-loaded healthy slot — agents connect to one endpoint and never see the underlying processes. See [Configuration Reference](docs/CONFIGURATION.md#slot-groups) for the full schema and examples.
+
 ### API Keys and Secrets
 
 Store API keys in `~/.config/vision/.env` and reference them via `${VAR}` in `servers.yaml`:

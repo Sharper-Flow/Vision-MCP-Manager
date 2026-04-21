@@ -1,9 +1,11 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -149,6 +151,129 @@ func extractTextContent(t *testing.T, result *mcp.CallToolResult) string {
 		t.Fatalf("expected TextContent, got %T", result.Content[0])
 	}
 	return tc.Text
+}
+
+type testSelector struct {
+	atCapacity bool
+	current    int
+	max        int
+	mgr        *session.Manager
+	selected   []string
+	rebound    [][2]string
+	released   []string
+}
+
+func (s *testSelector) CloseAll() {}
+func (s *testSelector) AdmissionStatus() (bool, int, int) { return s.atCapacity, s.current, s.max }
+func (s *testSelector) SelectForNewSession(ctx context.Context, upstreamSessionID string) (*session.Manager, error) {
+	s.selected = append(s.selected, upstreamSessionID)
+	if s.mgr == nil {
+		return nil, errors.New("not implemented in admission-only test")
+	}
+	return s.mgr, nil
+}
+func (s *testSelector) Rebind(oldKey, newKey string) { s.rebound = append(s.rebound, [2]string{oldKey, newKey}) }
+func (s *testSelector) ReportSpawnResult(sessionKey string, err error) {}
+func (s *testSelector) SetOnSessionRemoved(fn func(sessionID string)) {}
+func (s *testSelector) Release(upstreamSessionID string) { s.released = append(s.released, upstreamSessionID) }
+
+func TestNewProxyHandler_PanicsWhenSelectorAndSessionManagerBothSet(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when both SessionManager and Selector are set")
+		}
+	}()
+
+	logger := testLogger(t)
+	mgr := session.NewManager("both-set", testServerConfig(), logger)
+	_ = NewProxyHandler(ProxyConfig{
+		ServerName:     "both-set",
+		SessionManager: mgr,
+		Selector:       &testSelector{},
+		Logger:         logger,
+	})
+}
+
+func TestNewProxyHandler_PanicsWhenSelectorAndSessionManagerBothNil(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when both SessionManager and Selector are nil")
+		}
+	}()
+
+	_ = NewProxyHandler(ProxyConfig{ServerName: "both-nil", Logger: testLogger(t)})
+}
+
+func TestProxyHandler_UsesSelectorAdmissionStatusForInitialize(t *testing.T) {
+	selector := &testSelector{atCapacity: true, current: 4, max: 4}
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName: "selector-only",
+		Selector:   selector,
+		Logger:     testLogger(t),
+	})
+
+	body := bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", body)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusTooManyRequests)
+	}
+	respBody, err := io.ReadAll(w.Result().Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error: %v", err)
+	}
+	if !strings.Contains(string(respBody), "max sessions reached: limit 4 (current 4)") {
+		t.Fatalf("unexpected body: %s", respBody)
+	}
+}
+
+func TestProxyHandler_SelectorLifecycle(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	mgr := session.NewManager("selector-lifecycle", testServerConfig(), logger)
+	selector := &testSelector{mgr: mgr}
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName: "selector-lifecycle",
+		Selector:   selector,
+		Logger:     logger,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "client-a", Version: "1.0.0"}, nil)
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("client.Connect failed: %v", err)
+	}
+
+	if len(selector.selected) != 1 {
+		t.Fatalf("selector selected count = %d, want 1", len(selector.selected))
+	}
+	if len(selector.rebound) != 1 {
+		t.Fatalf("selector rebound count = %d, want 1", len(selector.rebound))
+	}
+	if selector.rebound[0][0] == "" || selector.rebound[0][1] == "" {
+		t.Fatalf("selector rebound keys should both be non-empty: %#v", selector.rebound)
+	}
+
+	if err := sess.Close(); err != nil {
+		t.Fatalf("sess.Close failed: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for len(selector.released) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(selector.released) == 0 {
+		t.Fatal("selector Release was not called")
+	}
 }
 
 func TestProxyHandler_CoalescesConcurrentReadOnlyCalls(t *testing.T) {

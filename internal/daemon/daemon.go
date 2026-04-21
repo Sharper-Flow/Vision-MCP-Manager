@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/jrede/vision/internal/mcp"
 	"github.com/jrede/vision/internal/server"
 	"github.com/jrede/vision/internal/session"
+	"github.com/jrede/vision/internal/slots"
 	"github.com/jrede/vision/internal/supervisor"
 )
 
@@ -98,7 +100,7 @@ func New(cfg Config) (*Daemon, error) {
 		Instructions: instructions,
 		DaemonConfig: visionCfg,
 		ConfigPath:   cfg.ConfigPath,
-		Port:         admin.DefaultPort, // 6275
+		Port:         cfg.ManagementPort,
 		Logger:       cfg.Logger,
 	})
 
@@ -155,6 +157,9 @@ func (d *Daemon) Start() error {
 	// Set up HTTP proxies for stdio servers
 	if err := d.setupHTTPProxies(); err != nil {
 		d.logger.Warn("some HTTP proxies failed to start", slog.String("error", err.Error()))
+	}
+	if err := d.setupSlotGroupProxies(); err != nil {
+		d.logger.Warn("some slot group proxies failed to start", slog.String("error", err.Error()))
 	}
 
 	// NOTE: Legacy REST API removed - use Admin MCP on port 6275 instead
@@ -299,6 +304,9 @@ func (d *Daemon) Reload() error {
 
 	// Update config reference BEFORE adding servers so that event handlers
 	// (e.g., setupProxyForServer reading d.cfg.Security) see the new config.
+	d.mu.RLock()
+	oldCfg := d.cfg
+	d.mu.RUnlock()
 	d.mu.Lock()
 	d.cfg = newCfg
 	d.mu.Unlock()
@@ -380,6 +388,13 @@ func (d *Daemon) Reload() error {
 		}
 	}
 
+	if err := d.syncSlotGroupProxies(oldCfg, newCfg); err != nil {
+		reloadErrs = append(reloadErrs, fmt.Errorf("slot-group-sync: %w", err))
+	}
+	if err := d.setupSlotGroupProxies(); err != nil {
+		reloadErrs = append(reloadErrs, fmt.Errorf("slot-group-setup: %w", err))
+	}
+
 	d.logger.Info("configuration reloaded",
 		slog.Int("added", len(toAdd)),
 		slog.Int("removed", len(toRemove)),
@@ -387,6 +402,37 @@ func (d *Daemon) Reload() error {
 	)
 
 	return errors.Join(reloadErrs...)
+}
+
+func (d *Daemon) syncSlotGroupProxies(oldCfg, newCfg *config.Config) error {
+	if d.portManager == nil {
+		return nil
+	}
+	var errs []error
+	oldGroups := map[string]*config.SlotGroupConfig{}
+	newGroups := map[string]*config.SlotGroupConfig{}
+	if oldCfg != nil {
+		oldGroups = oldCfg.SlotGroups
+	}
+	if newCfg != nil {
+		newGroups = newCfg.SlotGroups
+	}
+
+	for name, oldGroup := range oldGroups {
+		newGroup, exists := newGroups[name]
+		if exists && reflect.DeepEqual(oldGroup, newGroup) {
+			continue
+		}
+		listenerName := fmt.Sprintf("slot_group:%s", name)
+		if d.portManager.Get(listenerName) == nil {
+			continue
+		}
+		if err := d.portManager.Remove(listenerName); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", listenerName, err))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // Status returns the current daemon status.
@@ -431,6 +477,114 @@ func (d *Daemon) setupHTTPProxies() error {
 	return nil
 }
 
+func (d *Daemon) setupSlotGroupProxies() error {
+	d.mu.RLock()
+	cfg := d.cfg
+	d.mu.RUnlock()
+	if cfg == nil || len(cfg.SlotGroups) == 0 {
+		return nil
+	}
+
+	var errs []error
+	for groupName, group := range cfg.SlotGroups {
+		listenerName := fmt.Sprintf("slot_group:%s", groupName)
+
+		entries := make([]slots.Entry, 0, group.Count)
+		var representative *config.ServerConfig
+		for serverName, serverCfg := range cfg.Servers {
+			if serverCfg == nil || serverCfg.SlotGroup != groupName {
+				continue
+			}
+			if representative == nil {
+				representative = serverCfg
+			}
+			listener := d.portManager.Get(serverName)
+			if listener == nil {
+				continue
+			}
+			mgr, ok := listener.SessionManager.(*session.Manager)
+			if !ok || mgr == nil {
+				continue
+			}
+			nameCopy := serverName
+			entries = append(entries, slots.Entry{
+				SlotName: serverName,
+				Index:    serverCfg.SlotIndex,
+				Manager:  mgr,
+				Healthy: func() bool {
+					if d.registry == nil {
+						return true
+					}
+					srv := d.registry.Get(nameCopy)
+					return srv != nil && srv.State == server.StateRunning
+				},
+			})
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Index < entries[j].Index })
+		if len(entries) == 0 || representative == nil {
+			continue
+		}
+		healthCheckInterval := representative.HealthCheckInterval.Duration()
+		if healthCheckInterval <= 0 {
+			healthCheckInterval = 30 * time.Second
+		}
+		requestTimeout := representative.RequestTimeout.Duration()
+		if requestTimeout <= 0 {
+			requestTimeout = 30 * time.Second
+		}
+		retryCfg := mcp.RetryConfig{}
+		if representative.Retry != nil {
+			retryCfg = mcp.RetryConfig{
+				MaxAttempts: representative.Retry.MaxAttempts,
+				InitialDelay: representative.Retry.InitialDelay.Duration(),
+				MaxDelay: representative.Retry.MaxDelay.Duration(),
+				RetryableErrors: append([]string(nil), representative.Retry.RetryableErrors...),
+			}
+		}
+		cbCfg := mcp.CircuitBreakerConfig{}
+		if representative.CircuitBreaker != nil {
+			cbCfg = mcp.CircuitBreakerConfig{
+				FailureThreshold: representative.CircuitBreaker.FailureThreshold,
+				RecoveryTimeout: representative.CircuitBreaker.RecoveryTimeout.Duration(),
+			}
+		}
+		if listener := d.portManager.Get(listenerName); listener != nil {
+			if selector, ok := listener.SessionManager.(*slots.Multiplexer); ok && selector != nil {
+				selector.ReplaceEntries(entries)
+				continue
+			}
+			continue
+		}
+
+		selector := slots.NewMultiplexer(groupName, d.logger, entries)
+		handler := mcp.NewProxyHandler(mcp.ProxyConfig{
+			ServerName:          groupName,
+			Selector:            selector,
+			Logger:              d.logger,
+			HealthCheckInterval: healthCheckInterval,
+			RequestTimeout:      requestTimeout,
+			SharedReadOnlyTools: append([]string(nil), representative.SharedReadOnlyTools...),
+			SharedResultCacheTTL: representative.SharedResultCacheTTL.Duration(),
+			SharedResultCacheSize: representative.SharedResultCacheSize,
+			MaxInFlightRequests: representative.MaxInFlightRequests,
+			RetryConfig: retryCfg,
+			CircuitBreakerConfig: cbCfg,
+		})
+
+		secCfg := mcp.SecurityConfig{}
+		if cfg != nil {
+			secCfg.BearerToken = cfg.Security.BearerToken
+			secCfg.AllowedOrigins = cfg.Security.AllowedOrigins
+		}
+		if err := d.portManager.AddStreamable(listenerName, group.GroupPort, handler, selector, secCfg); err != nil {
+			errs = append(errs, fmt.Errorf("slot group %s: %w", groupName, err))
+			continue
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
 // handleServerEvent processes server lifecycle events from the registry.
 // This is called asynchronously when servers start or stop.
 func (d *Daemon) handleServerEvent(event server.ServerEvent) {
@@ -438,6 +592,12 @@ func (d *Daemon) handleServerEvent(event server.ServerEvent) {
 	case server.EventServerStarted:
 		if err := d.setupProxyForServer(event.Server); err != nil {
 			d.logger.Warn("failed to setup proxy for server",
+				slog.String("server", event.Name),
+				slog.String("error", err.Error()),
+			)
+		}
+		if err := d.setupSlotGroupProxies(); err != nil {
+			d.logger.Warn("failed to setup slot group proxies",
 				slog.String("server", event.Name),
 				slog.String("error", err.Error()),
 			)
@@ -548,6 +708,14 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		slog.String("server", srv.Name),
 		slog.Int("port", srv.Config.Port),
 	)
+	if srv.Config != nil && srv.Config.SlotGroup != "" {
+		if err := d.setupSlotGroupProxies(); err != nil {
+			d.logger.Warn("failed to refresh slot group proxies after slot proxy setup",
+				slog.String("server", srv.Name),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
 
 	return nil
 }

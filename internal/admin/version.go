@@ -22,6 +22,8 @@ var (
 var apiCapabilities = map[string]bool{
 	"v1_servers":        true, // GET /v1/servers
 	"v1_servers_detail": true, // GET /v1/servers/{name}
+	"v1_slots":          true, // GET /v1/slots
+	"v1_slot_groups":    true, // GET /v1/slots/{group}
 	"version":           true, // GET /version itself
 }
 
