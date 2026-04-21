@@ -40,6 +40,24 @@ func TestScrubSecrets_RedactsCommonCredentialPatterns(t *testing.T) {
 			mustKeep:   []string{"STRIPE_SECRET"},
 		},
 		{
+			name:       "credential suffix",
+			in:         "auth failed: AWS_CREDENTIAL=AKIAFAKEFAKEFAKE rejected",
+			mustRedact: []string{"AKIAFAKEFAKEFAKE"},
+			mustKeep:   []string{"AWS_CREDENTIAL"},
+		},
+		{
+			name:       "private suffix",
+			in:         "config error: SSH_PRIVATE=-----BEGIN-RSA----- invalid",
+			mustRedact: []string{"-----BEGIN-RSA-----"},
+			mustKeep:   []string{"SSH_PRIVATE"},
+		},
+		{
+			name:       "auth suffix",
+			in:         "header parse: X_AUTH=deadbeefcafebabe failed",
+			mustRedact: []string{"deadbeefcafebabe"},
+			mustKeep:   []string{"X_AUTH"},
+		},
+		{
 			name:       "lowercase password",
 			in:         "db connect error: password=correcthorsebattery (user=admin)",
 			mustRedact: []string{"correcthorsebattery"},

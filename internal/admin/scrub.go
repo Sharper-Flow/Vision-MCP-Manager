@@ -21,8 +21,8 @@ func buildScrubber() scrubberSet {
 	patterns := []string{
 		// Authorization: Bearer <token>   | Authorization=<token>
 		`(?i)(authorization)\s*[:=]\s*(?:bearer\s+)?(\S+)`,
-		// KEY_NAME=value where KEY_NAME ends with TOKEN/KEY/SECRET/PASSWORD
-		`(?i)([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD))\s*[:=]\s*(\S+)`,
+		// KEY_NAME=value where KEY_NAME ends with TOKEN/KEY/SECRET/PASSWORD/CREDENTIAL/PRIVATE/AUTH
+		`(?i)([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|PRIVATE|AUTH))\s*[:=]\s*(\S+)`,
 		// password=<value> (lowercased form not already caught above)
 		`(?i)(password)\s*=\s*(\S+)`,
 	}
