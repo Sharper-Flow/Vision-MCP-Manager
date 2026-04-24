@@ -60,6 +60,7 @@ func (sm *SharedSessionManager) GetOrCreateSession(ctx context.Context, sessionI
 	}
 
 	// Check admission and track session
+	newSession := false
 	sm.refMu.Lock()
 	if _, exists := sm.upstreamSessions[sessionID]; !exists {
 		// Check max sessions
@@ -69,11 +70,20 @@ func (sm *SharedSessionManager) GetOrCreateSession(ctx context.Context, sessionI
 		}
 		sm.upstreamSessions[sessionID] = struct{}{}
 		sm.refCount++
+		newSession = true
 	}
 	sm.refMu.Unlock()
 
 	// Get or create downstream
-	return sm.getOrCreateDownstream(ctx)
+	ds, err := sm.getOrCreateDownstream(ctx)
+	if err != nil && newSession {
+		// Undo refcount increment on spawn failure to prevent leak
+		sm.refMu.Lock()
+		delete(sm.upstreamSessions, sessionID)
+		sm.refCount--
+		sm.refMu.Unlock()
+	}
+	return ds, err
 }
 
 func (sm *SharedSessionManager) isClosed() bool {
@@ -270,7 +280,17 @@ func (sm *SharedSessionManager) notifySubscribers(ds *mcp.ClientSession) {
 	sm.subMu.RLock()
 	defer sm.subMu.RUnlock()
 	for _, cb := range sm.subscribers {
-		cb(ds)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					sm.logger.Error("subscriber callback panicked",
+						slog.String("event", "shared_session.subscriber_panic"),
+						slog.Any("panic", r),
+					)
+				}
+			}()
+			cb(ds)
+		}()
 	}
 }
 
