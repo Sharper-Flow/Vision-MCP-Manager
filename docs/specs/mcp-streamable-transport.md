@@ -45,11 +45,11 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 
 ---
 
-### Enforce one subprocess per MCP session
+### Enforce subprocess isolation per MCP session (stateful) or shared subprocess (stateless)
 
 **ID:** `rq-mcpstr02` | **Priority:** **[MUST]**
 
-Vision MUST maintain strict 1:1 mapping between each upstream MCP session and a supervised downstream subprocess. Session teardown or timeout MUST terminate only the owning subprocess and remove the mapping.
+Vision MUST maintain strict 1:1 mapping between each upstream MCP session and a supervised downstream subprocess when the server is configured with `stateful: true`. When the server is configured with `stateful: false` (default), multiple upstream sessions MAY share a single downstream subprocess managed by a SharedSessionManager. Session teardown or timeout MUST terminate only the owning subprocess (stateful) or decrement the shared refcount (stateless).
 
 **Tags:** `sessions`, `supervision`, `isolation`
 
@@ -58,6 +58,7 @@ Vision MUST maintain strict 1:1 mapping between each upstream MCP session and a 
 **Concurrent clients receive isolated subprocesses** (`rq-mcpstr02.1`)
 
 **Given:**
+- A server is configured with `stateful: true`
 - Two clients connect concurrently to the same server port
 - Both establish independent MCP sessions
 
@@ -77,6 +78,20 @@ Vision MUST maintain strict 1:1 mapping between each upstream MCP session and a 
 **Then:**
 - The owned subprocess is terminated gracefully then forcefully if needed
 - The session mapping is removed and cannot be reused
+
+**Concurrent clients share a single subprocess for stateless servers** (`rq-mcpstr02.3`)
+
+**Given:**
+- A server is configured with `stateful: false` (default)
+- Two clients connect concurrently to the same server port
+- Both establish independent MCP sessions
+
+**When:** Both clients perform tool calls
+
+**Then:**
+- Both sessions route tool calls through the same shared downstream subprocess
+- The shared subprocess is alive as long as at least one upstream session is active
+- When the last upstream session disconnects, the shared subprocess is eligible for teardown
 
 ---
 
