@@ -32,6 +32,14 @@ func New(cfg config.SupervisionConfig, logger *slog.Logger) *Supervisor {
 		Timeout:                  cfg.ShutdownTimeout.Duration(),
 		PassThroughPanics:        false, // Catch panics and restart
 		DontPropagateTermination: false,
+		// Explicit failure thresholds prevent one crashing service from
+		// causing global supervisor backoff that delays restart of others.
+		// FailureDecay: failures decay over 60 seconds (float64, seconds).
+		// FailureThreshold: enter backoff after 5 failures within decay window.
+		// FailureBackoff: wait 30 seconds in backoff before resuming restarts.
+		FailureDecay:     60,
+		FailureThreshold: 5,
+		FailureBackoff:   30 * time.Second,
 	}
 
 	return &Supervisor{

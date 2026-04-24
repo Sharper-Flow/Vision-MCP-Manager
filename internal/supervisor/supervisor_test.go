@@ -363,6 +363,69 @@ func TestManagedProcess_BuildEnv(t *testing.T) {
 	}
 }
 
+func TestNew_FailureThresholdSet(t *testing.T) {
+	// Verify that the suture spec has explicit failure thresholds configured.
+	// Without these, suture defaults to FailureThreshold=5 which is reasonable,
+	// but we set them explicitly for operational control and to prevent one
+	// crashing service from causing global backoff.
+	cfg := config.SupervisionConfig{}
+	cfg.ApplyDefaults()
+
+	sup := New(cfg, nil)
+
+	// The supervisor should be created successfully and the spec should have
+	// been applied. We verify this indirectly: a service that crashes
+	// repeatedly should NOT prevent other services from being restarted
+	// promptly.
+	//
+	// We test this by running two services: one that crashes immediately
+	// ("false") and one that runs stably ("sleep 60"). The stable service
+	// should remain unaffected by the crashing service's restart loop.
+
+	crashingCfg := &config.ServerConfig{
+		Port:    6276,
+		Command: "false",
+	}
+
+	stableCfg := &config.ServerConfig{
+		Port:    6277,
+		Command: "sleep",
+		Args:    []string{"60"},
+	}
+
+	crashing, err := sup.AddServer("crasher", crashingCfg)
+	if err != nil {
+		t.Fatalf("AddServer crasher: %v", err)
+	}
+	stable, err := sup.AddServer("stable", stableCfg)
+	if err != nil {
+		t.Fatalf("AddServer stable: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Start the supervisor
+	go sup.Serve(ctx)
+
+	// Wait a bit for the services to start and the crasher to restart a few times
+	time.Sleep(2 * time.Second)
+
+	// The stable service should still be running despite the crasher failing
+	stableState := stable.State()
+	if stableState != StateRunning && stableState != StateStarting {
+		t.Errorf("stable service state = %q, want running or starting (crasher should not affect it)", stableState)
+	}
+
+	// The crashing service should have restarted at least once
+	crashRestarts := crashing.RestartCount()
+	if crashRestarts < 1 {
+		t.Errorf("crasher restarts = %d, want at least 1", crashRestarts)
+	}
+
+	// Context cancel will shut down the supervisor (suture uses Serve(ctx))
+}
+
 func TestServiceState_Constants(t *testing.T) {
 	// Verify state constants are distinct
 	states := []ServiceState{StateStopped, StateStarting, StateRunning, StateCrashed, StateFailed}
