@@ -150,6 +150,11 @@ type ProxyConfig struct {
 	// used directly.
 	Selector ManagerSelector
 
+	// SharedManager manages a single downstream subprocess shared across all
+	// upstream sessions for stateless MCP servers. When set, SessionManager and
+	// Selector must both be nil.
+	SharedManager *session.SharedSessionManager
+
 	// Logger for proxy operations.
 	Logger *slog.Logger
 
@@ -184,12 +189,23 @@ type ProxyConfig struct {
 	MaxInFlightRequests int
 }
 
-// hasExactlyOneManagerSource reports whether exactly one of SessionManager or
-// Selector is set. NewProxyHandler requires this invariant.
+// hasExactlyOneManagerSource reports whether exactly one of SessionManager,
+// SharedManager, or Selector is set. NewProxyHandler requires this invariant.
 func (cfg ProxyConfig) hasExactlyOneManagerSource() bool {
 	hasManager := cfg.SessionManager != nil
+	hasShared := cfg.SharedManager != nil
 	hasSelector := cfg.Selector != nil
-	return hasManager != hasSelector
+	count := 0
+	if hasManager {
+		count++
+	}
+	if hasShared {
+		count++
+	}
+	if hasSelector {
+		count++
+	}
+	return count == 1
 }
 
 // NewProxyHandler creates a StreamableHTTPHandler that proxies MCP requests
@@ -203,7 +219,7 @@ func (cfg ProxyConfig) hasExactlyOneManagerSource() bool {
 //  5. Notifications from downstream are relayed to the upstream client
 func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	if !cfg.hasExactlyOneManagerSource() {
-		panic("mcp: exactly one of SessionManager or Selector must be set")
+		panic("mcp: exactly one of SessionManager, SharedManager, or Selector must be set")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -246,6 +262,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	// Register a callback so that any removal path (reaper, RemoveSession,
 	// CloseAll) triggers closeDownstream on the proxy session, setting the
 	// closed flag before the SDK connection is torn down.
+	// SharedManager handles its own lifecycle; no callback needed.
 	if cfg.SessionManager != nil {
 		cfg.SessionManager.SetOnSessionRemoved(func(sessionID string) {
 			idx.mu.RLock()
@@ -267,6 +284,39 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	}
 
 	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		// --- Shared mode ---
+		if cfg.SharedManager != nil {
+			srv, err := newSharedModeServer(
+				r.Context(),
+				cfg.ServerName,
+				cfg.SharedManager,
+				logger,
+				sharedTools,
+				inFlightLimiter,
+				cfg.RequestTimeout,
+				cfg.RetryConfig,
+				cfg.CircuitBreakerConfig,
+				func(upstreamSessionID string, ps *proxySession) {
+					idx.mu.Lock()
+					idx.byUpstream[upstreamSessionID] = ps
+					idx.mu.Unlock()
+				},
+				func(upstreamSessionID string) {
+					idx.mu.Lock()
+					delete(idx.byUpstream, upstreamSessionID)
+					idx.mu.Unlock()
+				},
+			)
+			if err != nil {
+				logger.Warn("failed to create shared-mode proxy server",
+					slog.String("error", err.Error()),
+				)
+				return nil
+			}
+			return srv
+		}
+
+		// --- Stateful mode (fixed manager or selector) ---
 		mgr := cfg.SessionManager
 		pendingKey := ""
 		if cfg.Selector != nil {
@@ -355,6 +405,8 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			var admission AdmissionStatuser
 			if cfg.Selector != nil {
 				admission = cfg.Selector
+			} else if cfg.SharedManager != nil {
+				admission = cfg.SharedManager
 			} else {
 				admission = cfg.SessionManager
 			}
@@ -504,13 +556,17 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			idx.mu.RUnlock()
 			if ps != nil {
 				ps.closeDownstream("upstream delete")
-				// Trigger the manager's removal path (kills subprocess, fires
-				// reaper cleanup). closeDownstream already set the closed flag,
-				// so the onSessionRemoved callback will be a no-op.
-				if err := ps.mgr.RemoveSession(ps.sessionID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
-					logger.Warn("failed to remove session on delete",
-						slog.String("error", err.Error()),
-					)
+				// In shared mode, closeDownstream already handles RemoveSession +
+				// Unsubscribe. In stateful mode, trigger the manager's removal
+				// path (kills subprocess, fires reaper cleanup). closeDownstream
+				// already set the closed flag, so the onSessionRemoved callback
+				// will be a no-op.
+				if !ps.shared && ps.mgr != nil {
+					if err := ps.mgr.RemoveSession(ps.sessionID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+						logger.Warn("failed to remove session on delete",
+							slog.String("error", err.Error()),
+						)
+					}
 				}
 			}
 		}
@@ -688,6 +744,16 @@ type proxySession struct {
 	// respawnMu serializes respawn attempts so only one goroutine respawns
 	// at a time. Other callers wait for the result.
 	respawnMu sync.Mutex
+
+	// shared indicates that this proxySession uses a SharedSessionManager
+	// instead of a per-session Manager. In shared mode, the downstream is
+	// shared across all upstream sessions and closeDownstream only decrements
+	// refcount.
+	shared bool
+
+	// sharedMgr is the SharedSessionManager used in shared mode. Nil when
+	// shared is false.
+	sharedMgr *session.SharedSessionManager
 }
 
 // newPerSessionServer creates a new mcp.Server for a single upstream session.
@@ -817,6 +883,136 @@ func newPerSessionServer(
 	return server, nil
 }
 
+// newSharedModeServer creates a new mcp.Server for a single upstream session
+// in shared-subprocess mode. It uses a SharedSessionManager to share a single
+// downstream subprocess across all upstream sessions.
+func newSharedModeServer(
+	ctx context.Context,
+	serverName string,
+	sm *session.SharedSessionManager,
+	logger *slog.Logger,
+	sharedTools *sharedToolCoordinator,
+	inFlightLimiter *inFlightLimiter,
+	requestTimeout time.Duration,
+	retryConfig RetryConfig,
+	circuitBreakerConfig CircuitBreakerConfig,
+	onInitialized func(string, *proxySession),
+	onClosed func(string),
+) (*mcp.Server, error) {
+	sessionID := fmt.Sprintf("proxy-%s-%d", serverName, nextSessionID())
+	logger = logger.With(slog.String("session_id", sessionID))
+
+	ps := &proxySession{
+		serverName:      serverName,
+		sessionID:       sessionID,
+		logger:          logger,
+		onClosed:        onClosed,
+		shared:          true,
+		sharedMgr:       sm,
+		sharedTools:     sharedTools,
+		inFlightLimiter: inFlightLimiter,
+		requestTimeout:  requestTimeout,
+		retryConfig:     retryConfig,
+		circuitBreaker:  newCircuitBreaker(circuitBreakerConfig, nil),
+	}
+	if ps.requestTimeout <= 0 {
+		ps.requestTimeout = 30 * time.Second
+	}
+	if ps.retryConfig.MaxAttempts <= 0 {
+		ps.retryConfig.MaxAttempts = 1
+	}
+	if ps.retryConfig.InitialDelay <= 0 {
+		ps.retryConfig.InitialDelay = 100 * time.Millisecond
+	}
+	if ps.retryConfig.MaxDelay <= 0 {
+		ps.retryConfig.MaxDelay = 5 * time.Second
+	}
+	if len(ps.retryConfig.RetryableErrors) == 0 {
+		ps.retryConfig.RetryableErrors = []string{"timeout", "429", "502", "503", "econnreset", "econnrefused", "enetunreach"}
+	}
+
+	// Create the upstream server with tools capability advertised.
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:    fmt.Sprintf("vision-proxy-%s", serverName),
+		Version: "1.0.0",
+	}, &mcp.ServerOptions{
+		HasTools: true,
+		InitializedHandler: func(_ context.Context, req *mcp.InitializedRequest) {
+			ps.mu.Lock()
+			ps.upstreamSession = req.Session
+			ps.upstreamSessionID = req.Session.ID()
+			ps.mu.Unlock()
+			if onInitialized != nil {
+				onInitialized(req.Session.ID(), ps)
+			}
+			logger.Debug("upstream session initialized",
+				slog.String("upstream_session_id", req.Session.ID()),
+			)
+		},
+	})
+	ps.server = server
+
+	// Build client options with notification relay handlers.
+	clientOpts := &mcp.ClientOptions{
+		ToolListChangedHandler: func(ctx context.Context, _ *mcp.ToolListChangedRequest) {
+			ps.handleToolListChanged(ctx)
+		},
+		LoggingMessageHandler: func(ctx context.Context, req *mcp.LoggingMessageRequest) {
+			ps.handleLoggingMessage(ctx, req.Params)
+		},
+		ProgressNotificationHandler: func(ctx context.Context, req *mcp.ProgressNotificationClientRequest) {
+			ps.handleProgress(ctx, req.Params)
+		},
+	}
+	ps.clientOpts = clientOpts
+
+	// Get or create shared downstream session.
+	downstream, err := sm.GetOrCreateSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get shared downstream session: %w", err)
+	}
+	ps.downstream = downstream
+
+	// Subscribe to respawn notifications so we update our local pointer.
+	sm.Subscribe(sessionID, func(newDS *mcp.ClientSession) {
+		ps.downstreamMu.Lock()
+		ps.downstream = newDS
+		ps.downstreamClosed = false
+		ps.downstreamMu.Unlock()
+		logger.Info("shared downstream respawned, updated local pointer",
+			slog.String("event", "shared_session.respawn"),
+		)
+	})
+
+	// Discover tools from downstream.
+	toolsResult, err := downstream.ListTools(ctx, nil)
+	if err != nil {
+		ps.closeDownstream("initial tools/list failed")
+		return nil, fmt.Errorf("failed to list downstream tools: %w", err)
+	}
+
+	current := make(map[string]struct{}, len(toolsResult.Tools))
+	for _, t := range toolsResult.Tools {
+		current[t.Name] = struct{}{}
+	}
+	ps.mu.Lock()
+	ps.currentTools = current
+	ps.mu.Unlock()
+
+	// Register proxy tool handlers that forward to the downstream.
+	for _, tool := range toolsResult.Tools {
+		server.AddTool(tool, makeProxyToolHandler(ps, tool.Name))
+	}
+
+	logger.Info("shared proxy session established",
+		slog.Int("tools", len(toolsResult.Tools)),
+	)
+
+	// No per-session health probe in shared mode — SharedManager handles it.
+
+	return server, nil
+}
+
 // handleToolListChanged is called when the downstream server notifies that
 // its tool list has changed. It re-discovers tools and updates the upstream
 // server, which automatically sends tools/list_changed to the upstream client.
@@ -836,18 +1032,34 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	ps.downstreamMu.RUnlock()
 
 	if closed || ds == nil {
-		ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
-		_, err := ps.respawnDownstream(ctx, "notification_relay")
-		if err != nil {
-			ps.logger.Warn("respawn failed during tool list refresh",
-				slog.String("error", err.Error()),
-			)
+		if ps.shared && ps.sharedMgr != nil {
+			// In shared mode, get or respawn via SharedManager.
+			var err error
+			ds, err = ps.sharedMgr.GetOrCreateSession(ctx, ps.sessionID)
+			if err != nil {
+				ps.logger.Warn("failed to get shared downstream during tool list refresh",
+					slog.String("error", err.Error()),
+				)
+				return
+			}
+			ps.downstreamMu.Lock()
+			ps.downstream = ds
+			ps.downstreamClosed = false
+			ps.downstreamMu.Unlock()
+		} else {
+			ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
+			_, err := ps.respawnDownstream(ctx, "notification_relay")
+			if err != nil {
+				ps.logger.Warn("respawn failed during tool list refresh",
+					slog.String("error", err.Error()),
+				)
+				return
+			}
+			// respawnDownstream already re-discovered tools and updated registrations,
+			// so we can return early — the tool list is already current.
+			ps.logger.Info("downstream respawned during tool list refresh")
 			return
 		}
-		// respawnDownstream already re-discovered tools and updated registrations,
-		// so we can return early — the tool list is already current.
-		ps.logger.Info("downstream respawned during tool list refresh")
-		return
 	}
 
 	// Re-discover tools from downstream.
@@ -956,6 +1168,37 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 	}
 }
 
+// getDownstream returns the current downstream session and whether the session
+// is closed. In shared mode, it queries SharedManager.Downstream() and falls
+// back to GetOrCreateSession if the downstream is nil.
+func (ps *proxySession) getDownstream(ctx context.Context) (*mcp.ClientSession, bool, error) {
+	if ps.shared && ps.sharedMgr != nil {
+		ds := ps.sharedMgr.Downstream()
+		ps.downstreamMu.RLock()
+		closed := ps.downstreamClosed
+		ps.downstreamMu.RUnlock()
+
+		if closed {
+			return nil, true, nil
+		}
+
+		if ds == nil {
+			var err error
+			ds, err = ps.sharedMgr.GetOrCreateSession(ctx, ps.sessionID)
+			if err != nil {
+				return nil, false, err
+			}
+		}
+		return ds, false, nil
+	}
+
+	ps.downstreamMu.RLock()
+	ds := ps.downstream
+	closed := ps.downstreamClosed
+	ps.downstreamMu.RUnlock()
+	return ds, closed, nil
+}
+
 func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToolRequest, toolName string) (*mcp.CallToolResult, error) {
 	if ps.circuitBreaker != nil && !ps.circuitBreaker.allow() {
 		err := &CircuitOpenError{Server: ps.serverName, RetryIn: ps.circuitBreaker.retryIn()}
@@ -977,12 +1220,17 @@ func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToo
 	defer requestCancel()
 
 	for attempt := 1; attempt <= ps.retryConfig.MaxAttempts; attempt++ {
-		ps.downstreamMu.RLock()
-		ds := ps.downstream
-		closed := ps.downstreamClosed
-		ps.downstreamMu.RUnlock()
+		ds, closed, err := ps.getDownstream(requestCtx)
+		if err != nil {
+			lastErr = err
+			break
+		}
 
 		if closed || ds == nil {
+			if ps.shared {
+				lastErr = ErrDownstreamUnavailable
+				break
+			}
 			ps.logger.Info("downstream unavailable, attempting respawn",
 				slog.String("tool", toolName),
 				slog.Int("attempt", attempt),
@@ -1025,6 +1273,11 @@ func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToo
 					slog.Int("attempt", attempt),
 				)
 				lastErr = ErrDownstreamUnavailable
+				if ps.shared && ps.sharedMgr != nil {
+					// Force respawn on next attempt by calling GetOrCreateSession
+					// which will block until a new downstream is ready.
+					_, _ = ps.sharedMgr.GetOrCreateSession(requestCtx, ps.sessionID)
+				}
 			} else {
 				lastErr = err
 			}
@@ -1278,14 +1531,25 @@ func (ps *proxySession) respawnDownstream(ctx context.Context, trigger string) (
 }
 
 func (ps *proxySession) touch() {
-	if ps == nil || ps.mgr == nil {
+	if ps == nil {
+		return
+	}
+	// In shared mode, there is no per-session timeout to touch.
+	if ps.shared {
+		return
+	}
+	if ps.mgr == nil {
 		return
 	}
 	ps.mgr.TouchSession(ps.sessionID)
 }
 
 func (ps *proxySession) closeDownstream(reason string) {
-	if ps == nil || ps.mgr == nil {
+	if ps == nil {
+		return
+	}
+	// Allow stateful mode (mgr != nil) or shared mode (sharedMgr != nil).
+	if ps.mgr == nil && ps.sharedMgr == nil {
 		return
 	}
 
@@ -1300,8 +1564,19 @@ func (ps *proxySession) closeDownstream(reason string) {
 			slog.String("reason", reason),
 		)
 
-		// Stop the health probe before tearing down the downstream.
-		ps.stopHealthProbe()
+		// In shared mode: decrement refcount and unsubscribe, but do NOT close
+		// the actual ClientSession (it's shared across upstream sessions).
+		if ps.shared && ps.sharedMgr != nil {
+			if err := ps.sharedMgr.RemoveSession(ps.sessionID); err != nil {
+				ps.logger.Warn("failed to remove shared session",
+					slog.String("error", err.Error()),
+				)
+			}
+			ps.sharedMgr.Unsubscribe(ps.sessionID)
+		} else {
+			// Stop the health probe before tearing down the downstream.
+			ps.stopHealthProbe()
+		}
 
 		// Atomically mark closed and detach the downstream pointer so that any
 		// concurrent tool calls see the closed state without dispatching to a
