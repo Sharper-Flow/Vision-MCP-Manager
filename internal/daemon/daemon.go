@@ -608,7 +608,10 @@ func (d *Daemon) handleServerEvent(event server.ServerEvent) {
 }
 
 // setupProxyForServer creates a StreamableHTTPHandler proxy for a single server.
-// Each upstream session gets its own isolated downstream subprocess via session.Manager.
+// For stateful servers (Stateful: true), each upstream session gets its own
+// isolated downstream subprocess via session.Manager.
+// For stateless servers (Stateful: false, default), all upstream sessions
+// share a single downstream subprocess via SharedSessionManager.
 func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	if srv == nil {
 		return errors.New("server is nil")
@@ -645,33 +648,9 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	}
 	defer d.proxySetupInProgress.Delete(srv.Name)
 
-	// Create a session manager for this server's per-session subprocesses
-	mgr := session.NewManager(srv.Name, srv.Config, d.logger)
-
-	// Start the session reaper for idle/TTL cleanup.
-	// Uses SessionTimeout as idle timeout and SessionTTL as absolute TTL.
-	idleTimeout := srv.Config.SessionTimeout.Duration()
-	sessionTTL := srv.Config.SessionTTL.Duration()
-	if idleTimeout > 0 || sessionTTL > 0 {
-		// Check interval: half of the shortest timeout (min 1s, max 30s).
-		shortest := idleTimeout
-		if sessionTTL > 0 && (shortest == 0 || sessionTTL < shortest) {
-			shortest = sessionTTL
-		}
-		checkInterval := shortest / 2
-		if checkInterval < time.Second {
-			checkInterval = time.Second
-		}
-		if checkInterval > 30*time.Second {
-			checkInterval = 30 * time.Second
-		}
-		mgr.StartReaper(d.ctx, checkInterval)
-	}
-
-	// Create the streamable proxy handler
-	handler := mcp.NewProxyHandler(mcp.ProxyConfig{
+	// Build proxy config common to both modes
+	proxyCfg := mcp.ProxyConfig{
 		ServerName:            srv.Name,
-		SessionManager:        mgr,
 		Logger:                d.logger,
 		HealthCheckInterval:   srv.Config.HealthCheckInterval.Duration(),
 		RequestTimeout:        srv.Config.RequestTimeout.Duration(),
@@ -689,7 +668,78 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 			FailureThreshold: srv.Config.CircuitBreaker.FailureThreshold,
 			RecoveryTimeout:  srv.Config.CircuitBreaker.RecoveryTimeout.Duration(),
 		},
-	})
+	}
+
+	var closer mcp.SessionCloser
+
+	if srv.Config.Stateful {
+		// Stateful mode: per-session subprocess isolation (existing behavior)
+		mgr := session.NewManager(srv.Name, srv.Config, d.logger)
+
+		// Start the session reaper for idle/TTL cleanup.
+		idleTimeout := srv.Config.SessionTimeout.Duration()
+		sessionTTL := srv.Config.SessionTTL.Duration()
+		if idleTimeout > 0 || sessionTTL > 0 {
+			shortest := idleTimeout
+			if sessionTTL > 0 && (shortest == 0 || sessionTTL < shortest) {
+				shortest = sessionTTL
+			}
+			checkInterval := shortest / 2
+			if checkInterval < time.Second {
+				checkInterval = time.Second
+			}
+			if checkInterval > 30*time.Second {
+				checkInterval = 30 * time.Second
+			}
+			mgr.StartReaper(d.ctx, checkInterval)
+		}
+
+		proxyCfg.SessionManager = mgr
+		closer = mgr
+	} else if srv.Config.SlotGroup != "" {
+		// Slot group members always use per-session isolation.
+		// The Multiplexer requires *session.Manager instances for load balancing.
+		mgr := session.NewManager(srv.Name, srv.Config, d.logger)
+
+		idleTimeout := srv.Config.SessionTimeout.Duration()
+		sessionTTL := srv.Config.SessionTTL.Duration()
+		if idleTimeout > 0 || sessionTTL > 0 {
+			shortest := idleTimeout
+			if sessionTTL > 0 && (shortest == 0 || sessionTTL < shortest) {
+				shortest = sessionTTL
+			}
+			checkInterval := shortest / 2
+			if checkInterval < time.Second {
+				checkInterval = time.Second
+			}
+			if checkInterval > 30*time.Second {
+				checkInterval = 30 * time.Second
+			}
+			mgr.StartReaper(d.ctx, checkInterval)
+		}
+
+		proxyCfg.SessionManager = mgr
+		closer = mgr
+
+		d.logger.Debug("slot group member uses per-session mode",
+			slog.String("server", srv.Name),
+			slog.String("slot_group", srv.Config.SlotGroup),
+		)
+	} else {
+		// Shared mode: single subprocess shared across all upstream sessions
+		sharedMgr := session.NewSharedSessionManager(srv.Name, srv.Config, d.logger)
+		sharedMgr.StartHealthProbe(d.ctx)
+
+		proxyCfg.SharedManager = sharedMgr
+		closer = sharedMgr
+
+		d.logger.Info("using shared subprocess mode for server",
+			slog.String("server", srv.Name),
+		)
+	}
+
+	// Create the streamable proxy handler
+	handler := mcp.NewProxyHandler(proxyCfg)
 
 	// Build security config from daemon-wide settings (read under lock).
 	d.mu.RLock()
@@ -700,13 +750,14 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	d.mu.RUnlock()
 
 	// Add to port manager with session manager for cleanup and security middleware.
-	if err := d.portManager.AddStreamable(srv.Name, srv.Config.Port, handler, mgr, secCfg); err != nil {
+	if err := d.portManager.AddStreamable(srv.Name, srv.Config.Port, handler, closer, secCfg); err != nil {
 		return fmt.Errorf("failed to add streamable proxy: %w", err)
 	}
 
 	d.logger.Info("streamable proxy started",
 		slog.String("server", srv.Name),
 		slog.Int("port", srv.Config.Port),
+		slog.Bool("stateful", srv.Config.Stateful),
 	)
 	if srv.Config != nil && srv.Config.SlotGroup != "" {
 		if err := d.setupSlotGroupProxies(); err != nil {
