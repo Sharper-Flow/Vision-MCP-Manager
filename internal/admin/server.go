@@ -14,6 +14,7 @@ import (
 	"github.com/jrede/vision/internal/catalog"
 	"github.com/jrede/vision/internal/config"
 	visionmcp "github.com/jrede/vision/internal/mcp"
+	"github.com/jrede/vision/internal/metrics"
 	"github.com/jrede/vision/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -34,6 +35,7 @@ type Server struct {
 	mcpServer            *mcp.Server
 	startedAt            time.Time
 	slotSessionAccessor  SlotSessionAccessor // Optional: provides live session counts
+	Metrics              *metrics.DaemonMetrics
 
 	mu      sync.RWMutex
 	running bool
@@ -49,6 +51,7 @@ type Config struct {
 	Port                int
 	Logger              *slog.Logger
 	SlotSessionAccessor SlotSessionAccessor // Optional: provides live session counts
+	Metrics             *metrics.DaemonMetrics
 }
 
 // NewServer creates a new Admin MCP server.
@@ -82,6 +85,7 @@ func NewServer(cfg Config) *Server {
 		port:                cfg.Port,
 		logger:              cfg.Logger,
 		slotSessionAccessor: cfg.SlotSessionAccessor,
+		Metrics:             cfg.Metrics,
 	}
 }
 
@@ -117,6 +121,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Version + capability contract (OCA integration — V5)
 	mux.HandleFunc("GET /version", s.handleVersion)
+
+	// Prometheus metrics endpoint
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 
 	// V1 admin endpoints (OCA integration): /v1/servers, /v1/servers/{name}
 	s.registerV1Routes(mux)
@@ -228,4 +235,28 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleMetrics handles GET /metrics - Prometheus text format.
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	var snap metrics.Snapshot
+	if s.Metrics != nil {
+		snap = s.Metrics.Snapshot()
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	fmt.Fprintf(w, "# HELP vision_tool_calls_total Total number of tool calls processed\n")
+	fmt.Fprintf(w, "# TYPE vision_tool_calls_total counter\n")
+	fmt.Fprintf(w, "vision_tool_calls_total %d\n", snap.ToolCallsTotal)
+	fmt.Fprintf(w, "# HELP vision_errors_total Total number of errors\n")
+	fmt.Fprintf(w, "# TYPE vision_errors_total counter\n")
+	fmt.Fprintf(w, "vision_errors_total %d\n", snap.ErrorsTotal)
+	fmt.Fprintf(w, "# HELP vision_sessions_active Number of active sessions\n")
+	fmt.Fprintf(w, "# TYPE vision_sessions_active gauge\n")
+	fmt.Fprintf(w, "vision_sessions_active %d\n", snap.SessionsActive)
+	fmt.Fprintf(w, "# HELP vision_subprocesses_active Number of active subprocesses\n")
+	fmt.Fprintf(w, "# TYPE vision_subprocesses_active gauge\n")
+	fmt.Fprintf(w, "vision_subprocesses_active %d\n", snap.SubprocessesActive)
 }

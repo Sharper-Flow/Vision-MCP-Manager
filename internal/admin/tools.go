@@ -17,6 +17,7 @@ import (
 
 	"github.com/jrede/vision/internal/catalog"
 	"github.com/jrede/vision/internal/config"
+	"github.com/jrede/vision/internal/metrics"
 	"github.com/jrede/vision/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -170,6 +171,14 @@ func (s *Server) getTools() []Tool {
 				Properties: map[string]Property{},
 			},
 		},
+		{
+			Name:        "vision_metrics",
+			Description: "Get Vision daemon metrics including active sessions, tool calls, errors, and subprocess counts",
+			InputSchema: InputSchema{
+				Type:       "object",
+				Properties: map[string]Property{},
+			},
+		},
 	}
 }
 
@@ -293,6 +302,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		return s.toolGuidance(ctx, args)
 	case "vision_slot_status":
 		return s.toolSlotStatus(ctx, args)
+	case "vision_metrics":
+		return s.toolMetrics(ctx, args)
 	default:
 		// Should never reach here due to isValidTool check
 		return nil, fmt.Errorf("unknown tool: %s", name)
@@ -1226,6 +1237,29 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 	}
 
 	return jsonToolResult(response)
+}
+
+// MetricsResponse is the response for vision_metrics.
+type MetricsResponse struct {
+	SessionsActive     int64 `json:"sessions_active"`
+	ToolCallsTotal     int64 `json:"tool_calls_total"`
+	ErrorsTotal        int64 `json:"errors_total"`
+	SubprocessesActive int64 `json:"subprocesses_active"`
+}
+
+// toolMetrics implements vision_metrics.
+func (s *Server) toolMetrics(_ context.Context, _ json.RawMessage) (*ToolCallResult, error) {
+	var snap metrics.Snapshot
+	if s.Metrics != nil {
+		snap = s.Metrics.Snapshot()
+	}
+
+	return jsonToolResult(MetricsResponse{
+		SessionsActive:     snap.SessionsActive,
+		ToolCallsTotal:     snap.ToolCallsTotal,
+		ErrorsTotal:        snap.ErrorsTotal,
+		SubprocessesActive: snap.SubprocessesActive,
+	})
 }
 
 // --- Guidance Tool ---
