@@ -1205,6 +1205,7 @@ type StatusResponse struct {
 	Uptime   string        `json:"uptime"`
 	Servers  StatusServers `json:"servers"`
 	MemoryMB float64       `json:"memory_mb"`
+	Warnings []string      `json:"warnings,omitempty"`
 }
 
 // toolStatus implements vision_status.
@@ -1234,6 +1235,11 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 			Error:   registryStatus.FailedServers,
 		},
 		MemoryMB: float64(memStats.Alloc) / 1024 / 1024,
+	}
+
+	// Warn if bearer_token is not configured
+	if s.daemonConfig != nil && s.daemonConfig.Security.BearerToken == "" {
+		response.Warnings = append(response.Warnings, "⚠ No bearer_token configured — see docs/AUTH.md for secure setup")
 	}
 
 	return jsonToolResult(response)
