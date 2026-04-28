@@ -99,7 +99,7 @@ Vision MUST maintain strict 1:1 mapping between each upstream MCP session and a 
 
 **ID:** `rq-mcpstr03` | **Priority:** **[MUST]**
 
-Vision MUST require bearer authentication, enforce a strict Origin allowlist, reject wildcard CORS, and enforce configured limits for max concurrent sessions, request sizes, and HTTP timeouts on streamable MCP endpoints.
+Vision MUST require bearer authentication when configured, enforce a strict Origin allowlist, reject wildcard CORS, and enforce configured limits for max concurrent sessions, request sizes, and HTTP timeouts on streamable MCP endpoints.
 
 **Tags:** `security`, `limits`, `hardening`
 
