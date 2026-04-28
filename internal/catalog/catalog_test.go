@@ -263,3 +263,198 @@ func TestCatalog_AddNil(t *testing.T) {
 		t.Error("nil and empty entries should not be added")
 	}
 }
+
+// --- BM25 scoring tests ---
+
+func TestBM25_NaturalLanguageQuery_LibraryReference(t *testing.T) {
+	// AC #1: "library reference" should rank context7 as top result
+	c := New()
+	c.Add(&Entry{
+		Name:         "context7",
+		Description:  "Library documentation lookup - query docs for any programming library",
+		Capabilities: []string{"documentation", "library-lookup", "code-intelligence", "api-reference"},
+	})
+	c.Add(&Entry{
+		Name:         "firecrawl",
+		Description:  "Web scraping and content extraction from URLs",
+		Capabilities: []string{"web-scraping", "content-extraction", "research", "url-fetch"},
+	})
+	c.Add(&Entry{
+		Name:         "kagi",
+		Description:  "Kagi search API for web search and summarization",
+		Capabilities: []string{"search", "web-search", "summarization", "research"},
+	})
+
+	results := c.Search("library reference", "")
+	if len(results) == 0 {
+		t.Fatal("expected results, got none")
+	}
+	if results[0].Name != "context7" {
+		t.Errorf("BM25: 'library reference' should rank context7 first, got %s", results[0].Name)
+	}
+}
+
+func TestBM25_NaturalLanguageQuery_WebSearch(t *testing.T) {
+	// AC #2: "web search" should rank kagi as top result
+	c := New()
+	c.Add(&Entry{
+		Name:         "context7",
+		Description:  "Library documentation lookup - query docs for any programming library",
+		Capabilities: []string{"documentation", "library-lookup", "code-intelligence", "api-reference"},
+	})
+	c.Add(&Entry{
+		Name:         "firecrawl",
+		Description:  "Web scraping and content extraction from URLs",
+		Capabilities: []string{"web-scraping", "content-extraction", "research", "url-fetch"},
+	})
+	c.Add(&Entry{
+		Name:         "kagi",
+		Description:  "Kagi search API for web search and summarization",
+		Capabilities: []string{"search", "web-search", "summarization", "research"},
+	})
+
+	results := c.Search("web search", "")
+	if len(results) == 0 {
+		t.Fatal("expected results, got none")
+	}
+	if results[0].Name != "kagi" {
+		t.Errorf("BM25: 'web search' should rank kagi first, got %s", results[0].Name)
+	}
+}
+
+func TestBM25_FieldWeighting_NameHigherThanDescription(t *testing.T) {
+	// Name match should score higher than description match for same term
+	c := New()
+	c.Add(&Entry{
+		Name:        "documentation-server",
+		Description: "A general purpose helper",
+	})
+	c.Add(&Entry{
+		Name:        "helper",
+		Description: "Documentation tools for code",
+	})
+
+	results := c.Search("documentation", "")
+	if len(results) < 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	// "documentation-server" has "documentation" in NAME (weight 3x)
+	// "helper" has "documentation" in DESCRIPTION (weight 1x)
+	// Name match should win
+	if results[0].Name != "documentation-server" {
+		t.Errorf("name-field match should outrank description-field match, got %s first", results[0].Name)
+	}
+}
+
+func TestBM25_CapabilityMatch(t *testing.T) {
+	// Capabilities should contribute to scoring (weight 2x)
+	c := New()
+	c.Add(&Entry{
+		Name:         "context7",
+		Description:  "Query programming resources",
+		Capabilities: []string{"documentation", "library-lookup"},
+	})
+	c.Add(&Entry{
+		Name:        "other",
+		Description: "Something unrelated",
+	})
+
+	results := c.Search("documentation", "")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Name != "context7" {
+		t.Errorf("capability match should find context7, got %s", results[0].Name)
+	}
+}
+
+func TestBM25_EmptyQueryReturnsAllAlphabetical(t *testing.T) {
+	// AC #3: empty query returns all, sorted alphabetically
+	c := New()
+	c.Add(&Entry{Name: "zebra", Description: "Last"})
+	c.Add(&Entry{Name: "alpha", Description: "First"})
+	c.Add(&Entry{Name: "beta", Description: "Second"})
+
+	results := c.Search("", "")
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	if results[0].Name != "alpha" || results[1].Name != "beta" || results[2].Name != "zebra" {
+		t.Errorf("empty query should return alphabetical: got %s, %s, %s",
+			results[0].Name, results[1].Name, results[2].Name)
+	}
+}
+
+func TestBM25_ExactNameMatchStillFirst(t *testing.T) {
+	// Exact name match should still get top priority regardless of BM25 score
+	c := New()
+	c.Add(&Entry{Name: "time", Description: "Time utilities"})
+	c.Add(&Entry{Name: "timeout", Description: "Timeout helper"})
+	c.Add(&Entry{Name: "realtime", Description: "Real-time sync"})
+
+	results := c.Search("time", "")
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	if results[0].Name != "time" {
+		t.Errorf("exact name match should be first, got %s", results[0].Name)
+	}
+}
+
+func TestBM25_HyphenTokenization(t *testing.T) {
+	// Hyphenated terms should be split and matched individually
+	c := New()
+	c.Add(&Entry{
+		Name:         "firecrawl",
+		Description:  "Web scraping tool",
+		Capabilities: []string{"web-scraping", "content-extraction"},
+	})
+
+	// "web scraping" (space) should match "web-scraping" (hyphenated capability)
+	results := c.Search("web scraping", "")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Name != "firecrawl" {
+		t.Errorf("hyphenated capability should match space-separated query, got %s", results[0].Name)
+	}
+}
+
+func TestBM25_ScoresAboveZero(t *testing.T) {
+	// Only entries with BM25 score > 0 should appear
+	c := New()
+	c.Add(&Entry{Name: "context7", Description: "Library documentation lookup"})
+	c.Add(&Entry{Name: "firecrawl", Description: "Web scraping"})
+
+	results := c.Search("documentation", "")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Name != "context7" {
+		t.Errorf("expected context7, got %s", results[0].Name)
+	}
+}
+
+func TestBM25_MultiWordQuery_PartialMatches(t *testing.T) {
+	// Multi-word query: entries matching more terms should rank higher
+	c := New()
+	c.Add(&Entry{
+		Name:         "kagi",
+		Description:  "Kagi search API for web search and summarization",
+		Capabilities: []string{"search", "web-search", "summarization"},
+	})
+	c.Add(&Entry{
+		Name:         "arxiv",
+		Description:  "Search and download academic papers from arXiv",
+		Capabilities: []string{"search", "academic", "papers"},
+	})
+
+	results := c.Search("web search", "")
+	if len(results) < 1 {
+		t.Fatal("expected results, got none")
+	}
+	// kagi matches both "web" and "search"; arxiv matches only "search"
+	if results[0].Name != "kagi" {
+		t.Errorf("entry matching more query terms should rank first, got %s", results[0].Name)
+	}
+}

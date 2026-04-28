@@ -4,6 +4,7 @@
 package catalog
 
 import (
+	"math"
 	"sort"
 	"strings"
 )
@@ -76,48 +77,207 @@ func (c *Catalog) List() []*Entry {
 	return entries
 }
 
-// Search finds entries matching the query and/or capability filter.
-// If query is empty, all entries are considered.
+// BM25 field weights — name matches are strongest signal, then capabilities, then description.
+const (
+	bm25FieldName       = 3.0
+	bm25FieldCapability = 2.0
+	bm25FieldDesc       = 1.0
+
+	bm25K1 = 1.2 // term frequency saturation
+	bm25B  = 0.75
+)
+
+// Search finds entries matching the query using BM25 scoring.
+// If query is empty, all entries are returned sorted alphabetically.
 // If capability is provided, only entries with that capability are returned.
 func (c *Catalog) Search(query, capability string) []*Entry {
-	query = strings.ToLower(strings.TrimSpace(query))
 	capability = strings.ToLower(strings.TrimSpace(capability))
 
-	var results []*Entry
+	// Empty query → return all (filtered by capability), sorted alphabetically
+	query = strings.TrimSpace(query)
+	if query == "" {
+		var results []*Entry
+		for _, entry := range c.entries {
+			if capability != "" && !entry.HasCapability(capability) {
+				continue
+			}
+			results = append(results, entry)
+		}
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Name < results[j].Name
+		})
+		return results
+	}
+
+	// BM25 scoring
+	queryTerms := tokenize(query)
+
+	// Pre-compute document frequencies across the catalog
+	df := make(map[string]int) // term → number of entries containing it
 	for _, entry := range c.entries {
-		// Check capability filter first
+		seen := make(map[string]bool)
+		for _, term := range queryTerms {
+			if _, ok := seen[term]; ok {
+				continue
+			}
+			if fieldWeightedTF(entry, term) > 0 {
+				seen[term] = true
+				df[term]++
+			}
+		}
+	}
+
+	n := float64(len(c.entries))
+	if n == 0 {
+		return nil
+	}
+
+	type scored struct {
+		entry *Entry
+		score float64
+	}
+
+	var results []scored
+	for _, entry := range c.entries {
+		// Capability filter
 		if capability != "" && !entry.HasCapability(capability) {
 			continue
 		}
 
-		// If no query, include all (that passed capability filter)
-		if query == "" {
-			results = append(results, entry)
-			continue
-		}
-
-		// Match against name, description, or capabilities
-		if entry.Matches(query) {
-			results = append(results, entry)
+		score := c.bm25Score(entry, queryTerms, df, n)
+		if score > 0 {
+			results = append(results, scored{entry: entry, score: score})
 		}
 	}
 
-	// Sort by relevance (exact name match first, then by name)
+	// Sort by score descending; break ties by name ascending
 	sort.Slice(results, func(i, j int) bool {
-		// Exact name match gets priority
-		iExact := strings.ToLower(results[i].Name) == query
-		jExact := strings.ToLower(results[j].Name) == query
-		if iExact && !jExact {
-			return true
+		if results[i].score != results[j].score {
+			return results[i].score > results[j].score
 		}
-		if jExact && !iExact {
-			return false
-		}
-		// Otherwise sort by name
-		return results[i].Name < results[j].Name
+		return results[i].entry.Name < results[j].entry.Name
 	})
 
-	return results
+	// Exact name match gets forced to top
+	queryLower := strings.ToLower(query)
+	out := make([]*Entry, 0, len(results))
+	for _, r := range results {
+		if strings.ToLower(r.entry.Name) == queryLower {
+			out = append(out, r.entry)
+			break
+		}
+	}
+	for _, r := range results {
+		if strings.ToLower(r.entry.Name) == queryLower {
+			continue
+		}
+		out = append(out, r.entry)
+	}
+
+	return out
+}
+
+// bm25Score computes the BM25 score for an entry against query terms.
+func (c *Catalog) bm25Score(entry *Entry, queryTerms []string, df map[string]int, n float64) float64 {
+	var total float64
+
+	// Average document length (total terms across all fields for all entries)
+	var totalLen float64
+	for _, e := range c.entries {
+		totalLen += float64(len(entryTerms(e)))
+	}
+	avgDL := totalLen / n
+	if avgDL == 0 {
+		avgDL = 1
+	}
+
+	// Current document length
+	docTerms := entryTerms(entry)
+	dl := float64(len(docTerms))
+
+	for _, term := range queryTerms {
+		// Term frequency in this document (weighted by field)
+		tf := fieldWeightedTF(entry, term)
+		if tf == 0 {
+			continue
+		}
+
+		docFreq := float64(df[term])
+		// IDF with smoothing: log((N - df + 0.5) / (df + 0.5))
+		// Floor at 0.01 so rare terms in tiny catalogs still contribute
+		idf := math.Log((n - docFreq + 0.5) / (docFreq + 0.5))
+		if idf < 0.01 {
+			idf = 0.01
+		}
+
+		// BM25 TF normalization
+		tfNorm := (tf * (bm25K1 + 1)) / (tf + bm25K1*(1-bm25B+bm25B*(dl/avgDL)))
+
+		total += idf * tfNorm
+	}
+
+	return total
+}
+
+// fieldWeightedTF computes term frequency weighted by field importance.
+// Supports partial (prefix) matches at reduced weight (0.5x) for better
+// substring backward-compatibility.
+func fieldWeightedTF(entry *Entry, term string) float64 {
+	var tf float64
+
+	// Name field (weight 3x)
+	nameTerms := tokenize(entry.Name)
+	for _, t := range nameTerms {
+		tf += matchWeight(t, term, bm25FieldName)
+	}
+
+	// Capability fields (weight 2x)
+	for _, cap := range entry.Capabilities {
+		capTerms := tokenize(cap)
+		for _, t := range capTerms {
+			tf += matchWeight(t, term, bm25FieldCapability)
+		}
+	}
+
+	// Description field (weight 1x)
+	descTerms := tokenize(entry.Description)
+	for _, t := range descTerms {
+		tf += matchWeight(t, term, bm25FieldDesc)
+	}
+
+	return tf
+}
+
+// matchWeight returns full weight for exact token match, 0.5x for prefix match, 0 otherwise.
+func matchWeight(token, query string, fieldWeight float64) float64 {
+	if token == query {
+		return fieldWeight
+	}
+	// Prefix match: query is a prefix of the token (e.g., "context" matches "context7")
+	if len(query) < len(token) && strings.HasPrefix(token, query) {
+		return fieldWeight * 0.5
+	}
+	return 0
+}
+
+// tokenize splits text into lowercase tokens on whitespace and hyphens.
+func tokenize(text string) []string {
+	text = strings.ToLower(text)
+	// Replace hyphens with spaces for uniform splitting
+	text = strings.ReplaceAll(text, "-", " ")
+	fields := strings.Fields(text)
+	return fields
+}
+
+// entryTerms returns all tokens from all fields of an entry.
+func entryTerms(entry *Entry) []string {
+	var terms []string
+	terms = append(terms, tokenize(entry.Name)...)
+	for _, cap := range entry.Capabilities {
+		terms = append(terms, tokenize(cap)...)
+	}
+	terms = append(terms, tokenize(entry.Description)...)
+	return terms
 }
 
 // Count returns the number of entries in the catalog.
@@ -133,31 +293,6 @@ func (e *Entry) HasCapability(cap string) bool {
 			return true
 		}
 	}
-	return false
-}
-
-// Matches checks if the entry matches a search query (case-insensitive).
-// Matches against name, description, and capabilities.
-func (e *Entry) Matches(query string) bool {
-	query = strings.ToLower(query)
-
-	// Check name
-	if strings.Contains(strings.ToLower(e.Name), query) {
-		return true
-	}
-
-	// Check description
-	if strings.Contains(strings.ToLower(e.Description), query) {
-		return true
-	}
-
-	// Check capabilities
-	for _, cap := range e.Capabilities {
-		if strings.Contains(strings.ToLower(cap), query) {
-			return true
-		}
-	}
-
 	return false
 }
 
