@@ -758,6 +758,19 @@ func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCal
 		return jsonToolResult(response)
 	}
 
+	// Persist removal to config file (best-effort — server is already removed from runtime registry).
+	if s.daemonConfig != nil && s.daemonConfig.Servers != nil {
+		delete(s.daemonConfig.Servers, params.Name)
+		if s.configPath != "" {
+			if err := config.Save(s.daemonConfig, s.configPath); err != nil {
+				s.logger.Warn("failed to persist config after removing server",
+					slog.String("server", params.Name),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+
 	response := RemoveResponse{
 		Success: true,
 		Name:    params.Name,
