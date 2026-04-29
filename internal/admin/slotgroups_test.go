@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -28,7 +29,7 @@ func TestToolList_IncludesSlotGroups(t *testing.T) {
 
 	s := &Server{registry: reg, daemonConfig: dcfg}
 
-	result, err := s.toolList(nil, json.RawMessage(`{}`))
+	result, err := s.toolList(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolList error: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestToolList_SlotGroupsEmptyWhenNoneConfigured(t *testing.T) {
 
 	s := &Server{registry: reg, daemonConfig: dcfg}
 
-	result, err := s.toolList(nil, json.RawMessage(`{}`))
+	result, err := s.toolList(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolList error: %v", err)
 	}
@@ -105,7 +106,7 @@ func TestToolList_SlotGroupsNilDaemonConfig(t *testing.T) {
 	reg := newTestRegistry()
 	s := &Server{registry: reg, daemonConfig: nil}
 
-	result, err := s.toolList(nil, json.RawMessage(`{}`))
+	result, err := s.toolList(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolList error: %v", err)
 	}

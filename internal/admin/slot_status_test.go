@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -24,7 +25,7 @@ func TestToolSlotStatus_ReturnsGroupWithSlots(t *testing.T) {
 
 	s := &Server{registry: reg, daemonConfig: dcfg}
 
-	result, err := s.toolSlotStatus(nil, json.RawMessage(`{}`))
+	result, err := s.toolSlotStatus(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolSlotStatus error: %v", err)
 	}
@@ -87,7 +88,7 @@ func TestToolSlotStatus_EmptyWhenNoSlotGroups(t *testing.T) {
 	}
 	s := &Server{registry: reg, daemonConfig: dcfg}
 
-	result, err := s.toolSlotStatus(nil, json.RawMessage(`{}`))
+	result, err := s.toolSlotStatus(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolSlotStatus error: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestToolSlotStatus_NilDaemonConfig(t *testing.T) {
 	reg := newTestRegistry()
 	s := &Server{registry: reg, daemonConfig: nil}
 
-	result, err := s.toolSlotStatus(nil, json.RawMessage(`{}`))
+	result, err := s.toolSlotStatus(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolSlotStatus error: %v", err)
 	}
@@ -144,7 +145,7 @@ func TestToolSlotStatus_WithSessionAccessor(t *testing.T) {
 	}
 	s := &Server{registry: reg, daemonConfig: dcfg, slotSessionAccessor: accessor}
 
-	result, err := s.toolSlotStatus(nil, json.RawMessage(`{}`))
+	result, err := s.toolSlotStatus(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolSlotStatus error: %v", err)
 	}
@@ -178,7 +179,7 @@ func TestToolSlotStatus_MultipleGroupsSorted(t *testing.T) {
 	}
 
 	s := &Server{registry: reg, daemonConfig: dcfg}
-	result, err := s.toolSlotStatus(nil, json.RawMessage(`{}`))
+	result, err := s.toolSlotStatus(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolSlotStatus error: %v", err)
 	}
