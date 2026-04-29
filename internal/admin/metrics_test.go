@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,7 @@ func TestToolMetrics_ReturnsCounters(t *testing.T) {
 	m.IncSubprocessesActive()
 
 	s := &Server{Metrics: m}
-	result, err := s.toolMetrics(nil, json.RawMessage(`{}`))
+	result, err := s.toolMetrics(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolMetrics error: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestToolMetrics_ReturnsCounters(t *testing.T) {
 // TestToolMetrics_NilMetrics returns zeroed values when Metrics is nil.
 func TestToolMetrics_NilMetrics(t *testing.T) {
 	s := &Server{Metrics: nil}
-	result, err := s.toolMetrics(nil, json.RawMessage(`{}`))
+	result, err := s.toolMetrics(context.TODO(), json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("toolMetrics error: %v", err)
 	}
