@@ -1035,7 +1035,7 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 			response.Success = false
 			response.Error = &errMsg
 			return jsonToolResult(response)
-		} else if err := os.WriteFile(backupPath, existingBytes, 0644); err != nil {
+		} else if err := os.WriteFile(backupPath, existingBytes, 0600); err != nil {
 			errMsg := fmt.Sprintf("Failed to create backup: %s", err.Error())
 			response.Success = false
 			response.Error = &errMsg
@@ -1061,7 +1061,7 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		// Try to restore backup if we made one
 		if response.BackedUp {
 			if backupBytes, readErr := os.ReadFile(response.BackupPath); readErr == nil {
-				_ = os.WriteFile(params.Path, backupBytes, 0644)
+				_ = os.WriteFile(params.Path, backupBytes, 0600)
 			}
 			response.BackedUp = false
 			response.BackupPath = ""
