@@ -651,6 +651,7 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 			}
 		}
 	}
+	s.syncClientConfigAdd(params.Name, serverCfg.Port)
 
 	// Start the server if requested (triggers Streamable HTTP proxy setup via EventServerStarted).
 	if shouldStart {
@@ -781,6 +782,7 @@ func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCal
 			}
 		}
 	}
+	s.syncClientConfigRemove(params.Name)
 
 	response := RemoveResponse{
 		Success: true,
@@ -877,11 +879,6 @@ func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCal
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, NewValidationError("invalid arguments: " + err.Error())
-	}
-
-	// Validate: query is required per spec
-	if params.Query == "" && params.Capability == "" {
-		return nil, NewValidationError("query is required")
 	}
 
 	// Search the catalog
@@ -1131,6 +1128,94 @@ func buildClientConfigEntry(kind clientConfigKind, port int) map[string]any {
 	default:
 		return map[string]any{"url": url}
 	}
+}
+
+func (s *Server) clientConfigPath() string {
+	if s.configPath != "" {
+		return filepath.Join(filepath.Dir(s.configPath), ".opencode.json")
+	}
+	return ".opencode.json"
+}
+
+func (s *Server) syncClientConfigAdd(name string, port int) {
+	path := s.clientConfigPath()
+	existing, _, err := loadExistingClientConfig(path)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to read OpenCode config for server add sync",
+				slog.String("server", name),
+				slog.String("path", path),
+				slog.String("error", err.Error()),
+			)
+		}
+		return
+	}
+
+	cfg := existing
+	if cfg == nil {
+		cfg = make(map[string]any)
+	}
+	kind := detectClientConfigKind(path, cfg)
+	mergeClientConfig(cfg, kind, map[string]map[string]any{name: buildClientConfigEntry(kind, port)})
+	if err := writeClientConfig(path, cfg); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to sync OpenCode config after adding server",
+				slog.String("server", name),
+				slog.String("path", path),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+}
+
+func (s *Server) syncClientConfigRemove(name string) {
+	path := s.clientConfigPath()
+	cfg, existed, err := loadExistingClientConfig(path)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to read OpenCode config for server remove sync",
+				slog.String("server", name),
+				slog.String("path", path),
+				slog.String("error", err.Error()),
+			)
+		}
+		return
+	}
+	if !existed || cfg == nil {
+		return
+	}
+
+	kind := detectClientConfigKind(path, cfg)
+	key := "mcpServers"
+	if kind == clientConfigKindOpenCode {
+		key = "mcp"
+	}
+	current, _ := cfg[key].(map[string]any)
+	if current == nil {
+		return
+	}
+	delete(current, name)
+	cfg[key] = current
+	if err := writeClientConfig(path, cfg); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("failed to sync OpenCode config after removing server",
+				slog.String("server", name),
+				slog.String("path", path),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+}
+
+func writeClientConfig(path string, cfg map[string]any) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return writeJSONFileAtomic(path, data)
 }
 
 func mergeClientConfig(config map[string]any, kind clientConfigKind, generated map[string]map[string]any) {
