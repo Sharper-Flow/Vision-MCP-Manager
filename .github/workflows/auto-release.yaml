@@ -178,7 +178,50 @@ jobs:
           git push origin HEAD:"${{ github.event.workflow_run.head_branch }}"
           git push origin "$NEW_TAG"
 
-          echo "Tagged and pushed ${NEW_TAG}. Release workflow will build binaries."
+          echo "Tagged and pushed ${NEW_TAG}."
+
+      - name: Set up Go
+        if: steps.bump.outputs.skip != 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build release binaries
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          VERSION="${{ steps.bump.outputs.new_tag }}"
+          mkdir -p dist
+
+          for GOOS in linux darwin; do
+            for GOARCH in amd64 arm64; do
+              echo "Building for ${GOOS}/${GOARCH}..."
+              GOOS=$GOOS GOARCH=$GOARCH go build \
+                -ldflags "-X main.version=${VERSION}" \
+                -o "vision" \
+                ./cmd/vision
+
+              tar -czf "dist/vision_${GOOS}_${GOARCH}.tar.gz" vision
+              rm vision
+            done
+          done
+
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+
+      - name: Create Release
+        if: steps.bump.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump.outputs.new_tag }}
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         if: steps.bump.outputs.skip != 'true'
@@ -187,7 +230,7 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Version:** ${{ steps.bump.outputs.new_tag }} (${{ steps.bump.outputs.bump }} bump from ${{ steps.last_tag.outputs.tag }})" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Release workflow will build binaries and create the GitHub release." >> "$GITHUB_STEP_SUMMARY"
+          echo "Binaries built and GitHub release created." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Skip summary
         if: steps.bump.outputs.skip == 'true'
