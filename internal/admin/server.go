@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrede/vision/internal/catalog"
-	"github.com/jrede/vision/internal/config"
-	visionmcp "github.com/jrede/vision/internal/mcp"
-	"github.com/jrede/vision/internal/metrics"
-	"github.com/jrede/vision/internal/server"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

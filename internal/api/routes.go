@@ -4,8 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/server"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
 // Server is the management API HTTP server.

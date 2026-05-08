@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrede/vision/internal/config"
-	visionmcp "github.com/jrede/vision/internal/mcp"
-	"github.com/jrede/vision/internal/session"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 )
 
 // --- PID File Tests ---

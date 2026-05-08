@@ -3,8 +3,8 @@ package server
 import (
 	"time"
 
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/supervisor"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/supervisor"
 )
 
 // State represents the lifecycle state of a managed server.

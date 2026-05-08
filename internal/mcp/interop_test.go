@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/session"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

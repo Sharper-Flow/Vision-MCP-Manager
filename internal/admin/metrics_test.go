@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrede/vision/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 )
 
 // TestToolMetrics_ReturnsCounters verifies vision_metrics returns JSON

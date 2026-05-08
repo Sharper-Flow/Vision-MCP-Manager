@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/supervisor"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/supervisor"
 )
 
 func newTestRegistry() (*Registry, *supervisor.Supervisor) {

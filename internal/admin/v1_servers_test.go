@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jrede/vision/internal/server"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
 // newTestRegistry constructs a bare registry for handler tests.

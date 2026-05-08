@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/jrede/vision/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 )
 
 // TestToolSlotStatus_ReturnsGroupWithSlots verifies the response shape:

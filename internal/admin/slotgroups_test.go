@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/jrede/vision/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 )
 
 // TestToolList_IncludesSlotGroups verifies that vision_list adds a slot_groups

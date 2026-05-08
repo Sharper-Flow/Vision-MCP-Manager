@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"github.com/jrede/vision/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 )
 
 // TestServerConfig_AcceptsRequiredField verifies the V3 schema addition

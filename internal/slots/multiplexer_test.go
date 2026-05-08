@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/session"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 )
 
 func TestSelectForNewSession_LeastLoadedTieBreaksByIndex(t *testing.T) {

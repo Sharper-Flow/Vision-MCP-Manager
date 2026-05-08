@@ -12,13 +12,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrede/vision/internal/admin"
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/mcp"
-	"github.com/jrede/vision/internal/server"
-	"github.com/jrede/vision/internal/session"
-	"github.com/jrede/vision/internal/slots"
-	"github.com/jrede/vision/internal/supervisor"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/admin"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/slots"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/supervisor"
 )
 
 // Daemon is the main Vision daemon that coordinates all components.

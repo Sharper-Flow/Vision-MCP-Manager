@@ -15,10 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jrede/vision/internal/catalog"
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/metrics"
-	"github.com/jrede/vision/internal/server"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

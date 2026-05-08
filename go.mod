@@ -1,6 +1,6 @@
-module github.com/jrede/vision
+module github.com/Sharper-Flow/Vision-MCP-Manager
 
-go 1.23.0
+go 1.24.0
 
 toolchain go1.24.12
 

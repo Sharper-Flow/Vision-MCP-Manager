@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/jrede/vision/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 )
 
 // --- handleV1Slots (GET /v1/slots) tests ---

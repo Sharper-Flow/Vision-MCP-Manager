@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jrede/vision/internal/admin"
-	"github.com/jrede/vision/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/admin"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 )
 
 type rpcRequest struct {

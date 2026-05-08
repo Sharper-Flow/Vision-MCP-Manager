@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/server"
-	"github.com/jrede/vision/internal/supervisor"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/supervisor"
 )
 
 // testSetup creates a test environment with registry and handlers.

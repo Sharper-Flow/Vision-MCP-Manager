@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jrede/vision/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/thejerf/suture/v4"
 )
 

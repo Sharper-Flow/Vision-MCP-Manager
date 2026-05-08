@@ -14,9 +14,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jrede/vision/internal/admin"
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/daemon"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/admin"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/daemon"
 )
 
 var (

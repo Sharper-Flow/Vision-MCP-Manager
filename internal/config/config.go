@@ -230,7 +230,7 @@ func Save(cfg *Config, path string) error {
 	}
 
 	// Add header comment
-	header := "# Vision Server Registry\n# See: https://github.com/jrede/vision\n\n"
+	header := "# Vision Server Registry\n# See: https://github.com/Sharper-Flow/Vision-MCP-Manager\n\n"
 	fullData := []byte(header + string(data))
 
 	// Write atomically: create temp file, write, rename

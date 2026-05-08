@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jrede/vision/internal/config"
-	"github.com/jrede/vision/internal/server"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
 // Handlers provides HTTP handlers for the management API.

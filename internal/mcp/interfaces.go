@@ -3,7 +3,7 @@ package mcp
 import (
 	"context"
 
-	"github.com/jrede/vision/internal/session"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 )
 
 // AdmissionStatuser abstracts admission-control state for fixed and multiplexed
