@@ -251,12 +251,15 @@ func (p *ManagedProcess) forceKill() error {
 // collectStderr reads stderr and logs it to prevent stream corruption.
 // MCP uses stdout for JSON-RPC, so stderr must be captured separately.
 func (p *ManagedProcess) collectStderr() {
-	if p.stderr == nil {
+	p.ioMu.RLock()
+	stderr := p.stderr
+	p.ioMu.RUnlock()
+	if stderr == nil {
 		return
 	}
-	defer func() { _ = p.stderr.Close() }()
+	defer func() { _ = stderr.Close() }()
 
-	scanner := bufio.NewScanner(p.stderr)
+	scanner := bufio.NewScanner(stderr)
 	for scanner.Scan() {
 		line := scanner.Text()
 		p.logger.Debug("server stderr", slog.String("line", line))
