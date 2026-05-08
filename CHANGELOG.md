@@ -1,5 +1,15 @@
 ## 2026-05-08 (v1.2.2)
 
+### Fixed
+
+- address review suggestions — defense-in-depth logging, Source sanitization, DRY isInstalled
+### Changed
+
+- update changelog for v1.2.2 — structured fallback suggestions (docs)
+- clarify classification/conversion function attribution in MCP_TRANSPORTS.md (docs)
+
+## 2026-05-08 (v1.2.2)
+
 ### Added
 
 - structured fallback suggestions on upstream tool failure — AvailabilityError now returns CallToolResult{IsError:true} with failure category, server/tool name, explicit no-auto-routing disclaimer, and up to 3 alternative tool suggestions ranked by catalog capability overlap
