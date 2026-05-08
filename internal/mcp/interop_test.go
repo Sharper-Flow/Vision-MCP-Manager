@@ -90,6 +90,97 @@ func setupInteropProxyWithMaxSessions(t *testing.T, maxSessions int) (*httptest.
 	return ts, mgr
 }
 
+func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := &config.ServerConfig{
+		Command:        "node",
+		Args:           []string{"-e", echoMCPServerJS},
+		Port:           16302,
+		Autostart:      true,
+		RestartPolicy:  config.RestartOnFailure,
+		SessionTimeout: config.Duration(30 * time.Second),
+		MaxSessions:    5,
+	}
+	mgr := session.NewManager("interop-structured-fallback", cfg, logger)
+
+	provider := fallbackSuggestionProviderFunc(func(_ context.Context, failedServer, failedTool string) []FallbackSuggestion {
+		if failedServer != "kagi" {
+			t.Fatalf("failedServer = %q, want kagi", failedServer)
+		}
+		if failedTool != "echo" {
+			t.Fatalf("failedTool = %q, want echo", failedTool)
+		}
+		return []FallbackSuggestion{
+			{ServerName: "brave-search", Capabilities: []string{"web-search"}, Installed: true, Reason: "shares 1 capability: web-search"},
+			{ServerName: "tavily", Capabilities: []string{"web-search"}, Installed: false, Reason: "shares 1 capability: web-search"},
+		}
+	})
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:         "kagi",
+		SessionManager:     mgr,
+		Logger:             logger,
+		SuggestionProvider: provider,
+	})
+	ts := httptest.NewServer(handler)
+	t.Cleanup(func() {
+		ts.Close()
+		mgr.CloseAll()
+	})
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "structured-fallback-test", Version: "1.0.0"}, nil)
+	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer sess.Close()
+
+	if _, err := sess.ListTools(ctx, nil); err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+
+	// Force the next respawn to fail after the initial healthy subprocess has
+	// been closed. This creates a deterministic downstream availability failure.
+	cfg.Command = "vision-missing-command-for-structured-fallback-test"
+	for _, id := range mgr.Sessions() {
+		if err := mgr.RemoveSession(id); err != nil {
+			t.Fatalf("RemoveSession(%s): %v", id, err)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	result, err := sess.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "post-close"},
+	})
+	if err != nil {
+		t.Fatalf("expected visible tool error result, got Go error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected result, got nil")
+	}
+	if !result.IsError {
+		t.Fatal("expected IsError=true")
+	}
+
+	text := firstTextContent(t, result)
+	for _, want := range []string{
+		"config_drift",
+		"echo",
+		"brave-search",
+		"tavily",
+		"Vision did not retry on a different server",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("result text missing %q:\n%s", want, text)
+		}
+	}
+}
+
 // mcpAccept is the Accept header required by go-sdk v1.0.0 StreamableHTTPHandler.
 const mcpAccept = "application/json, text/event-stream"
 
