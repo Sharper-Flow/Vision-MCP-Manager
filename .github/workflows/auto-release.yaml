@@ -1,0 +1,193 @@
+name: Auto Release
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [trunk, main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Auto Release
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get last tag
+        id: last_tag
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+          echo "Last tag: $LAST_TAG"
+
+      - name: Determine version bump
+        id: bump
+        run: |
+          LAST_TAG="${{ steps.last_tag.outputs.tag }}"
+          COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
+
+          echo "Commits since ${LAST_TAG}:"
+          echo "$COMMITS"
+
+          # If no new commits, skip
+          COUNT=$(echo "$COMMITS" | wc -l | tr -d ' ')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "No new commits since last tag. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          # Parse conventional commit prefixes to determine bump level
+          HAS_BREAKING=false
+          HAS_FEAT=false
+          HAS_FIX=false
+          HAS_OTHER=false
+
+          while IFS= read -r line; do
+            # Check for breaking change (feat!: or fix!: or BREAKING CHANGE in body)
+            if echo "$line" | grep -qE '^[a-z]+(\(.+\))?!:'; then
+              HAS_BREAKING=true
+            fi
+            if echo "$line" | grep -qE '^feat(\(.+\))?:'; then
+              HAS_FEAT=true
+            fi
+            if echo "$line" | grep -qE '^fix(\(.+\))?:'; then
+              HAS_FIX=true
+            fi
+            # Any non-trivial commit counts
+            if echo "$line" | grep -qE '^[a-z]+(\(.+\))?:'; then
+              HAS_OTHER=true
+            fi
+          done <<< "$COMMITS"
+
+          # Determine bump level
+          CURRENT="${LAST_TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+          if [ "$HAS_BREAKING" = true ]; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+            BUMP="major"
+          elif [ "$HAS_FEAT" = true ]; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+            BUMP="minor"
+          elif [ "$HAS_FIX" = true ] || [ "$HAS_OTHER" = true ]; then
+            PATCH=$((PATCH + 1))
+            BUMP="patch"
+          else
+            echo "No conventional commits found. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          NEW_TAG="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "Bump: $BUMP ($LAST_TAG → $NEW_TAG)"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+
+      - name: Generate CHANGELOG
+        if: steps.bump.outputs.skip != 'true'
+        id: changelog
+        run: |
+          LAST_TAG="${{ steps.last_tag.outputs.tag }}"
+          NEW_TAG="${{ steps.bump.outputs.new_tag }}"
+          TODAY=$(date +%Y-%m-%d)
+
+          # Generate categorized entries from conventional commits
+          FEAT_ENTRIES=""
+          FIX_ENTRIES=""
+          OTHER_ENTRIES=""
+
+          while IFS= read -r line; do
+            # Strip prefix for display
+            MSG=$(echo "$line" | sed -E 's/^[a-z]+(\(.+\))?:\s*//')
+
+            if echo "$line" | grep -qE '^feat(\(.+\))?:'; then
+              FEAT_ENTRIES="${FEAT_ENTRIES}- ${MSG}
+          "
+            elif echo "$line" | grep -qE '^fix(\(.+\))?:'; then
+              FIX_ENTRIES="${FIX_ENTRIES}- ${MSG}
+          "
+            elif echo "$line" | grep -qE '^(chore|ci|docs|refactor|test|perf|style|build)(\(.+\))?:'; then
+              SCOPE=$(echo "$line" | sed -E 's/^([a-z]+)(\((.+)\))?:.*/\3/' | head -1)
+              PREFIX=$(echo "$line" | sed -E 's/^([a-z]+)(\(.+\))?:.*/\1/')
+              if [ -n "$SCOPE" ] && [ "$SCOPE" != "$PREFIX" ]; then
+                OTHER_ENTRIES="${OTHER_ENTRIES}- ${MSG} (${PREFIX}: ${SCOPE})
+          "
+              else
+                OTHER_ENTRIES="${OTHER_ENTRIES}- ${MSG} (${PREFIX})
+          "
+            fi
+          done < <(git log "${LAST_TAG}..HEAD" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
+
+          # Build changelog entry
+          ENTRY="## ${TODAY} (${NEW_TAG})
+          "
+          if [ -n "$FEAT_ENTRIES" ]; then
+            ENTRY="${ENTRY}
+          ### Added
+          ${FEAT_ENTRIES}"
+          fi
+          if [ -n "$FIX_ENTRIES" ]; then
+            ENTRY="${ENTRY}
+          ### Fixed
+          ${FIX_ENTRIES}"
+          fi
+          if [ -n "$OTHER_ENTRIES" ]; then
+            ENTRY="${ENTRY}
+          ### Changed
+          ${OTHER_ENTRIES}"
+          fi
+
+          # Prepend to CHANGELOG.md
+          if [ -f CHANGELOG.md ]; then
+            EXISTING=$(cat CHANGELOG.md)
+            printf '%s\n\n%s\n' "$ENTRY" "$EXISTING" > CHANGELOG.md
+          else
+            printf '%s\n' "$ENTRY" > CHANGELOG.md
+          fi
+
+          echo "Changelog entry generated for ${NEW_TAG}"
+          head -30 CHANGELOG.md
+
+      - name: Commit CHANGELOG and push tag
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          NEW_TAG="${{ steps.bump.outputs.new_tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add CHANGELOG.md
+          git diff --cached --quiet || git commit -m "docs: update changelog for ${NEW_TAG}"
+
+          git tag -a "$NEW_TAG" -m "Release ${NEW_TAG}"
+          git push origin HEAD:"${{ github.event.workflow_run.head_branch }}"
+          git push origin "$NEW_TAG"
+
+          echo "Tagged and pushed ${NEW_TAG}. Release workflow will build binaries."
+
+      - name: Summary
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          echo "## Auto Release Triggered 🚀" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version:** ${{ steps.bump.outputs.new_tag }} (${{ steps.bump.outputs.bump }} bump from ${{ steps.last_tag.outputs.tag }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release workflow will build binaries and create the GitHub release." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip summary
+        if: steps.bump.outputs.skip == 'true'
+        run: |
+          echo "## No Release Needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "No conventional commits or no new commits since last tag." >> "$GITHUB_STEP_SUMMARY"
