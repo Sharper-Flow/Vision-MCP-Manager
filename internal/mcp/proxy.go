@@ -1186,6 +1186,17 @@ func (ps *proxySession) finishToolCall(ctx context.Context, toolName string, res
 		return result, nil
 	}
 
+	// Defense-in-depth: result should be nil when err is non-nil per
+	// callDownstreamTool contract (result, nil) | (nil, err). Log if
+	// violated so upstream debugging isn't silently confused.
+	if result != nil {
+		ps.logger.Warn("finishToolCall received non-nil result with non-nil error",
+			slog.String("tool", toolName),
+			slog.String("server", ps.serverName),
+			slog.String("error", err.Error()),
+		)
+	}
+
 	var availabilityErr *AvailabilityError
 	if !errors.As(err, &availabilityErr) {
 		return nil, err

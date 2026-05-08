@@ -119,6 +119,44 @@ func TestFormatAvailabilityFailureWithUnknownCategory(t *testing.T) {
 	}
 }
 
+func TestSanitizeSource(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"https://example.com/brave", "https://example.com/brave"},
+		{"https://example.com/a\x00b", "https://example.com/ab"},
+		{"https://example.com/\x1b[31mred", "https://example.com/[31mred"},
+		{"a\x7fb", "ab"},
+		{"normal-url", "normal-url"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := sanitizeSource(tt.input)
+			if got != tt.want {
+				t.Fatalf("sanitizeSource(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAvailabilityErrorToResultSanitizesSourceURL(t *testing.T) {
+	availabilityErr := &AvailabilityError{Category: FailureCategoryProviderTimeout, Err: context.DeadlineExceeded}
+	suggestions := []FallbackSuggestion{
+		{ServerName: "evil", Source: "https://example.com/\x00injected"},
+	}
+
+	result := availabilityErrorToResult(availabilityErr, "kagi", "tool", suggestions)
+	text := firstTextContent(t, result)
+
+	if strings.Contains(text, "\x00") {
+		t.Fatal("control character leaked into output")
+	}
+	if !strings.Contains(text, "https://example.com/injected") {
+		t.Fatalf("sanitized source missing from output:\n%s", text)
+	}
+}
+
 func firstTextContent(t *testing.T, result *sdkmcp.CallToolResult) string {
 	t.Helper()
 	if result == nil {

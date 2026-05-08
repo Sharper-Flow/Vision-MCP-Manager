@@ -7,6 +7,18 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// sanitizeSource strips ASCII control characters (except space) from a
+// suggestion source string to prevent injection or rendering artifacts in
+// the error message shown to the LLM.
+func sanitizeSource(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 func availabilityErrorToResult(err *AvailabilityError, server, tool string, suggestions []FallbackSuggestion) *sdkmcp.CallToolResult {
 	if err == nil {
 		return nil
@@ -49,7 +61,7 @@ func formatAvailabilityFailureWithCause(category FailureCategory, server, tool, 
 		}
 		fmt.Fprintf(&b, "; installed: %t", suggestion.Installed)
 		if suggestion.Source != "" {
-			fmt.Fprintf(&b, "; source: %s", suggestion.Source)
+			fmt.Fprintf(&b, "; source: %s", sanitizeSource(suggestion.Source))
 		}
 		if suggestion.Reason != "" {
 			fmt.Fprintf(&b, "; reason: %s", suggestion.Reason)

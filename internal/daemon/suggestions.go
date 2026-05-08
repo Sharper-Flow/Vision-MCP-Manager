@@ -20,6 +20,10 @@ func newCatalogSuggestionProvider(cat *catalog.Catalog, registry *server.Registr
 	return &catalogSuggestionProvider{catalog: cat, registry: registry}
 }
 
+func (p *catalogSuggestionProvider) isInstalled(name string) bool {
+	return p.registry != nil && p.registry.Get(name) != nil
+}
+
 func (p *catalogSuggestionProvider) SuggestAlternatives(_ context.Context, failedServer, _ string) []mcp.FallbackSuggestion {
 	if p == nil || p.catalog == nil {
 		return nil
@@ -86,7 +90,7 @@ func (p *catalogSuggestionProvider) SuggestAlternatives(_ context.Context, faile
 		suggestions = append(suggestions, mcp.FallbackSuggestion{
 			ServerName:   name,
 			Capabilities: append([]string(nil), capabilities...),
-			Installed:    p.registry != nil && p.registry.Get(name) != nil,
+			Installed:    p.isInstalled(name),
 			Source:       entry.Source,
 			Reason:       sharedCapabilitiesReason(capabilities),
 		})

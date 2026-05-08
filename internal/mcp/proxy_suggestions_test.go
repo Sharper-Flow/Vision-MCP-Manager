@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -86,6 +87,29 @@ func TestProxyToolHandlerConvertsAvailabilityErrorToToolResult(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("result text missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestProxySessionFinishToolCallLogsResultWithNonNilError(t *testing.T) {
+	var logBuf bytes.Buffer
+	ps := &proxySession{
+		serverName: "kagi",
+		logger:     slog.New(slog.NewTextHandler(&logBuf, nil)),
+	}
+
+	// Non-availability error with non-nil result (contract violation)
+	dummyResult := &sdkmcp.CallToolResult{Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: "stale"}}}
+	wantErr := errors.New("unexpected dual return")
+
+	result, err := ps.finishToolCall(context.Background(), "kagi_search_fetch", dummyResult, wantErr)
+	if result != nil {
+		t.Fatalf("expected nil result for non-availability error, got %#v", result)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if !strings.Contains(logBuf.String(), "finishToolCall received non-nil result with non-nil error") {
+		t.Fatalf("expected defense-in-depth log, got:\n%s", logBuf.String())
 	}
 }
 
