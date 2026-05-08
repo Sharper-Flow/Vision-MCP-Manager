@@ -36,9 +36,9 @@ Vision is a Go-native daemon that provides:
 | **Agent Self-Management** | AI agents can add, remove, and restart servers through the Admin MCP API |
 | **Hot Reload** | Update configuration without restarting your coding session |
 
-## Why Vision + OpenCode?
+## Why Vision?
 
-[OpenCode](https://opencode.ai) is an open-source AI coding agent with native support for Vision's `remote` MCP transport. Together, they enable **high-agency coding with guardrails**:
+Vision turns any MCP-compatible agent into a **high-agency system with guardrails**:
 
 ```
 You: "Research best practices for React Server Components"
@@ -59,7 +59,7 @@ No human intervention. No config file edits. The agent adapts to what it needs.
 
 ## Comparison
 
-| Feature | Vision | MCP Gateway | Direct in OpenCode |
+| Feature | Vision | MCP Gateway | Direct Config |
 |---------|--------|-------------|-------------------|
 | Agent self-management | Yes | No | No |
 | Process supervision | Yes (Erlang-style) | Varies | No |
@@ -80,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/tru
 # Start the daemon (with example servers)
 vision daemon start -d
 
-# Generate OpenCode configuration
+# Generate client configuration
 vision init --global
 ```
 
@@ -99,7 +99,7 @@ When it installs the systemd unit, it also captures your current `PATH` so shell
 
 **Options:**
 - `--systemd` — Install and enable the systemd user service
-- `--opencode` — Auto-configure OpenCode integration
+- `--client <name>` — Auto-configure for a specific client
 
 ### From Source
 
@@ -188,9 +188,9 @@ Vision loads `.env` before parsing the config, so `${VAR}` expansion works regar
 
 For producer-owned remote MCPs like Grep by Vercel, prefer configuring the official remote endpoint directly in your client instead of wrapping it in a local subprocess. If you intentionally want Vision to proxy a remote MCP, use `transport: http` with `url:` in `servers.yaml`.
 
-### OpenCode Integration
+### Client Integration
 
-Add Vision to your OpenCode config (`~/.config/opencode/opencode.json`):
+Connect any MCP-compatible client to Vision-managed servers via Streamable HTTP:
 
 ```json
 {
@@ -209,12 +209,6 @@ Add Vision to your OpenCode config (`~/.config/opencode/opencode.json`):
       "type": "remote",
       "url": "http://localhost:6279/mcp",
       "enabled": true
-    },
-    "gh_grep": {
-      "type": "remote",
-      "url": "https://mcp.grep.app",
-      "enabled": true,
-      "timeout": 20000
     }
   }
 }
@@ -223,42 +217,21 @@ Add Vision to your OpenCode config (`~/.config/opencode/opencode.json`):
 Or generate automatically:
 
 ```bash
-vision init --global --client opencode
+vision init --global
 ```
 
-## External Configuration Tools
+## External Configuration
 
-Vision's `~/.config/vision/servers.yaml` is designed to be written by external
-configuration tools as well as edited by hand. A tool such as
-[OpenCode Advance](https://github.com/Sharper-Flow/Opencode-Advance) can render
-a complete `servers.yaml` from its own declarative source of truth and hand it
-to Vision.
+Vision's `~/.config/vision/servers.yaml` can be written by external configuration tools as well as edited by hand.
 
 **Contract for external writers:**
 
-- `servers.yaml` is **authoritative** on reload. Vision does not merge with
-  prior state — what's in the file is what runs.
+- `servers.yaml` is **authoritative** on reload. Vision does not merge with prior state — what's in the file is what runs.
 - Use atomic writes (write to a temp file in the same directory, then rename).
-- Validate against the documented schema (`internal/config/schema.go`) before
-  writing.
-- Preserve unknown but reserved fields (e.g. `source`, `description`,
-  `retry.*`, `circuit_breaker.*`) on round-trip when re-rendering from a
-  higher-level source.
-- The admin HTTP surface at `http://127.0.0.1:6275` exposes stable
-  integration endpoints: `GET /version` (capability contract), `GET /health`
-  (aggregate status), `GET /v1/servers` (per-server status), and
-  `GET /v1/servers/{name}` (single server detail).
-- Check `GET /version` for the `api.*` capability flags before calling
-  endpoints — this lets external tools feature-detect without pinning Vision
-  versions.
-
-**Non-contract (intentionally):**
-
-- Vision does not read secrets referenced via `env_file` paths during config
-  parse; those are resolved at server-spawn time. External tools may record
-  paths as-is without materializing the files.
-- Vision does not interpret `source` or `description` beyond preserving them
-  on round-trip.
+- Validate against the documented schema (`internal/config/schema.go`) before writing.
+- Preserve unknown but reserved fields (e.g. `source`, `description`, `retry.*`, `circuit_breaker.*`) on round-trip when re-rendering from a higher-level source.
+- The admin HTTP surface at `http://127.0.0.1:6275` exposes stable integration endpoints: `GET /version` (capability contract), `GET /health` (aggregate status), `GET /v1/servers` (per-server status), and `GET /v1/servers/{name}` (single server detail).
+- Check `GET /version` for the `api.*` capability flags before calling endpoints — this lets external tools feature-detect without pinning Vision versions.
 
 ## Agent Self-Management
 
@@ -288,7 +261,7 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        AI Agents                                │
-│                  (OpenCode, Claude Code, etc.)                  │
+│              (OpenCode, Claude Code, Cursor, etc.)              │
 └───────────────────────────────┬─────────────────────────────────┘
                                 │ HTTP POST/GET/DELETE /mcp
                                 ▼
@@ -363,7 +336,7 @@ vision server stop <name>
 ```bash
 vision init                           # Project-local config
 vision init --global                  # Global config
-vision init --client opencode         # Target OpenCode format
+vision init --client opencode         # Target specific client format
 vision init --servers time,context7   # Specific servers only
 ```
 
