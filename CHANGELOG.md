@@ -1,3 +1,26 @@
+## 2026-05-08 (v1.2.0)
+
+### Added
+
+- add tool naming guidance and proxy config tests
+### Fixed
+
+- resolve flaky TestProxyHandler_SelectorLifecycle
+- fix process substitution in auto-release changelog step
+- close stderr data race in collectStderr
+- resolve all lint issues, add pre-push hook
+- rename module from github.com/jrede/vision to github.com/Sharper-Flow/Vision-MCP-Manager
+- remove duplicate tests, add golangci-lint v2 config
+- replace nil context with context.TODO in admin tests
+- replace nil context with context.TODO in metrics_test.go
+- refcount leak on spawn failure + subscriber panic recovery
+### Changed
+
+- add conventional commits auto-release workflow (ci)
+- cleanup project root, fix CI deprecation warnings (chore)
+- decouple from OpenCode-specific framing (docs: readme)
+- session snapshot (chore: worktree)
+
 # Changelog
 
 ## 2026-04-21 (v1.1.1)
