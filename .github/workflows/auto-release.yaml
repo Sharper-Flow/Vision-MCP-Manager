@@ -108,27 +108,30 @@ jobs:
           FIX_ENTRIES=""
           OTHER_ENTRIES=""
 
+          COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
+
           while IFS= read -r line; do
             # Strip prefix for display
             MSG=$(echo "$line" | sed -E 's/^[a-z]+(\(.+\))?:\s*//')
 
             if echo "$line" | grep -qE '^feat(\(.+\))?:'; then
-              FEAT_ENTRIES="${FEAT_ENTRIES}- ${MSG}
-          "
+              FEAT_ENTRIES="${FEAT_ENTRIES}
+          - ${MSG}"
             elif echo "$line" | grep -qE '^fix(\(.+\))?:'; then
-              FIX_ENTRIES="${FIX_ENTRIES}- ${MSG}
-          "
+              FIX_ENTRIES="${FIX_ENTRIES}
+          - ${MSG}"
             elif echo "$line" | grep -qE '^(chore|ci|docs|refactor|test|perf|style|build)(\(.+\))?:'; then
               SCOPE=$(echo "$line" | sed -E 's/^([a-z]+)(\((.+)\))?:.*/\3/' | head -1)
               PREFIX=$(echo "$line" | sed -E 's/^([a-z]+)(\(.+\))?:.*/\1/')
               if [ -n "$SCOPE" ] && [ "$SCOPE" != "$PREFIX" ]; then
-                OTHER_ENTRIES="${OTHER_ENTRIES}- ${MSG} (${PREFIX}: ${SCOPE})
-          "
+                OTHER_ENTRIES="${OTHER_ENTRIES}
+          - ${MSG} (${PREFIX}: ${SCOPE})"
               else
-                OTHER_ENTRIES="${OTHER_ENTRIES}- ${MSG} (${PREFIX})
-          "
+                OTHER_ENTRIES="${OTHER_ENTRIES}
+          - ${MSG} (${PREFIX})"
+              fi
             fi
-          done < <(git log "${LAST_TAG}..HEAD" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
+          done <<< "$COMMITS"
 
           # Build changelog entry
           ENTRY="## ${TODAY} (${NEW_TAG})
