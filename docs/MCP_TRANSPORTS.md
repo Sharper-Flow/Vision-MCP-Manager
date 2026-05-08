@@ -127,8 +127,8 @@ protocol errors. This follows the MCP SDK guidance that tool-originated errors
 should use `CallToolResult{IsError: true}` so the LLM can see the failure and
 self-correct.
 
-When `callDownstreamTool` classifies an upstream failure as `AvailabilityError`,
-`makeProxyToolHandler` converts it into a `CallToolResult` whose text content
+When `classifyToolCallError` classifies an upstream failure as `AvailabilityError`,
+`finishToolCall` (called by `makeProxyToolHandler`) converts it into a `CallToolResult` whose text content
 includes:
 
 - failure category: `config_drift`, `provider_timeout`, `retry_exhausted`, or
