@@ -2221,3 +2221,369 @@ func TestProxyHandler_ProactiveHealthCheck(t *testing.T) {
 
 	t.Logf("proactive health check test passed: probe-triggered respawn succeeded, count=%d", mgr.SessionCount())
 }
+
+func TestProxyConfig_hasExactlyOneManagerSource(t *testing.T) {
+	tests := []struct {
+		name     string
+		mgr      *session.Manager
+		shared   *session.SharedSessionManager
+		selector ManagerSelector
+		want     bool
+	}{
+		{"none", nil, nil, nil, false},
+		{"only mgr", &session.Manager{}, nil, nil, true},
+		{"only shared", nil, &session.SharedSessionManager{}, nil, true},
+		{"only selector", nil, nil, &testSelector{}, true},
+		{"mgr+shared", &session.Manager{}, &session.SharedSessionManager{}, nil, false},
+		{"mgr+selector", &session.Manager{}, nil, &testSelector{}, false},
+		{"shared+selector", nil, &session.SharedSessionManager{}, &testSelector{}, false},
+		{"all three", &session.Manager{}, &session.SharedSessionManager{}, &testSelector{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ProxyConfig{
+				SessionManager: tt.mgr,
+				SharedManager:  tt.shared,
+				Selector:       tt.selector,
+			}
+			if got := cfg.hasExactlyOneManagerSource(); got != tt.want {
+				t.Errorf("hasExactlyOneManagerSource() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewProxyHandler_PanicsWhenSharedManagerAndSessionManagerBothSet(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when both SessionManager and SharedManager are set")
+		}
+	}()
+
+	logger := testLogger(t)
+	mgr := session.NewManager("both-set", testServerConfig(), logger)
+	_ = NewProxyHandler(ProxyConfig{
+		ServerName:     "both-set",
+		SessionManager: mgr,
+		SharedManager:  session.NewSharedSessionManager("shared", testServerConfig(), logger),
+		Logger:         logger,
+	})
+}
+
+func TestNewProxyHandler_PanicsWhenSharedManagerAndSelectorBothSet(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic when both SharedManager and Selector are set")
+		}
+	}()
+
+	logger := testLogger(t)
+	_ = NewProxyHandler(ProxyConfig{
+		ServerName:    "shared+selector",
+		SharedManager: session.NewSharedSessionManager("shared", testServerConfig(), logger),
+		Selector:      &testSelector{},
+		Logger:        logger,
+	})
+}
+
+func TestProxyHandler_SharedModeEndToEnd(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfig()
+
+	sm := session.NewSharedSessionManager("test-shared", cfg, logger)
+	defer sm.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:    "test-shared",
+		SharedManager: sm,
+		Logger:        logger,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	results := make([]string, 2)
+	for i := 0; i < 2; i++ {
+		client := mcp.NewClient(&mcp.Implementation{
+			Name:    "test-client",
+			Version: "1.0.0",
+		}, nil)
+
+		clientSession, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+		if err != nil {
+			t.Fatalf("client[%d].Connect failed: %v", i, err)
+		}
+		defer clientSession.Close()
+
+		toolsResult, err := clientSession.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("client[%d] ListTools failed: %v", i, err)
+		}
+
+		if len(toolsResult.Tools) == 0 {
+			t.Fatalf("client[%d] expected at least one tool from proxy, got none", i)
+		}
+
+		foundEcho := false
+		for _, tool := range toolsResult.Tools {
+			if tool.Name == "echo" {
+				foundEcho = true
+				break
+			}
+		}
+		if !foundEcho {
+			t.Errorf("client[%d] expected 'echo' tool in proxy tools, got: %v", i, toolsResult.Tools)
+		}
+
+		callResult, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
+			Name:      "echo",
+			Arguments: map[string]any{"message": fmt.Sprintf("hello-shared-%d", i)},
+		})
+		if err != nil {
+			t.Fatalf("client[%d] CallTool failed: %v", i, err)
+		}
+
+		if len(callResult.Content) == 0 {
+			t.Fatalf("client[%d] expected content in CallTool result, got none", i)
+		}
+
+		tc, ok := callResult.Content[0].(*mcp.TextContent)
+		if !ok {
+			t.Fatalf("client[%d] expected TextContent, got %T", i, callResult.Content[0])
+		}
+
+		if tc.Text == "" {
+			t.Errorf("client[%d] expected non-empty text in CallTool result", i)
+		}
+
+		t.Logf("client[%d] proxy result: %s", i, tc.Text)
+		results[i] = tc.Text
+	}
+
+	if results[0] == "" || results[1] == "" {
+		t.Fatalf("expected both results non-empty, got %q and %q", results[0], results[1])
+	}
+
+	pid0 := ""
+	pid1 := ""
+	for _, part := range strings.Fields(results[0]) {
+		if strings.Contains(part, "pid=") {
+			pid0 = part
+			break
+		}
+	}
+	for _, part := range strings.Fields(results[1]) {
+		if strings.Contains(part, "pid=") {
+			pid1 = part
+			break
+		}
+	}
+
+	if pid0 == "" || pid1 == "" {
+		t.Fatalf("expected both results to contain pid=, got %q and %q", results[0], results[1])
+	}
+
+	if pid0 != pid1 {
+		t.Errorf("expected same PID in shared mode, got %q and %q", pid0, pid1)
+	}
+
+	t.Logf("shared mode: both sessions used same downstream PID %s", pid0)
+}
+
+func TestProxyHandler_SharedModeCloseDownstream(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfig()
+
+	sm := session.NewSharedSessionManager("test-shared-close", cfg, logger)
+	defer sm.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:    "test-shared-close",
+		SharedManager: sm,
+		Logger:        logger,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	clientA := mcp.NewClient(&mcp.Implementation{
+		Name:    "client-A",
+		Version: "1.0.0",
+	}, nil)
+	sessA, err := clientA.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("client A Connect failed: %v", err)
+	}
+
+	clientB := mcp.NewClient(&mcp.Implementation{
+		Name:    "client-B",
+		Version: "1.0.0",
+	}, nil)
+	sessB, err := clientB.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("client B Connect failed: %v", err)
+	}
+
+	if count := sm.RefCount(); count != 2 {
+		t.Fatalf("expected refcount 2, got %d", count)
+	}
+
+	resultA, err := sessA.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "before-close"},
+	})
+	if err != nil {
+		t.Fatalf("client A CallTool failed: %v", err)
+	}
+	textA := ""
+	if len(resultA.Content) > 0 {
+		if tc, ok := resultA.Content[0].(*mcp.TextContent); ok {
+			textA = tc.Text
+		}
+	}
+
+	if err := sessA.Close(); err != nil {
+		t.Logf("sessA.Close error (expected in some cases): %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if count := sm.RefCount(); count != 1 {
+		t.Fatalf("expected refcount 1 after closing A, got %d", count)
+	}
+
+	if !sm.HasDownstream() {
+		t.Fatal("expected shared downstream to still be alive after closing one upstream session")
+	}
+
+	resultB, err := sessB.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "echo",
+		Arguments: map[string]any{"message": "still-alive"},
+	})
+	if err != nil {
+		t.Fatalf("client B CallTool after A close failed: %v", err)
+	}
+
+	textB := ""
+	if len(resultB.Content) > 0 {
+		if tc, ok := resultB.Content[0].(*mcp.TextContent); ok {
+			textB = tc.Text
+		}
+	}
+
+	pidA := ""
+	pidB := ""
+	for _, part := range strings.Fields(textA) {
+		if strings.Contains(part, "pid=") {
+			pidA = part
+			break
+		}
+	}
+	for _, part := range strings.Fields(textB) {
+		if strings.Contains(part, "pid=") {
+			pidB = part
+			break
+		}
+	}
+
+	if pidA != pidB {
+		t.Errorf("expected same PID after close (downstream should survive), got %q and %q", pidA, pidB)
+	}
+
+	t.Logf("shared close test passed: refcount after A close = %d, same PID = %s", sm.RefCount(), pidB)
+
+	sessB.Close()
+}
+
+func TestProxyHandler_SharedModeConcurrentCalls(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfig()
+
+	sm := session.NewSharedSessionManager("test-shared-concurrent", cfg, logger)
+	defer sm.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:    "test-shared-concurrent",
+		SharedManager: sm,
+		Logger:        logger,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	const numClients = 5
+	clients := make([]*mcp.ClientSession, numClients)
+	for i := 0; i < numClients; i++ {
+		client := mcp.NewClient(&mcp.Implementation{
+			Name:    fmt.Sprintf("client-%d", i),
+			Version: "1.0.0",
+		}, nil)
+		sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+		if err != nil {
+			t.Fatalf("client[%d] Connect failed: %v", i, err)
+		}
+		clients[i] = sess
+		defer sess.Close()
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, numClients)
+	results := make([]string, numClients)
+
+	for i := 0; i < numClients; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			callResult, err := clients[idx].CallTool(ctx, &mcp.CallToolParams{
+				Name:      "echo",
+				Arguments: map[string]any{"message": fmt.Sprintf("concurrent-%d", idx)},
+			})
+			errs[idx] = err
+			if err == nil && len(callResult.Content) > 0 {
+				if tc, ok := callResult.Content[0].(*mcp.TextContent); ok {
+					results[idx] = tc.Text
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < numClients; i++ {
+		if errs[i] != nil {
+			t.Errorf("client[%d] CallTool failed: %v", i, errs[i])
+		}
+		if results[i] == "" {
+			t.Errorf("client[%d] got empty result", i)
+		}
+	}
+
+	pids := make(map[string]bool)
+	for _, r := range results {
+		if r != "" {
+			for _, part := range strings.Fields(r) {
+				if strings.Contains(part, "pid=") {
+					pids[part] = true
+					break
+				}
+			}
+		}
+	}
+
+	if len(pids) != 1 {
+		t.Errorf("expected all calls to use same shared downstream (1 PID), got %d different PIDs: %v", len(pids), pids)
+	}
+
+	t.Logf("shared concurrent calls test passed: %d clients, %d unique PIDs", numClients, len(pids))
+}
