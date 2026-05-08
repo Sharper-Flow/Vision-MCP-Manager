@@ -1,3 +1,9 @@
+## 2026-05-08 (v1.2.1)
+
+### Fixed
+
+- build binaries in auto-release workflow
+
 ## 2026-05-08 (v1.2.0)
 
 ### Added
