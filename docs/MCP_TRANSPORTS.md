@@ -120,6 +120,40 @@ When a downstream subprocess becomes unavailable — reaped by idle timeout, cra
 
 **Overhead:** ~20ms for subprocess spawn + initialize handshake (Node.js servers). Transparent to the upstream client.
 
+### Structured Fallback Suggestions
+
+Availability failures are returned as visible tool results, not JSON-RPC
+protocol errors. This follows the MCP SDK guidance that tool-originated errors
+should use `CallToolResult{IsError: true}` so the LLM can see the failure and
+self-correct.
+
+When `callDownstreamTool` classifies an upstream failure as `AvailabilityError`,
+`makeProxyToolHandler` converts it into a `CallToolResult` whose text content
+includes:
+
+- failure category: `config_drift`, `provider_timeout`, `retry_exhausted`, or
+  `circuit_open`
+- failed server and tool name
+- human-readable cause/guidance
+- up to three fallback suggestions ranked by catalog capability overlap
+
+Fallback suggestions are advisory only. Vision **does not** retry on another
+server or auto-route the tool call. The agent must explicitly choose and invoke
+any alternative.
+
+Suggestions are supplied through `ProxyConfig.SuggestionProvider`. The daemon
+wires this to a catalog-backed provider that compares the failed server's
+capabilities with other catalog entries and annotates each suggestion with:
+
+- server name
+- overlapping capabilities
+- installed/configured status
+- catalog source URL when available
+- match reason
+
+If `SuggestionProvider` is nil, availability failures are still visible as
+`IsError` tool results, but the suggestions list is empty.
+
 ### Admission Control
 
 `session.Manager` enforces a configurable `MaxSessions` limit per server. When the limit is reached, new `initialize` requests fail with an admission error. Existing sessions remain unaffected.
