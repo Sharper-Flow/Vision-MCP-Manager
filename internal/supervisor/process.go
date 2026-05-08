@@ -254,7 +254,7 @@ func (p *ManagedProcess) collectStderr() {
 	if p.stderr == nil {
 		return
 	}
-	defer p.stderr.Close()
+	defer func() { _ = p.stderr.Close() }()
 
 	scanner := bufio.NewScanner(p.stderr)
 	for scanner.Scan() {

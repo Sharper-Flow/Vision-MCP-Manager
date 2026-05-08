@@ -132,9 +132,9 @@ func (sm *SharedSessionManager) getOrCreateDownstream(ctx context.Context) (*mcp
 	}
 
 	// Close old downstream if exists
-	if sm.downstream != nil {
-		sm.downstream.Close()
-	}
+		if sm.downstream != nil {
+			_ = sm.downstream.Close()
+		}
 
 	// Spawn new downstream
 	sm.downstream, sm.client, sm.spawnErr = sm.spawn(ctx)
@@ -243,10 +243,10 @@ func (sm *SharedSessionManager) CloseAll() {
 	sm.refMu.Unlock()
 
 	// Close downstream
-	if sm.downstream != nil {
-		sm.downstream.Close()
-		sm.downstream = nil
-	}
+		if sm.downstream != nil {
+			_ = sm.downstream.Close()
+			sm.downstream = nil
+		}
 
 	sm.client = nil
 	sm.spawnErr = nil

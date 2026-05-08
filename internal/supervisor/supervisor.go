@@ -64,7 +64,7 @@ func (s *Supervisor) AddServer(name string, serverCfg *config.ServerConfig) (*Ma
 	s.services[name] = proc
 
 	// Add to suture supervisor
-	s.Supervisor.Add(proc)
+	s.Add(proc)
 
 	s.logger.Info("registered server",
 		slog.String("name", name),
@@ -86,7 +86,7 @@ func (s *Supervisor) RemoveServer(name string) error {
 	}
 
 	// Remove from suture (this will stop it)
-	_ = s.Supervisor.Remove(proc.token)
+	_ = s.Remove(proc.token)
 	delete(s.services, name)
 
 	s.logger.Info("removed server", slog.String("name", name))

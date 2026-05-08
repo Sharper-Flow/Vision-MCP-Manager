@@ -1217,10 +1217,7 @@ func TestProxyHandler_ConcurrentInitCallDelete(t *testing.T) {
 
 	// After all clients close, sessions should drain deterministically.
 	deadline := time.After(5 * time.Second)
-	for {
-		if mgr.SessionCount() == 0 {
-			break
-		}
+	for mgr.SessionCount() != 0 {
 		select {
 		case <-deadline:
 			t.Fatalf("expected 0 sessions after all clients closed, got %d", mgr.SessionCount())

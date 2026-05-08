@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Vision pre-push hook — runs lint + test before allowing push
+# Install: cp scripts/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+
+set -euo pipefail
+
+echo "==> Running pre-push checks..."
+
+# Lint
+echo "  golangci-lint..."
+if ! golangci-lint run ./...; then
+  echo "ERROR: golangci-lint failed. Fix issues before pushing."
+  exit 1
+fi
+
+# Test
+echo "  go test -race..."
+if ! go test -race ./...; then
+  echo "ERROR: Tests failed. Fix failures before pushing."
+  exit 1
+fi
+
+echo "==> All checks passed."

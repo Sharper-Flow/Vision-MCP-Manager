@@ -96,7 +96,7 @@ func LoadEnvFile(path string) error {
 
 		// Only set if not already in environment or if existing value is empty
 		if existing, exists := os.LookupEnv(key); !exists || existing == "" {
-			os.Setenv(key, value)
+			_ = os.Setenv(key, value)
 		}
 	}
 
@@ -243,13 +243,11 @@ func Save(cfg *Config, path string) error {
 
 	// Clean up temp file on error
 	defer func() {
-		if tmpPath != "" {
-			os.Remove(tmpPath)
-		}
+		_ = os.Remove(tmpPath)
 	}()
 
 	if _, err := tmpFile.Write(fullData); err != nil {
-		tmpFile.Close()
+		_ = tmpFile.Close()
 		return fmt.Errorf("config: write temp file: %w", err)
 	}
 

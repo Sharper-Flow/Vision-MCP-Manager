@@ -233,7 +233,7 @@ func showDaemonStatus() error {
 		// Try to get detailed status from API
 		resp, err := http.Get(daemonAddr + "/health")
 		if err == nil {
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			var health map[string]interface{}
 			if json.NewDecoder(resp.Body).Decode(&health) == nil {
 				fmt.Printf("  Status: %v\n", health["status"])
@@ -405,7 +405,7 @@ func checkHealth() error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to daemon: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var health map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&health); err != nil {
