@@ -1170,13 +1170,32 @@ func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 		)
 
 		if ps.sharedTools != nil && ps.sharedTools.enabledFor(toolName) {
-			return ps.sharedTools.execute(ctx, toolName, req.Params.Arguments, func() (*mcp.CallToolResult, error) {
+			result, err := ps.sharedTools.execute(ctx, toolName, req.Params.Arguments, func() (*mcp.CallToolResult, error) {
 				return ps.callDownstreamTool(ctx, req, toolName)
 			})
+			return ps.finishToolCall(ctx, toolName, result, err)
 		}
 
-		return ps.callDownstreamTool(ctx, req, toolName)
+		result, err := ps.callDownstreamTool(ctx, req, toolName)
+		return ps.finishToolCall(ctx, toolName, result, err)
 	}
+}
+
+func (ps *proxySession) finishToolCall(ctx context.Context, toolName string, result *mcp.CallToolResult, err error) (*mcp.CallToolResult, error) {
+	if err == nil {
+		return result, nil
+	}
+
+	var availabilityErr *AvailabilityError
+	if !errors.As(err, &availabilityErr) {
+		return nil, err
+	}
+
+	var suggestions []FallbackSuggestion
+	if ps.suggestionProvider != nil {
+		suggestions = ps.suggestionProvider.SuggestAlternatives(ctx, ps.serverName, toolName)
+	}
+	return availabilityErrorToResult(availabilityErr, ps.serverName, toolName, suggestions), nil
 }
 
 // getDownstream returns the current downstream session and whether the session
