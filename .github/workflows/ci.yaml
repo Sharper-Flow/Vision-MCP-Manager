@@ -40,7 +40,7 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test -race -coverprofile=coverage.out ./...
+        run: go test -race -p 2 -timeout 5m -coverprofile=coverage.out ./...
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5

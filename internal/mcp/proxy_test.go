@@ -272,6 +272,7 @@ func TestProxyHandler_SelectorLifecycle(t *testing.T) {
 
 	logger := testLogger(t)
 	mgr := session.NewManager("selector-lifecycle", testServerConfig(), logger)
+	defer mgr.CloseAll()
 	selector := &testSelector{mgr: mgr}
 	handler := NewProxyHandler(ProxyConfig{
 		ServerName: "selector-lifecycle",
@@ -291,7 +292,17 @@ func TestProxyHandler_SelectorLifecycle(t *testing.T) {
 	if selector.selectedLen() != 1 {
 		t.Fatalf("selector selected count = %d, want 1", selector.selectedLen())
 	}
-	rebound := selector.reboundSnapshot()
+
+	// Rebind fires asynchronously when the client sends notifications/initialized.
+	reboundDeadline := time.Now().Add(2 * time.Second)
+	var rebound [][2]string
+	for time.Now().Before(reboundDeadline) {
+		rebound = selector.reboundSnapshot()
+		if len(rebound) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if len(rebound) != 1 {
 		t.Fatalf("selector rebound count = %d, want 1", len(rebound))
 	}
