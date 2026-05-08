@@ -190,6 +190,37 @@ func TestDaemonStatus_Structure(t *testing.T) {
 	}
 }
 
+func TestNewInitializesCatalogSuggestionProvider(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "servers.yaml")
+	if err := os.WriteFile(configPath, []byte("servers: {}\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d, err := New(Config{ConfigPath: configPath, Logger: logger})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer d.cancel()
+
+	if d.catalog == nil {
+		t.Fatal("expected daemon catalog to be initialized")
+	}
+	if d.suggestionProvider == nil {
+		t.Fatal("expected daemon suggestion provider to be initialized")
+	}
+	if _, ok := d.suggestionProvider.(*catalogSuggestionProvider); !ok {
+		t.Fatalf("suggestionProvider = %T, want *catalogSuggestionProvider", d.suggestionProvider)
+	}
+
+	// Default catalog has kagi and arxiv sharing search/research capabilities.
+	got := d.suggestionProvider.SuggestAlternatives(context.Background(), "kagi", "kagi_search_fetch")
+	if len(got) == 0 {
+		t.Fatal("expected default catalog provider to suggest alternatives for kagi")
+	}
+}
+
 func TestReload_ReplacesUpdatedServerConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "servers.yaml")

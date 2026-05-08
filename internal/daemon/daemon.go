@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/admin"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
@@ -30,6 +31,9 @@ type Daemon struct {
 	registry    *server.Registry
 	portManager *mcp.PortManager
 	adminServer *admin.Server // Admin MCP server on port 6275
+	catalog     *catalog.Catalog
+
+	suggestionProvider mcp.FallbackSuggestionProvider
 
 	logger *slog.Logger
 
@@ -93,10 +97,13 @@ func New(cfg Config) (*Daemon, error) {
 
 	// Create port manager for MCP HTTP endpoints
 	pm := mcp.NewPortManager(cfg.Logger)
+	cat := catalog.Default()
+	suggestionProvider := newCatalogSuggestionProvider(cat, reg)
 
 	// Create Admin MCP server (primary management interface)
 	adminSrv := admin.NewServer(admin.Config{
 		Registry:     reg,
+		Catalog:      cat,
 		Instructions: instructions,
 		DaemonConfig: visionCfg,
 		ConfigPath:   cfg.ConfigPath,
@@ -105,15 +112,17 @@ func New(cfg Config) (*Daemon, error) {
 	})
 
 	d := &Daemon{
-		cfg:         visionCfg,
-		configPath:  cfg.ConfigPath,
-		supervisor:  sup,
-		registry:    reg,
-		portManager: pm,
-		adminServer: adminSrv,
-		logger:      cfg.Logger,
-		ctx:         ctx,
-		cancel:      cancel,
+		cfg:                visionCfg,
+		configPath:         cfg.ConfigPath,
+		supervisor:         sup,
+		registry:           reg,
+		portManager:        pm,
+		adminServer:        adminSrv,
+		catalog:            cat,
+		suggestionProvider: suggestionProvider,
+		logger:             cfg.Logger,
+		ctx:                ctx,
+		cancel:             cancel,
 	}
 
 	// Register event handler for dynamic server lifecycle management
@@ -535,9 +544,9 @@ func (d *Daemon) setupSlotGroupProxies() error {
 		retryCfg := mcp.RetryConfig{}
 		if representative.Retry != nil {
 			retryCfg = mcp.RetryConfig{
-				MaxAttempts: representative.Retry.MaxAttempts,
-				InitialDelay: representative.Retry.InitialDelay.Duration(),
-				MaxDelay: representative.Retry.MaxDelay.Duration(),
+				MaxAttempts:     representative.Retry.MaxAttempts,
+				InitialDelay:    representative.Retry.InitialDelay.Duration(),
+				MaxDelay:        representative.Retry.MaxDelay.Duration(),
 				RetryableErrors: append([]string(nil), representative.Retry.RetryableErrors...),
 			}
 		}
@@ -545,7 +554,7 @@ func (d *Daemon) setupSlotGroupProxies() error {
 		if representative.CircuitBreaker != nil {
 			cbCfg = mcp.CircuitBreakerConfig{
 				FailureThreshold: representative.CircuitBreaker.FailureThreshold,
-				RecoveryTimeout: representative.CircuitBreaker.RecoveryTimeout.Duration(),
+				RecoveryTimeout:  representative.CircuitBreaker.RecoveryTimeout.Duration(),
 			}
 		}
 		if listener := d.portManager.Get(listenerName); listener != nil {
@@ -558,17 +567,18 @@ func (d *Daemon) setupSlotGroupProxies() error {
 
 		selector := slots.NewMultiplexer(groupName, d.logger, entries)
 		handler := mcp.NewProxyHandler(mcp.ProxyConfig{
-			ServerName:          groupName,
-			Selector:            selector,
-			Logger:              d.logger,
-			HealthCheckInterval: healthCheckInterval,
-			RequestTimeout:      requestTimeout,
-			SharedReadOnlyTools: append([]string(nil), representative.SharedReadOnlyTools...),
-			SharedResultCacheTTL: representative.SharedResultCacheTTL.Duration(),
+			ServerName:            groupName,
+			Selector:              selector,
+			Logger:                d.logger,
+			SuggestionProvider:    d.suggestionProvider,
+			HealthCheckInterval:   healthCheckInterval,
+			RequestTimeout:        requestTimeout,
+			SharedReadOnlyTools:   append([]string(nil), representative.SharedReadOnlyTools...),
+			SharedResultCacheTTL:  representative.SharedResultCacheTTL.Duration(),
 			SharedResultCacheSize: representative.SharedResultCacheSize,
-			MaxInFlightRequests: representative.MaxInFlightRequests,
-			RetryConfig: retryCfg,
-			CircuitBreakerConfig: cbCfg,
+			MaxInFlightRequests:   representative.MaxInFlightRequests,
+			RetryConfig:           retryCfg,
+			CircuitBreakerConfig:  cbCfg,
 		})
 
 		secCfg := mcp.SecurityConfig{}
@@ -652,6 +662,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	proxyCfg := mcp.ProxyConfig{
 		ServerName:            srv.Name,
 		Logger:                d.logger,
+		SuggestionProvider:    d.suggestionProvider,
 		HealthCheckInterval:   srv.Config.HealthCheckInterval.Duration(),
 		RequestTimeout:        srv.Config.RequestTimeout.Duration(),
 		SharedReadOnlyTools:   append([]string(nil), srv.Config.SharedReadOnlyTools...),
