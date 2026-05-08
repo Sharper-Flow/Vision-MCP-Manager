@@ -1,3 +1,19 @@
+## 2026-05-08 (v1.2.2)
+
+### Added
+
+- structured fallback suggestions on upstream tool failure — AvailabilityError now returns CallToolResult{IsError:true} with failure category, server/tool name, explicit no-auto-routing disclaimer, and up to 3 alternative tool suggestions ranked by catalog capability overlap
+- FallbackSuggestionProvider interface (internal/mcp) — consumer-defined, zero-coupling with catalog
+- catalogSuggestionProvider (internal/daemon) — ranks alternatives by capability overlap, top-3 limit
+- sanitizeSource() — strips control characters from suggestion Source URLs
+- defense-in-depth logging in finishToolCall for contract violations
+
+### Changed
+
+- daemon now owns catalog.Default() construction, wires to admin + proxy provider
+- finishToolCall helper separates error classification from handler routing
+- docs: clarify classification/conversion function attribution in MCP_TRANSPORTS.md
+
 ## 2026-05-08 (v1.2.1)
 
 ### Fixed
