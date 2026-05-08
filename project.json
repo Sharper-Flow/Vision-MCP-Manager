@@ -1,0 +1,6 @@
+{
+  "name": "vision",
+  "version": "0.2.0",
+  "specs_dir": ".adv/specs",
+  "docs_dir": "docs/specs"
+}

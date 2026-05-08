@@ -54,10 +54,21 @@ opencode.json
 # Local logs (generated at runtime)
 logs/
 
-# ADV (Advance) plugin files - project-specific, not part of Vision
+# ADV (Advance) plugin - managed externally by ADV
+# Only .adv/specs/ is tracked; everything else is external state
 .specdb/
-project.json
+changes/
+archive/
+temp/
+project.md
 
 # Local OpenCode workspace artifacts
 .opencode/
 cache/
+
+# Tool caches / runtime artifacts
+.ruff_cache/
+.playwright-mcp/
+
+# Screenshots from visual audits / reviews (assets/ has tracked images)
+/*.png
