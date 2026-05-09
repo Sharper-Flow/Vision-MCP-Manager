@@ -2229,3 +2229,159 @@ func TestProxyHandler_ProactiveHealthCheck(t *testing.T) {
 
 	t.Logf("proactive health check test passed: probe-triggered respawn succeeded, count=%d", mgr.SessionCount())
 }
+
+// TestProxyHandler_SharedModeDisconnectReap verifies that when a shared-mode
+// client disconnects without sending DELETE, the disconnect tracker reaps the
+// session after the grace period expires, freeing admission capacity.
+func TestProxyHandler_SharedModeDisconnectReap(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfig()
+
+	sm := session.NewSharedSessionManager("test-disconnect-reap", cfg, logger)
+	defer sm.CloseAll()
+
+	// Create proxy handler with short disconnect grace period
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:            "test-disconnect-reap",
+		SharedManager:         sm,
+		Logger:                logger,
+		DisconnectGracePeriod: 50 * time.Millisecond,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// Step 1: Initialize session via raw HTTP
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test-disconnect","version":"1.0.0"}}}`
+	initReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(initBody))
+	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set("Accept", "application/json, text/event-stream")
+
+	initResp, err := http.DefaultClient.Do(initReq)
+	if err != nil {
+		t.Fatalf("initialize failed: %v", err)
+	}
+	initResp.Body.Close()
+
+	sessionID := initResp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("initialize response missing Mcp-Session-Id")
+	}
+	t.Logf("session initialized: %s", sessionID)
+
+	// Step 2: Send notifications/initialized to complete handshake
+	notifBody := `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
+	notifReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(notifBody))
+	notifReq.Header.Set("Content-Type", "application/json")
+	notifReq.Header.Set("Accept", "application/json, text/event-stream")
+	notifReq.Header.Set("Mcp-Session-Id", sessionID)
+	notifResp, err := http.DefaultClient.Do(notifReq)
+	if err != nil {
+		t.Fatalf("notifications/initialized failed: %v", err)
+	}
+	notifResp.Body.Close()
+
+	// Verify session is tracked
+	if count := sm.SessionCount(); count < 1 {
+		t.Fatalf("expected at least 1 session after initialize, got %d", count)
+	}
+	t.Logf("session count before disconnect: %d", sm.SessionCount())
+
+	// Step 3: Open SSE stream with cancellable context
+	sseCtx, sseCancel := context.WithCancel(ctx)
+	sseReq, _ := http.NewRequestWithContext(sseCtx, http.MethodGet, ts.URL+"/mcp", nil)
+	sseReq.Header.Set("Accept", "text/event-stream")
+	sseReq.Header.Set("Mcp-Session-Id", sessionID)
+
+	sseDone := make(chan struct{})
+	go func() {
+		defer close(sseDone)
+		resp, err := http.DefaultClient.Do(sseReq)
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	// Give SSE stream time to establish
+	time.Sleep(50 * time.Millisecond)
+
+	// Step 4: Simulate disconnect by cancelling the SSE context
+	sseCancel()
+	<-sseDone // Wait for SSE goroutine to finish
+
+	t.Logf("SSE stream cancelled, waiting for grace period...")
+
+	// Step 5: Wait for grace period to expire (50ms) plus slack
+	time.Sleep(150 * time.Millisecond)
+
+	// Step 6: Verify session was reaped
+	if count := sm.SessionCount(); count != 0 {
+		t.Fatalf("expected 0 sessions after disconnect + grace period, got %d", count)
+	}
+	t.Logf("session successfully reaped after disconnect")
+}
+
+// TestProxyHandler_SharedModeDisconnectDisabled verifies that when
+// DisconnectGracePeriod is 0, no disconnect tracking occurs.
+func TestProxyHandler_SharedModeDisconnectDisabled(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfig()
+
+	sm := session.NewSharedSessionManager("test-disabled", cfg, logger)
+	defer sm.CloseAll()
+
+	// Create proxy handler with disconnect disabled (grace period = 0)
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:            "test-disabled",
+		SharedManager:         sm,
+		Logger:                logger,
+		DisconnectGracePeriod: 0, // disabled
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	// Initialize session
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test-disabled","version":"1.0.0"}}}`
+	initReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(initBody))
+	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set("Accept", "application/json, text/event-stream")
+
+	initResp, err := http.DefaultClient.Do(initReq)
+	if err != nil {
+		t.Fatalf("initialize failed: %v", err)
+	}
+	initResp.Body.Close()
+
+	sessionID := initResp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("initialize response missing Mcp-Session-Id")
+	}
+
+	// Complete handshake
+	notifBody := `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
+	notifReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(notifBody))
+	notifReq.Header.Set("Content-Type", "application/json")
+	notifReq.Header.Set("Accept", "application/json, text/event-stream")
+	notifReq.Header.Set("Mcp-Session-Id", sessionID)
+	notifResp, _ := http.DefaultClient.Do(notifReq)
+	notifResp.Body.Close()
+
+	countBefore := sm.SessionCount()
+
+	// Wait a while — session should NOT be reaped because tracking is disabled
+	time.Sleep(200 * time.Millisecond)
+
+	if count := sm.SessionCount(); count != countBefore {
+		t.Fatalf("expected session count to remain %d (disconnect disabled), got %d", countBefore, count)
+	}
+	t.Logf("session survived as expected (disconnect tracking disabled)")
+}
