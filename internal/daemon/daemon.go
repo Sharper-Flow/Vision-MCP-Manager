@@ -742,10 +742,12 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		sharedMgr.StartHealthProbe(d.ctx)
 
 		proxyCfg.SharedManager = sharedMgr
+		proxyCfg.DisconnectGracePeriod = srv.Config.ResolvedDisconnectGracePeriod()
 		closer = sharedMgr
 
 		d.logger.Info("using shared subprocess mode for server",
 			slog.String("server", srv.Name),
+			slog.Duration("disconnect_grace_period", proxyCfg.DisconnectGracePeriod),
 		)
 	}
 

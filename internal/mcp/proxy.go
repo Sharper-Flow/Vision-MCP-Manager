@@ -191,6 +191,11 @@ type ProxyConfig struct {
 	// MaxInFlightRequests caps concurrent downstream tool calls per server.
 	// 0 means unlimited.
 	MaxInFlightRequests int
+
+	// DisconnectGracePeriod is the time to wait after the last HTTP connection
+	// closes before removing a shared-mode upstream session. 0 disables disconnect
+	// detection. Set from ServerConfig.ResolvedDisconnectGracePeriod().
+	DisconnectGracePeriod time.Duration
 }
 
 // hasExactlyOneManagerSource reports whether exactly one of SessionManager,

@@ -726,3 +726,42 @@ func TestDuration_String(t *testing.T) {
 		t.Errorf("Duration.String() = %q, want %q", d.String(), "30s")
 	}
 }
+
+func TestServerConfig_ResolvedDisconnectGracePeriod(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    Duration
+		expected time.Duration
+	}{
+		{
+			name:     "zero returns default 60s",
+			input:    Duration(0),
+			expected: 60 * time.Second,
+		},
+		{
+			name:     "positive value returned as-is",
+			input:    Duration(120 * time.Second),
+			expected: 120 * time.Second,
+		},
+		{
+			name:     "small positive value returned as-is",
+			input:    Duration(5 * time.Second),
+			expected: 5 * time.Second,
+		},
+		{
+			name:     "negative returns zero (disabled)",
+			input:    Duration(-1),
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ServerConfig{DisconnectGracePeriod: tt.input}
+			got := cfg.ResolvedDisconnectGracePeriod()
+			if got != tt.expected {
+				t.Errorf("ResolvedDisconnectGracePeriod() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}

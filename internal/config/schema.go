@@ -155,6 +155,12 @@ type ServerConfig struct {
 	// Populated by external configuration tools.
 	Description string `yaml:"description,omitempty"`
 
+	// DisconnectGracePeriod controls how long to wait after the last HTTP connection
+	// closes before removing a shared-mode upstream session. Only applies to
+	// non-stateful servers using SharedSessionManager. 0 uses default (60s).
+	// Negative values disable disconnect detection entirely.
+	DisconnectGracePeriod Duration `yaml:"disconnect_grace_period,omitempty"`
+
 	// SlotGroup is internal metadata set when this server was synthesized from a
 	// slot_groups entry. It is not persisted to YAML.
 	SlotGroup string `yaml:"-"`
@@ -310,6 +316,21 @@ func (s *ServerConfig) InferTransport() TransportType {
 
 	// Default to stdio (will fail validation if command is missing)
 	return TransportStdio
+}
+
+const defaultDisconnectGracePeriod = 60 * time.Second
+
+// ResolvedDisconnectGracePeriod returns the effective disconnect grace period.
+// Negative values return 0 (disabled). Zero returns the default (60s).
+func (s *ServerConfig) ResolvedDisconnectGracePeriod() time.Duration {
+	d := time.Duration(s.DisconnectGracePeriod)
+	if d < 0 {
+		return 0
+	}
+	if d == 0 {
+		return defaultDisconnectGracePeriod
+	}
+	return d
 }
 
 // Validate checks that the ServerConfig is valid.
