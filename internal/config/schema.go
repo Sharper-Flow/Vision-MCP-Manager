@@ -161,6 +161,12 @@ type ServerConfig struct {
 	// Negative values disable disconnect detection entirely.
 	DisconnectGracePeriod Duration `yaml:"disconnect_grace_period,omitempty"`
 
+	// IdleReapTimeout controls how long a shared-mode backend subprocess lives after
+	// the last upstream session disconnects. Only applies to non-stateful servers
+	// using SharedSessionManager. 0 uses default (5m). Negative values disable
+	// idle reaping entirely (subprocess lives forever).
+	IdleReapTimeout Duration `yaml:"idle_reap_timeout,omitempty"`
+
 	// SlotGroup is internal metadata set when this server was synthesized from a
 	// slot_groups entry. It is not persisted to YAML.
 	SlotGroup string `yaml:"-"`
@@ -329,6 +335,21 @@ func (s *ServerConfig) ResolvedDisconnectGracePeriod() time.Duration {
 	}
 	if d == 0 {
 		return defaultDisconnectGracePeriod
+	}
+	return d
+}
+
+const defaultIdleReapTimeout = 5 * time.Minute
+
+// ResolvedIdleReapTimeout returns the effective idle reap timeout.
+// Negative values return 0 (disabled). Zero returns the default (5m).
+func (s *ServerConfig) ResolvedIdleReapTimeout() time.Duration {
+	d := time.Duration(s.IdleReapTimeout)
+	if d < 0 {
+		return 0
+	}
+	if d == 0 {
+		return defaultIdleReapTimeout
 	}
 	return d
 }

@@ -765,3 +765,42 @@ func TestServerConfig_ResolvedDisconnectGracePeriod(t *testing.T) {
 		})
 	}
 }
+
+func TestServerConfig_ResolvedIdleReapTimeout(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    Duration
+		expected time.Duration
+	}{
+		{
+			name:     "zero returns default 5m",
+			input:    Duration(0),
+			expected: 5 * time.Minute,
+		},
+		{
+			name:     "positive value returned as-is",
+			input:    Duration(10 * time.Minute),
+			expected: 10 * time.Minute,
+		},
+		{
+			name:     "small positive value returned as-is",
+			input:    Duration(30 * time.Second),
+			expected: 30 * time.Second,
+		},
+		{
+			name:     "negative returns zero (disabled)",
+			input:    Duration(-1),
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ServerConfig{IdleReapTimeout: tt.input}
+			got := cfg.ResolvedIdleReapTimeout()
+			if got != tt.expected {
+				t.Errorf("ResolvedIdleReapTimeout() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
