@@ -43,6 +43,20 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 - The request is rejected as an unknown or expired session
 - No previous session resources remain attached
 
+**Disconnect-triggered cleanup reaps stale shared sessions** (`rq-mcpstr01.3`)
+
+**Given:**
+- A shared-mode server has an active upstream session
+- The client disconnects without sending DELETE
+
+**When:** The configured disconnect grace period expires after the last HTTP connection closes
+
+**Then:**
+- The upstream session is removed from tracking
+- Admission capacity is freed for new sessions
+- The downstream subprocess remains healthy for other sessions
+- A structured audit event is logged with the reap reason
+
 ---
 
 ### Enforce subprocess isolation per MCP session (stateful) or shared subprocess (stateless)

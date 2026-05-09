@@ -42,6 +42,21 @@
             "The request is rejected as an unknown or expired session",
             "No previous session resources remain attached"
           ]
+        },
+        {
+          "id": "rq-mcpstr01.3",
+          "title": "Disconnect-triggered cleanup reaps stale shared sessions",
+          "given": [
+            "A shared-mode server has an active upstream session",
+            "The client disconnects without sending DELETE"
+          ],
+          "when": "The configured disconnect grace period expires after the last HTTP connection closes",
+          "then": [
+            "The upstream session is removed from tracking",
+            "Admission capacity is freed for new sessions",
+            "The downstream subprocess remains healthy for other sessions",
+            "A structured audit event is logged with the reap reason"
+          ]
         }
       ]
     },
