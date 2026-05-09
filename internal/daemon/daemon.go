@@ -738,7 +738,8 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		)
 	} else {
 		// Shared mode: single subprocess shared across all upstream sessions
-		sharedMgr := session.NewSharedSessionManager(srv.Name, srv.Config, d.logger)
+		idleTimeout := srv.Config.ResolvedIdleReapTimeout()
+		sharedMgr := session.NewSharedSessionManager(srv.Name, srv.Config, d.logger, idleTimeout)
 		sharedMgr.StartHealthProbe(d.ctx)
 
 		proxyCfg.SharedManager = sharedMgr
@@ -748,6 +749,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		d.logger.Info("using shared subprocess mode for server",
 			slog.String("server", srv.Name),
 			slog.Duration("disconnect_grace_period", proxyCfg.DisconnectGracePeriod),
+			slog.Duration("idle_reap_timeout", idleTimeout),
 		)
 	}
 

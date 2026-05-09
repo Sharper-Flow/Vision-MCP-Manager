@@ -26,10 +26,17 @@ type SharedSessionManager struct {
 	client     *mcp.Client
 	spawnErr   error
 	closed     bool
+	cmd        *exec.Cmd // stored at spawn for PID capture in reap events
 
 	refMu            sync.Mutex
 	refCount         int
 	upstreamSessions map[string]struct{}
+
+	// Idle reap: when refCount drops to 0, start idleTimer. On expiry,
+	// tear down the downstream subprocess. Cancelled by GetOrCreateSession.
+	// All idle fields guarded by refMu.
+	idleTimer  *time.Timer
+	idleTimeout time.Duration
 
 	healthCtx    context.Context
 	healthCancel context.CancelFunc
@@ -39,7 +46,9 @@ type SharedSessionManager struct {
 }
 
 // NewSharedSessionManager creates a new shared session manager.
-func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger *slog.Logger) *SharedSessionManager {
+// idleTimeout controls the idle reap behavior: when refCount drops to 0, the
+// downstream subprocess is torn down after this duration. 0 disables idle reaping.
+func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger *slog.Logger, idleTimeout time.Duration) *SharedSessionManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -49,6 +58,7 @@ func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger
 		logger:           logger.With(slog.String("server", serverName)),
 		upstreamSessions: make(map[string]struct{}),
 		subscribers:      make(map[string]func(*mcp.ClientSession)),
+		idleTimeout:      idleTimeout,
 	}
 }
 
@@ -72,6 +82,16 @@ func (sm *SharedSessionManager) GetOrCreateSession(ctx context.Context, sessionI
 		sm.refCount++
 		newSession = true
 	}
+
+	// Cancel idle timer on new session arrival
+	if sm.idleTimer != nil {
+		sm.idleTimer.Stop()
+		sm.idleTimer = nil
+		sm.logger.Info("idle reap timer cancelled by new session",
+			slog.String("event", "shared_session.idle_cancelled"),
+		)
+	}
+
 	sm.refMu.Unlock()
 
 	// Get or create downstream
@@ -153,6 +173,10 @@ func (sm *SharedSessionManager) spawn(ctx context.Context) (*mcp.ClientSession, 
 		return nil, nil, fmt.Errorf("failed to build command: %w", err)
 	}
 
+	// Store cmd for PID capture in reap events.
+	// Safe without lock: spawn() is always called under mu.Lock from getOrCreateDownstream.
+	sm.cmd = cmd
+
 	sm.logger.Info("spawning shared downstream subprocess",
 		slog.String("event", "shared_session.spawn"),
 		slog.String("command", sm.config.Command),
@@ -205,6 +229,7 @@ func (sm *SharedSessionManager) buildEnv() []string {
 }
 
 // RemoveSession removes the upstream session from tracking and decrements refcount.
+// If refCount reaches 0 and idle reap is enabled, starts the idle reap timer.
 func (sm *SharedSessionManager) RemoveSession(sessionID string) error {
 	sm.refMu.Lock()
 	defer sm.refMu.Unlock()
@@ -216,7 +241,79 @@ func (sm *SharedSessionManager) RemoveSession(sessionID string) error {
 	delete(sm.upstreamSessions, sessionID)
 	sm.refCount--
 
+	// Start idle reap timer when refCount reaches 0
+	if sm.refCount == 0 && sm.idleTimeout > 0 && !sm.isClosedUnsafe() {
+		if sm.idleTimer != nil {
+			sm.idleTimer.Stop()
+		}
+		sm.idleTimer = time.AfterFunc(sm.idleTimeout, sm.reapDownstream)
+
+		sm.logger.Info("all sessions removed, idle reap timer started",
+			slog.String("event", "shared_session.idle_timeout_started"),
+			slog.Duration("idle_timeout", sm.idleTimeout),
+		)
+	}
+
 	return nil
+}
+
+// isClosedUnsafe reports whether the manager is closed. Must be called with refMu held.
+func (sm *SharedSessionManager) isClosedUnsafe() bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	return sm.closed
+}
+
+// reapDownstream is the idle timer callback. It tears down the downstream
+// subprocess when the idle timeout expires.
+//
+// Lock hierarchy: refMu (verify 0) → release → mu (teardown) → refMu (recheck).
+// This matches CloseAll's mu→refMu order for the teardown phase.
+func (sm *SharedSessionManager) reapDownstream() {
+	// Phase 1: verify refCount still 0
+	sm.refMu.Lock()
+	if sm.refCount != 0 || sm.isClosedUnsafe() {
+		sm.refMu.Unlock()
+		return
+	}
+	sm.refMu.Unlock()
+
+	// Phase 2: teardown downstream under mu (matches CloseAll order)
+	sm.mu.Lock()
+
+	// Re-check under mu
+	sm.refMu.Lock()
+	if sm.refCount != 0 || sm.closed {
+		sm.refMu.Unlock()
+		sm.mu.Unlock()
+		return
+	}
+
+	pid := 0
+	if sm.cmd != nil && sm.cmd.Process != nil {
+		pid = sm.cmd.Process.Pid
+	}
+
+	if sm.downstream != nil {
+		_ = sm.downstream.Close()
+	}
+	sm.downstream = nil
+	sm.spawnErr = nil
+	sm.cmd = nil
+
+	sm.logger.Info("idle timeout expired, downstream subprocess reaped",
+		slog.String("event", "shared_session.idle_reaped"),
+		slog.Int("pid", pid),
+		slog.Duration("idle_timeout", sm.idleTimeout),
+	)
+
+	sm.refMu.Unlock()
+	sm.mu.Unlock()
+
+	// Phase 3: clear timer reference
+	sm.refMu.Lock()
+	sm.idleTimer = nil
+	sm.refMu.Unlock()
 }
 
 // CloseAll terminates the shared downstream subprocess and clears all state.
@@ -236,8 +333,12 @@ func (sm *SharedSessionManager) CloseAll() {
 		sm.healthCancel = nil
 	}
 
-	// Clear upstream sessions
+	// Cancel idle timer and clear upstream sessions
 	sm.refMu.Lock()
+	if sm.idleTimer != nil {
+		sm.idleTimer.Stop()
+		sm.idleTimer = nil
+	}
 	sm.upstreamSessions = make(map[string]struct{})
 	sm.refCount = 0
 	sm.refMu.Unlock()
@@ -250,6 +351,7 @@ func (sm *SharedSessionManager) CloseAll() {
 
 	sm.client = nil
 	sm.spawnErr = nil
+	sm.cmd = nil
 }
 
 // AdmissionStatus returns current admission-control state.

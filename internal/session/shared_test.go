@@ -33,7 +33,7 @@ func TestSharedManager_SpawnOnFirstUse(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
 	defer sm.CloseAll()
 
 	// Initially no downstream
@@ -78,7 +78,7 @@ func TestSharedManager_ConcurrentSpawnSafety(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
 	defer sm.CloseAll()
 
 	var wg sync.WaitGroup
@@ -126,7 +126,7 @@ func TestSharedManager_RefcountLifecycle(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
 	defer sm.CloseAll()
 
 	// Add refs
@@ -180,7 +180,7 @@ func TestSharedManager_RespawnOnCrash(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
 	defer sm.CloseAll()
 
 	// Spawn initial session
@@ -235,7 +235,7 @@ func TestSharedManager_HealthProbe(t *testing.T) {
 	cfg := testSharedServerConfig()
 	cfg.HealthCheckInterval = config.Duration(200 * time.Millisecond)
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
 	defer sm.CloseAll()
 
 	// Spawn and start health probe
@@ -283,7 +283,7 @@ func TestSharedManager_AdmissionControl(t *testing.T) {
 	cfg := testSharedServerConfig()
 	cfg.MaxSessions = 2
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
 	defer sm.CloseAll()
 
 	// First two should succeed
@@ -334,7 +334,7 @@ func TestSharedManager_CloseAll(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
 
 	// Spawn some sessions
 	for i := 0; i < 3; i++ {
@@ -368,4 +368,256 @@ func TestSharedManager_CloseAll(t *testing.T) {
 
 	// Calling CloseAll again should be safe
 	sm.CloseAll()
+}
+
+// TestIdleReap_ZeroRefsTriggersReap verifies that the downstream subprocess is
+// torn down after the idle timeout when all upstream sessions are removed.
+func TestIdleReap_ZeroRefsTriggersReap(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testSharedServerConfig()
+
+	sm := NewSharedSessionManager("test-idle-reap", cfg, logger, 50*time.Millisecond)
+	defer sm.CloseAll()
+
+	// Create session
+	_, err := sm.GetOrCreateSession(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+
+	if !sm.HasDownstream() {
+		t.Fatal("expected downstream after session creation")
+	}
+
+	// Remove session → refCount == 0 → idle timer starts
+	if err := sm.RemoveSession("sess-1"); err != nil {
+		t.Fatalf("RemoveSession failed: %v", err)
+	}
+
+	// Downstream should still be alive immediately after removal
+	if !sm.HasDownstream() {
+		t.Error("downstream should still be alive immediately after zero refs (timer not fired)")
+	}
+
+	// Wait for idle timer to fire
+	time.Sleep(150 * time.Millisecond)
+
+	// Downstream should be reaped
+	if sm.HasDownstream() {
+		t.Error("expected downstream to be reaped after idle timeout")
+	}
+}
+
+// TestIdleReap_NewSessionCancelsTimer verifies that a new GetOrCreateSession
+// during the idle period cancels the reap timer.
+func TestIdleReap_NewSessionCancelsTimer(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testSharedServerConfig()
+
+	sm := NewSharedSessionManager("test-idle-cancel", cfg, logger, 200*time.Millisecond)
+	defer sm.CloseAll()
+
+	// Create and remove session → idle timer starts
+	_, err := sm.GetOrCreateSession(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+	if err := sm.RemoveSession("sess-1"); err != nil {
+		t.Fatalf("RemoveSession failed: %v", err)
+	}
+
+	// New session before timeout → timer cancelled
+	_, err = sm.GetOrCreateSession(ctx, "sess-2")
+	if err != nil {
+		t.Fatalf("GetOrCreateSession during idle period failed: %v", err)
+	}
+
+	// Wait past original timeout
+	time.Sleep(350 * time.Millisecond)
+
+	// Downstream should still be alive (timer was cancelled)
+	if !sm.HasDownstream() {
+		t.Error("expected downstream to survive — new session should have cancelled idle timer")
+	}
+}
+
+// TestIdleReap_DisabledNegative verifies that a negative idle timeout disables
+// idle reaping entirely.
+func TestIdleReap_DisabledNegative(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testSharedServerConfig()
+
+	sm := NewSharedSessionManager("test-idle-disabled", cfg, logger, 0) // 0 = disabled
+	defer sm.CloseAll()
+
+	_, err := sm.GetOrCreateSession(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+	if err := sm.RemoveSession("sess-1"); err != nil {
+		t.Fatalf("RemoveSession failed: %v", err)
+	}
+
+	// Wait past what would be a short timeout
+	time.Sleep(150 * time.Millisecond)
+
+	// Downstream should still be alive (idle reaping disabled)
+	if !sm.HasDownstream() {
+		t.Error("expected downstream to survive — idle reaping disabled (timeout=0)")
+	}
+}
+
+// TestIdleReap_CloseAllDuringTimer verifies that CloseAll during a pending
+// idle timer does not deadlock and cleans up correctly.
+func TestIdleReap_CloseAllDuringTimer(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testSharedServerConfig()
+
+	sm := NewSharedSessionManager("test-idle-closeall", cfg, logger, 5*time.Second)
+	defer sm.CloseAll()
+
+	_, err := sm.GetOrCreateSession(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+	if err := sm.RemoveSession("sess-1"); err != nil {
+		t.Fatalf("RemoveSession failed: %v", err)
+	}
+
+	// CloseAll while timer is pending — should not deadlock
+	done := make(chan struct{})
+	go func() {
+		sm.CloseAll()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success — no deadlock
+	case <-time.After(3 * time.Second):
+		t.Fatal("CloseAll deadlocked during pending idle timer")
+	}
+
+	if sm.HasDownstream() {
+		t.Error("expected no downstream after CloseAll")
+	}
+}
+
+// TestIdleReap_RespawnAfterReap verifies that GetOrCreateSession spawns a
+// fresh downstream after idle reaping.
+func TestIdleReap_RespawnAfterReap(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testSharedServerConfig()
+
+	sm := NewSharedSessionManager("test-idle-respawn", cfg, logger, 50*time.Millisecond)
+	defer sm.CloseAll()
+
+	// Create → remove → wait for reap
+	ds1, err := sm.GetOrCreateSession(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+	if err := sm.RemoveSession("sess-1"); err != nil {
+		t.Fatalf("RemoveSession failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	if sm.HasDownstream() {
+		t.Fatal("expected downstream to be reaped")
+	}
+
+	// New session should respawn
+	ds2, err := sm.GetOrCreateSession(ctx, "sess-2")
+	if err != nil {
+		t.Fatalf("GetOrCreateSession after reap failed: %v", err)
+	}
+	if ds2 == nil {
+		t.Fatal("expected non-nil downstream after respawn")
+	}
+	if ds2 == ds1 {
+		t.Error("respawn should produce a different downstream session")
+	}
+}
+
+// TestSharedManager_RefcountLifecycle_WithIdleReap is the updated version of
+// TestSharedManager_RefcountLifecycle that accounts for idle reaping.
+// With idle reaping enabled, the downstream is alive at t=0 after zero refs,
+// then reaped after the idle timeout.
+func TestSharedManager_RefcountLifecycle_WithIdleReap(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testSharedServerConfig()
+
+	sm := NewSharedSessionManager("test-lifecycle", cfg, logger, 50*time.Millisecond)
+	defer sm.CloseAll()
+
+	// Add refs
+	for i := 0; i < 3; i++ {
+		_, err := sm.GetOrCreateSession(ctx, fmt.Sprintf("sess-%d", i))
+		if err != nil {
+			t.Fatalf("GetOrCreateSession failed: %v", err)
+		}
+	}
+
+	if sm.RefCount() != 3 {
+		t.Errorf("refcount = %d, want 3", sm.RefCount())
+	}
+
+	// Remove one ref - subprocess should still be alive
+	if err := sm.RemoveSession("sess-0"); err != nil {
+		t.Fatalf("RemoveSession failed: %v", err)
+	}
+	if sm.RefCount() != 2 {
+		t.Errorf("refcount after remove = %d, want 2", sm.RefCount())
+	}
+	if !sm.HasDownstream() {
+		t.Error("downstream should still be alive with refs > 0")
+	}
+
+	// Remove remaining refs
+	if err := sm.RemoveSession("sess-1"); err != nil {
+		t.Fatalf("RemoveSession failed: %v", err)
+	}
+	if err := sm.RemoveSession("sess-2"); err != nil {
+		t.Fatalf("RemoveSession failed: %v", err)
+	}
+
+	if sm.RefCount() != 0 {
+		t.Errorf("refcount after all removed = %d, want 0", sm.RefCount())
+	}
+
+	// Subprocess should still be alive immediately after zero refs (timer hasn't fired)
+	if !sm.HasDownstream() {
+		t.Error("downstream should still be alive immediately after zero refs")
+	}
+
+	// After idle timeout, subprocess should be reaped
+	time.Sleep(150 * time.Millisecond)
+
+	if sm.HasDownstream() {
+		t.Error("expected downstream to be reaped after idle timeout")
+	}
 }
