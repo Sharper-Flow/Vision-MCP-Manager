@@ -57,6 +57,21 @@
             "The downstream subprocess remains healthy for other sessions",
             "A structured audit event is logged with the reap reason"
           ]
+        },
+        {
+          "id": "rq-mcpstr01.4",
+          "title": "Idle zero-ref reaping tears down shared downstream",
+          "given": [
+            "A shared-mode server has zero upstream sessions (all removed)",
+            "idle_reap_timeout is configured (non-zero, non-negative)"
+          ],
+          "when": "The idle reap timeout expires with no new sessions arriving",
+          "then": [
+            "The shared downstream subprocess is terminated",
+            "A structured audit event is logged with server name, PID, and idle duration",
+            "The next GetOrCreateSession spawns a fresh downstream subprocess",
+            "Admission state is unaffected (already at zero)"
+          ]
         }
       ]
     },

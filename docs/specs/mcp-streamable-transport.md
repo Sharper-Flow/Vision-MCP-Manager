@@ -57,6 +57,20 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 - The downstream subprocess remains healthy for other sessions
 - A structured audit event is logged with the reap reason
 
+**Idle zero-ref reaping tears down shared downstream** (`rq-mcpstr01.4`)
+
+**Given:**
+- A shared-mode server has zero upstream sessions (all removed)
+- `idle_reap_timeout` is configured (non-zero, non-negative)
+
+**When:** The idle reap timeout expires with no new sessions arriving
+
+**Then:**
+- The shared downstream subprocess is terminated
+- A structured audit event is logged with server name, PID, and idle duration
+- The next `GetOrCreateSession` spawns a fresh downstream subprocess
+- Admission state is unaffected (already at zero)
+
 ---
 
 ### Enforce subprocess isolation per MCP session (stateful) or shared subprocess (stateless)
