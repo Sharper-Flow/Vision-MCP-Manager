@@ -268,6 +268,23 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 		tombstones:   make(map[string]struct{}),
 	}
 
+	// Disconnect tracker for shared-mode servers: detects client disconnect
+	// via r.Context().Done() and reaps stale sessions after a grace period.
+	var tracker *DisconnectTracker
+	if cfg.SharedManager != nil && cfg.DisconnectGracePeriod > 0 {
+		tracker = newDisconnectTracker(
+			cfg.ServerName,
+			cfg.DisconnectGracePeriod,
+			logger,
+			func(sid string) *proxySession {
+				idx.mu.RLock()
+				ps := idx.byUpstream[sid]
+				idx.mu.RUnlock()
+				return ps
+			},
+		)
+	}
+
 	// Register a callback so that any removal path (reaper, RemoveSession,
 	// CloseAll) triggers closeDownstream on the proxy session, setting the
 	// closed flag before the SDK connection is torn down.
@@ -411,7 +428,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 		return srv
 	}, nil)
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	outerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" && isInitializeRequest(r) {
 			var admission AdmissionStatuser
 			if cfg.Selector != nil {
@@ -580,8 +597,18 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 					}
 				}
 			}
+			// Cancel any pending disconnect grace timer for this session.
+			if tracker != nil {
+				tracker.HandleDelete(sessionHeader)
+			}
 		}
 	})
+
+	// For shared mode with disconnect detection, wrap the outer handler.
+	if tracker != nil {
+		return tracker.Wrap(outerHandler)
+	}
+	return outerHandler
 }
 
 func isInitializeRequest(r *http.Request) bool {
