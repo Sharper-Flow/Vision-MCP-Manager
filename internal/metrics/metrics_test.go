@@ -111,3 +111,76 @@ func TestDaemonMetrics_SnapshotIsCopy(t *testing.T) {
 		t.Errorf("s2.ToolCallsTotal = %d, want 2 (snapshot after second inc)", s2.ToolCallsTotal)
 	}
 }
+
+func TestServerMetrics_BasicOperations(t *testing.T) {
+	m := NewServerMetrics()
+
+	// Initial state
+	s := m.Snapshot()
+	if s.ActiveSessions != 0 {
+		t.Errorf("initial ActiveSessions = %d, want 0", s.ActiveSessions)
+	}
+	if s.AdmissionDenied != 0 {
+		t.Errorf("initial AdmissionDenied = %d, want 0", s.AdmissionDenied)
+	}
+	if len(s.ReapedByReason) != 0 {
+		t.Errorf("initial ReapedByReason = %v, want empty", s.ReapedByReason)
+	}
+
+	// Inc/dec active sessions
+	m.IncActiveSessions()
+	m.IncActiveSessions()
+	m.DecActiveSessions()
+	s = m.Snapshot()
+	if s.ActiveSessions != 1 {
+		t.Errorf("ActiveSessions = %d, want 1", s.ActiveSessions)
+	}
+
+	// Admission denial
+	m.IncAdmissionDenied()
+	m.IncAdmissionDenied()
+	s = m.Snapshot()
+	if s.AdmissionDenied != 2 {
+		t.Errorf("AdmissionDenied = %d, want 2", s.AdmissionDenied)
+	}
+
+	// Reap by reason
+	m.IncReaped("client_disconnected")
+	m.IncReaped("idle_timeout")
+	m.IncReaped("client_disconnected")
+	s = m.Snapshot()
+	if s.ReapedByReason["client_disconnected"] != 2 {
+		t.Errorf("ReapedByReason[client_disconnected] = %d, want 2", s.ReapedByReason["client_disconnected"])
+	}
+	if s.ReapedByReason["idle_timeout"] != 1 {
+		t.Errorf("ReapedByReason[idle_timeout] = %d, want 1", s.ReapedByReason["idle_timeout"])
+	}
+}
+
+func TestServerMetrics_ConcurrentAccess(t *testing.T) {
+	m := NewServerMetrics()
+	var wg sync.WaitGroup
+
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.IncActiveSessions()
+			m.DecActiveSessions()
+			m.IncReaped("client_disconnected")
+			m.IncAdmissionDenied()
+		}()
+	}
+	wg.Wait()
+
+	s := m.Snapshot()
+	if s.ActiveSessions != 0 {
+		t.Errorf("ActiveSessions = %d, want 0", s.ActiveSessions)
+	}
+	if s.ReapedByReason["client_disconnected"] != 100 {
+		t.Errorf("ReapedByReason[client_disconnected] = %d, want 100", s.ReapedByReason["client_disconnected"])
+	}
+	if s.AdmissionDenied != 100 {
+		t.Errorf("AdmissionDenied = %d, want 100", s.AdmissionDenied)
+	}
+}
