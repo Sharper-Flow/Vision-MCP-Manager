@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -21,6 +22,31 @@ func testSharedServerConfig() *config.ServerConfig {
 		HealthCheckInterval: config.Duration(30 * time.Second),
 		MaxSessions:         10,
 	}
+}
+
+type testServerMetricsReporter struct {
+	mu      sync.Mutex
+	reasons map[string]int
+}
+
+func newTestServerMetricsReporter() *testServerMetricsReporter {
+	return &testServerMetricsReporter{reasons: make(map[string]int)}
+}
+
+func (r *testServerMetricsReporter) IncActiveSessions()  {}
+func (r *testServerMetricsReporter) DecActiveSessions()  {}
+func (r *testServerMetricsReporter) IncAdmissionDenied() {}
+
+func (r *testServerMetricsReporter) IncReaped(reason string) {
+	r.mu.Lock()
+	r.reasons[reason]++
+	r.mu.Unlock()
+}
+
+func (r *testServerMetricsReporter) reapCount(reason string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reasons[reason]
 }
 
 // TestSharedManager_SpawnOnFirstUse verifies that the first GetOrCreateSession
@@ -379,8 +405,9 @@ func TestIdleReap_ZeroRefsTriggersReap(t *testing.T) {
 
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
+	reporter := newTestServerMetricsReporter()
 
-	sm := NewSharedSessionManager("test-idle-reap", cfg, logger, 50*time.Millisecond, nil)
+	sm := NewSharedSessionManager("test-idle-reap", cfg, logger, 50*time.Millisecond, reporter)
 	defer sm.CloseAll()
 
 	// Create session
@@ -409,6 +436,9 @@ func TestIdleReap_ZeroRefsTriggersReap(t *testing.T) {
 	// Downstream should be reaped
 	if sm.HasDownstream() {
 		t.Error("expected downstream to be reaped after idle timeout")
+	}
+	if got := reporter.reapCount(metrics.ReapReasonIdleTimeout); got != 1 {
+		t.Errorf("idle timeout reap count = %d, want 1", got)
 	}
 }
 

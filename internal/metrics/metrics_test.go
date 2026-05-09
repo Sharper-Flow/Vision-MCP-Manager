@@ -157,6 +157,33 @@ func TestServerMetrics_BasicOperations(t *testing.T) {
 	}
 }
 
+func TestServerMetrics_NormalizesReapReasons(t *testing.T) {
+	m := NewServerMetrics()
+
+	m.IncReaped("upstream delete")
+	m.IncReaped("session removed by manager")
+	m.IncReaped("health check failed")
+	m.IncReaped("initial tools/list failed")
+	m.IncReaped("surprising future reason")
+
+	s := m.Snapshot()
+	cases := map[string]int64{
+		ReapReasonUpstreamDelete:  1,
+		ReapReasonSessionRemoved:  1,
+		ReapReasonHealthCheck:     1,
+		ReapReasonToolsListFailed: 1,
+		ReapReasonUnknown:         1,
+	}
+	for reason, want := range cases {
+		if got := s.ReapedByReason[reason]; got != want {
+			t.Errorf("ReapedByReason[%s] = %d, want %d", reason, got, want)
+		}
+	}
+	if _, ok := s.ReapedByReason["surprising future reason"]; ok {
+		t.Error("raw unknown reason should not be exposed as metric key")
+	}
+}
+
 func TestServerMetrics_ConcurrentAccess(t *testing.T) {
 	m := NewServerMetrics()
 	var wg sync.WaitGroup

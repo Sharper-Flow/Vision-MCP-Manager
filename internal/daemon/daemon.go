@@ -317,6 +317,8 @@ func (d *Daemon) Reload() error {
 				slog.String("error", err.Error()),
 			)
 			reloadErrs = append(reloadErrs, fmt.Errorf("remove %s: %w", name, err))
+		} else {
+			d.deleteServerMetrics(name)
 		}
 	}
 
@@ -814,6 +816,13 @@ func (d *Daemon) teardownProxyForServer(name string) {
 			slog.String("server", name),
 		)
 	}
+	d.deleteServerMetrics(name)
+}
+
+func (d *Daemon) deleteServerMetrics(name string) {
+	d.serverMetricsMu.Lock()
+	delete(d.serverMetrics, name)
+	d.serverMetricsMu.Unlock()
 }
 
 // Registry returns the server registry.

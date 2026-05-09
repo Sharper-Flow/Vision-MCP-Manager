@@ -314,12 +314,12 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 
 // ListServerEntry represents a server in the vision_list response.
 type ListServerEntry struct {
-	Name           string                       `json:"name"`
-	Status         string                       `json:"status"`
-	Port           *int                         `json:"port"`
-	PID            *int                         `json:"pid"`
-	Uptime         *string                      `json:"uptime"`
-	Error          *string                      `json:"error"`
+	Name           string                         `json:"name"`
+	Status         string                         `json:"status"`
+	Port           *int                           `json:"port"`
+	PID            *int                           `json:"pid"`
+	Uptime         *string                        `json:"uptime"`
+	Error          *string                        `json:"error"`
 	SessionMetrics *metrics.ServerMetricsSnapshot `json:"session_metrics,omitempty"`
 }
 
@@ -374,7 +374,7 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 
 		// Set error if present
 		if status.LastError != "" {
-			errStr := status.LastError
+			errStr := scrubSecrets(status.LastError)
 			info.Error = &errStr
 		}
 

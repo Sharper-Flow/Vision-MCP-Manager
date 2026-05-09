@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
@@ -120,6 +121,9 @@ func (a *testMetricsAccessor) ServerMetricsSnapshot(name string) *metrics.Server
 // are included in the /v1/servers response when ServerMetricsAccessor is set.
 func TestHandleV1Servers_WithMetrics(t *testing.T) {
 	reg := newTestRegistry()
+	if err := reg.Add("test-server", &config.ServerConfig{Port: 18080}); err != nil {
+		t.Fatalf("add test server: %v", err)
+	}
 	accessor := &testMetricsAccessor{
 		snapshots: map[string]*metrics.ServerMetricsSnapshot{
 			"test-server": {
@@ -146,9 +150,37 @@ func TestHandleV1Servers_WithMetrics(t *testing.T) {
 		t.Fatalf("unmarshal: %v; body=%s", err, rr.Body.String())
 	}
 
-	// With empty registry, no servers but response should still be valid
-	if body.Servers == nil {
-		t.Fatalf("servers field missing or null; body=%s", rr.Body.String())
+	if len(body.Servers) != 1 {
+		t.Fatalf("servers length = %d, want 1; body=%s", len(body.Servers), rr.Body.String())
+	}
+	metricValue, ok := body.Servers[0]["session_metrics"].(map[string]any)
+	if !ok {
+		t.Fatalf("session_metrics missing or wrong type: %#v", body.Servers[0]["session_metrics"])
+	}
+	if got := metricValue["active_sessions"]; got != float64(3) {
+		t.Fatalf("active_sessions = %v, want 3", got)
+	}
+	reaped, ok := metricValue["reaped_by_reason"].(map[string]any)
+	if !ok {
+		t.Fatalf("reaped_by_reason missing or wrong type: %#v", metricValue["reaped_by_reason"])
+	}
+	if got := reaped["idle_timeout"]; got != float64(2) {
+		t.Fatalf("idle_timeout count = %v, want 2", got)
+	}
+
+	detailReq := httptest.NewRequest(http.MethodGet, "/v1/servers/test-server", nil)
+	detailReq.SetPathValue("name", "test-server")
+	detailRR := httptest.NewRecorder()
+	s.handleV1ServerDetail(detailRR, detailReq)
+	if detailRR.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want 200; body=%s", detailRR.Code, detailRR.Body.String())
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(detailRR.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail unmarshal: %v; body=%s", err, detailRR.Body.String())
+	}
+	if _, ok := detail["session_metrics"].(map[string]any); !ok {
+		t.Fatalf("detail session_metrics missing or wrong type: %#v", detail["session_metrics"])
 	}
 }
 
@@ -172,6 +204,9 @@ func TestServerMetricsAccessor_NilAccessor(t *testing.T) {
 // when ServerMetricsAccessor is wired.
 func TestToolList_WithMetrics(t *testing.T) {
 	reg := newTestRegistry()
+	if err := reg.Add("test-srv", &config.ServerConfig{Port: 18081}); err != nil {
+		t.Fatalf("add test server: %v", err)
+	}
 	accessor := &testMetricsAccessor{
 		snapshots: map[string]*metrics.ServerMetricsSnapshot{
 			"test-srv": {
@@ -197,8 +232,16 @@ func TestToolList_WithMetrics(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	// With empty registry, servers list is empty but response is valid
-	if response.Servers == nil {
-		t.Fatal("servers should be non-nil slice")
+	if len(response.Servers) != 1 {
+		t.Fatalf("servers length = %d, want 1", len(response.Servers))
+	}
+	if response.Servers[0].SessionMetrics == nil {
+		t.Fatal("session metrics should be populated")
+	}
+	if got := response.Servers[0].SessionMetrics.ActiveSessions; got != 5 {
+		t.Fatalf("active sessions = %d, want 5", got)
+	}
+	if got := response.Servers[0].SessionMetrics.ReapedByReason["client_disconnected"]; got != 1 {
+		t.Fatalf("client_disconnected reap count = %d, want 1", got)
 	}
 }

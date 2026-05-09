@@ -71,10 +71,20 @@ func (m *DaemonMetrics) Snapshot() Snapshot {
 
 // ServerMetricsSnapshot holds a point-in-time copy of per-server metrics.
 type ServerMetricsSnapshot struct {
-	ActiveSessions   int64            `json:"active_sessions"`
-	ReapedByReason   map[string]int64 `json:"reaped_by_reason"`
-	AdmissionDenied  int64            `json:"admission_denied"`
+	ActiveSessions  int64            `json:"active_sessions"`
+	ReapedByReason  map[string]int64 `json:"reaped_by_reason"`
+	AdmissionDenied int64            `json:"admission_denied"`
 }
+
+const (
+	ReapReasonClientDisconnected = "client_disconnected"
+	ReapReasonIdleTimeout        = "idle_timeout"
+	ReapReasonUpstreamDelete     = "upstream_delete"
+	ReapReasonSessionRemoved     = "session_removed"
+	ReapReasonHealthCheck        = "health_check"
+	ReapReasonToolsListFailed    = "tools_list_failed"
+	ReapReasonUnknown            = "unknown"
+)
 
 // ServerMetrics provides thread-safe per-server counters using sync/atomic.
 // Tracks active sessions, reap counts by reason, and admission denials.
@@ -82,7 +92,7 @@ type ServerMetrics struct {
 	activeSessions  atomic.Int64
 	admissionDenied atomic.Int64
 
-	mu           sync.Mutex
+	mu             sync.Mutex
 	reapedByReason map[string]int64
 }
 
@@ -91,6 +101,7 @@ type ServerMetrics struct {
 type ServerMetricsReporter interface {
 	IncActiveSessions()
 	DecActiveSessions()
+	IncAdmissionDenied()
 	IncReaped(reason string)
 }
 
@@ -117,10 +128,33 @@ func (m *ServerMetrics) IncAdmissionDenied() {
 }
 
 // IncReaped increments the reap counter for the given reason.
+// Reasons are normalized to bounded canonical keys before counting.
 func (m *ServerMetrics) IncReaped(reason string) {
+	reason = NormalizeReapReason(reason)
 	m.mu.Lock()
 	m.reapedByReason[reason]++
 	m.mu.Unlock()
+}
+
+// NormalizeReapReason maps legacy close reason text to canonical metrics keys.
+// Unknown input collapses to "unknown" to avoid unbounded metric cardinality.
+func NormalizeReapReason(reason string) string {
+	switch reason {
+	case ReapReasonClientDisconnected:
+		return ReapReasonClientDisconnected
+	case ReapReasonIdleTimeout, "idle timeout":
+		return ReapReasonIdleTimeout
+	case ReapReasonUpstreamDelete, "upstream delete":
+		return ReapReasonUpstreamDelete
+	case ReapReasonSessionRemoved, "session removed by manager":
+		return ReapReasonSessionRemoved
+	case ReapReasonHealthCheck, "health check failed":
+		return ReapReasonHealthCheck
+	case ReapReasonToolsListFailed, "initial tools/list failed":
+		return ReapReasonToolsListFailed
+	default:
+		return ReapReasonUnknown
+	}
 }
 
 // Snapshot returns a point-in-time copy of all per-server counters.

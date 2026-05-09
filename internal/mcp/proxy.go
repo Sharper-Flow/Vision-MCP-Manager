@@ -199,7 +199,7 @@ type ProxyConfig struct {
 	DisconnectGracePeriod time.Duration
 
 	// Metrics tracks per-server session lifecycle counters. Optional; nil = no metrics.
-	Metrics *metrics.ServerMetrics
+	Metrics metrics.ServerMetricsReporter
 }
 
 // hasExactlyOneManagerSource reports whether exactly one of SessionManager,
@@ -804,7 +804,7 @@ type proxySession struct {
 	sharedMgr *session.SharedSessionManager
 
 	// metrics tracks per-server session lifecycle counters. Optional; nil = no metrics.
-	metrics *metrics.ServerMetrics
+	metrics metrics.ServerMetricsReporter
 }
 
 // newPerSessionServer creates a new mcp.Server for a single upstream session.
@@ -822,7 +822,7 @@ func newPerSessionServer(
 	requestTimeout time.Duration,
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
-	srvMetrics *metrics.ServerMetrics,
+	srvMetrics metrics.ServerMetricsReporter,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
 	onRespawn func(oldSessionID, newSessionID string, ps *proxySession),
@@ -955,7 +955,7 @@ func newSharedModeServer(
 	requestTimeout time.Duration,
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
-	srvMetrics *metrics.ServerMetrics,
+	srvMetrics metrics.ServerMetricsReporter,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
 ) (*mcp.Server, error) {
