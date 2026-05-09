@@ -86,6 +86,14 @@ type ServerMetrics struct {
 	reapedByReason map[string]int64
 }
 
+// ServerMetricsReporter decouples consumers from concrete ServerMetrics.
+// SharedSessionManager uses this interface so tests can inject stubs.
+type ServerMetricsReporter interface {
+	IncActiveSessions()
+	DecActiveSessions()
+	IncReaped(reason string)
+}
+
 // NewServerMetrics creates a new zeroed ServerMetrics.
 func NewServerMetrics() *ServerMetrics {
 	return &ServerMetrics{

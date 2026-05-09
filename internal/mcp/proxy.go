@@ -49,6 +49,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -196,6 +197,9 @@ type ProxyConfig struct {
 	// closes before removing a shared-mode upstream session. 0 disables disconnect
 	// detection. Set from ServerConfig.ResolvedDisconnectGracePeriod().
 	DisconnectGracePeriod time.Duration
+
+	// Metrics tracks per-server session lifecycle counters. Optional; nil = no metrics.
+	Metrics *metrics.ServerMetrics
 }
 
 // hasExactlyOneManagerSource reports whether exactly one of SessionManager,
@@ -323,6 +327,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				cfg.RequestTimeout,
 				cfg.RetryConfig,
 				cfg.CircuitBreakerConfig,
+				cfg.Metrics,
 				func(upstreamSessionID string, ps *proxySession) {
 					idx.mu.Lock()
 					idx.byUpstream[upstreamSessionID] = ps
@@ -370,6 +375,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			cfg.RequestTimeout,
 			cfg.RetryConfig,
 			cfg.CircuitBreakerConfig,
+			cfg.Metrics,
 			func(upstreamSessionID string, ps *proxySession) {
 				if cfg.Selector != nil && pendingKey != "" {
 					cfg.Selector.Rebind(pendingKey, upstreamSessionID)
@@ -439,6 +445,9 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				admission = cfg.SessionManager
 			}
 			if atCapacity, current, max := admission.AdmissionStatus(); atCapacity {
+				if cfg.Metrics != nil {
+					cfg.Metrics.IncAdmissionDenied()
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]any{
@@ -793,6 +802,9 @@ type proxySession struct {
 	// sharedMgr is the SharedSessionManager used in shared mode. Nil when
 	// shared is false.
 	sharedMgr *session.SharedSessionManager
+
+	// metrics tracks per-server session lifecycle counters. Optional; nil = no metrics.
+	metrics *metrics.ServerMetrics
 }
 
 // newPerSessionServer creates a new mcp.Server for a single upstream session.
@@ -810,6 +822,7 @@ func newPerSessionServer(
 	requestTimeout time.Duration,
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
+	srvMetrics *metrics.ServerMetrics,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
 	onRespawn func(oldSessionID, newSessionID string, ps *proxySession),
@@ -833,6 +846,7 @@ func newPerSessionServer(
 		requestTimeout:      requestTimeout,
 		retryConfig:         retryConfig,
 		circuitBreaker:      newCircuitBreaker(circuitBreakerConfig, nil),
+		metrics:             srvMetrics,
 	}
 	if ps.requestTimeout <= 0 {
 		ps.requestTimeout = 30 * time.Second
@@ -864,6 +878,9 @@ func newPerSessionServer(
 			ps.mu.Unlock()
 			if onInitialized != nil {
 				onInitialized(req.Session.ID(), ps)
+			}
+			if ps.metrics != nil {
+				ps.metrics.IncActiveSessions()
 			}
 			logger.Debug("upstream session initialized",
 				slog.String("upstream_session_id", req.Session.ID()),
@@ -938,6 +955,7 @@ func newSharedModeServer(
 	requestTimeout time.Duration,
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
+	srvMetrics *metrics.ServerMetrics,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
 ) (*mcp.Server, error) {
@@ -957,6 +975,7 @@ func newSharedModeServer(
 		requestTimeout:     requestTimeout,
 		retryConfig:        retryConfig,
 		circuitBreaker:     newCircuitBreaker(circuitBreakerConfig, nil),
+		metrics:            srvMetrics,
 	}
 	if ps.requestTimeout <= 0 {
 		ps.requestTimeout = 30 * time.Second
@@ -987,6 +1006,9 @@ func newSharedModeServer(
 			ps.mu.Unlock()
 			if onInitialized != nil {
 				onInitialized(req.Session.ID(), ps)
+			}
+			if ps.metrics != nil {
+				ps.metrics.IncActiveSessions()
 			}
 			logger.Debug("upstream session initialized",
 				slog.String("upstream_session_id", req.Session.ID()),
@@ -1630,6 +1652,12 @@ func (ps *proxySession) closeDownstream(reason string) {
 	defer ps.closeMu.Unlock()
 
 	ps.closeOnce.Do(func() {
+		// Increment reap counter
+		if ps.metrics != nil {
+			ps.metrics.IncReaped(reason)
+			ps.metrics.DecActiveSessions()
+		}
+
 		ps.mu.Lock()
 		ps.closeReason = reason
 		ps.mu.Unlock()

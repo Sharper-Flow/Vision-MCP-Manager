@@ -16,6 +16,7 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/slots"
@@ -681,6 +682,10 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		},
 	}
 
+	// Per-server metrics for session observability.
+	srvMetrics := metrics.NewServerMetrics()
+	proxyCfg.Metrics = srvMetrics
+
 	var closer mcp.SessionCloser
 
 	if srv.Config.Stateful {
@@ -739,7 +744,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	} else {
 		// Shared mode: single subprocess shared across all upstream sessions
 		idleTimeout := srv.Config.ResolvedIdleReapTimeout()
-		sharedMgr := session.NewSharedSessionManager(srv.Name, srv.Config, d.logger, idleTimeout)
+		sharedMgr := session.NewSharedSessionManager(srv.Name, srv.Config, d.logger, idleTimeout, srvMetrics)
 		sharedMgr.StartHealthProbe(d.ctx)
 
 		proxyCfg.SharedManager = sharedMgr

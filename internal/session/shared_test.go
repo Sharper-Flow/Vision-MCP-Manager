@@ -33,7 +33,7 @@ func TestSharedManager_SpawnOnFirstUse(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Initially no downstream
@@ -78,7 +78,7 @@ func TestSharedManager_ConcurrentSpawnSafety(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	var wg sync.WaitGroup
@@ -126,7 +126,7 @@ func TestSharedManager_RefcountLifecycle(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Add refs
@@ -180,7 +180,7 @@ func TestSharedManager_RespawnOnCrash(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Spawn initial session
@@ -235,7 +235,7 @@ func TestSharedManager_HealthProbe(t *testing.T) {
 	cfg := testSharedServerConfig()
 	cfg.HealthCheckInterval = config.Duration(200 * time.Millisecond)
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Spawn and start health probe
@@ -283,7 +283,7 @@ func TestSharedManager_AdmissionControl(t *testing.T) {
 	cfg := testSharedServerConfig()
 	cfg.MaxSessions = 2
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// First two should succeed
@@ -334,7 +334,7 @@ func TestSharedManager_CloseAll(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-shared", cfg, logger, 0)
+	sm := NewSharedSessionManager("test-shared", cfg, logger, 0, nil)
 
 	// Spawn some sessions
 	for i := 0; i < 3; i++ {
@@ -380,7 +380,7 @@ func TestIdleReap_ZeroRefsTriggersReap(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-idle-reap", cfg, logger, 50*time.Millisecond)
+	sm := NewSharedSessionManager("test-idle-reap", cfg, logger, 50*time.Millisecond, nil)
 	defer sm.CloseAll()
 
 	// Create session
@@ -422,7 +422,7 @@ func TestIdleReap_NewSessionCancelsTimer(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-idle-cancel", cfg, logger, 200*time.Millisecond)
+	sm := NewSharedSessionManager("test-idle-cancel", cfg, logger, 200*time.Millisecond, nil)
 	defer sm.CloseAll()
 
 	// Create and remove session → idle timer starts
@@ -459,7 +459,7 @@ func TestIdleReap_DisabledNegative(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-idle-disabled", cfg, logger, 0) // 0 = disabled
+	sm := NewSharedSessionManager("test-idle-disabled", cfg, logger, 0, nil) // 0 = disabled
 	defer sm.CloseAll()
 
 	_, err := sm.GetOrCreateSession(ctx, "sess-1")
@@ -489,7 +489,7 @@ func TestIdleReap_CloseAllDuringTimer(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-idle-closeall", cfg, logger, 5*time.Second)
+	sm := NewSharedSessionManager("test-idle-closeall", cfg, logger, 5*time.Second, nil)
 	defer sm.CloseAll()
 
 	_, err := sm.GetOrCreateSession(ctx, "sess-1")
@@ -529,7 +529,7 @@ func TestIdleReap_RespawnAfterReap(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-idle-respawn", cfg, logger, 50*time.Millisecond)
+	sm := NewSharedSessionManager("test-idle-respawn", cfg, logger, 50*time.Millisecond, nil)
 	defer sm.CloseAll()
 
 	// Create → remove → wait for reap
@@ -571,7 +571,7 @@ func TestSharedManager_RefcountLifecycle_WithIdleReap(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testSharedServerConfig()
 
-	sm := NewSharedSessionManager("test-lifecycle", cfg, logger, 50*time.Millisecond)
+	sm := NewSharedSessionManager("test-lifecycle", cfg, logger, 50*time.Millisecond, nil)
 	defer sm.CloseAll()
 
 	// Add refs

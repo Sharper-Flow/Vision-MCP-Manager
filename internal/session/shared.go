@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -35,8 +36,11 @@ type SharedSessionManager struct {
 	// Idle reap: when refCount drops to 0, start idleTimer. On expiry,
 	// tear down the downstream subprocess. Cancelled by GetOrCreateSession.
 	// All idle fields guarded by refMu.
-	idleTimer  *time.Timer
+	idleTimer   *time.Timer
 	idleTimeout time.Duration
+
+	// metrics tracks per-server session lifecycle counters. Optional; nil = no metrics.
+	metrics metrics.ServerMetricsReporter
 
 	healthCtx    context.Context
 	healthCancel context.CancelFunc
@@ -48,7 +52,7 @@ type SharedSessionManager struct {
 // NewSharedSessionManager creates a new shared session manager.
 // idleTimeout controls the idle reap behavior: when refCount drops to 0, the
 // downstream subprocess is torn down after this duration. 0 disables idle reaping.
-func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger *slog.Logger, idleTimeout time.Duration) *SharedSessionManager {
+func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger *slog.Logger, idleTimeout time.Duration, m metrics.ServerMetricsReporter) *SharedSessionManager {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -59,6 +63,7 @@ func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger
 		upstreamSessions: make(map[string]struct{}),
 		subscribers:      make(map[string]func(*mcp.ClientSession)),
 		idleTimeout:      idleTimeout,
+		metrics:          m,
 	}
 }
 
@@ -306,6 +311,10 @@ func (sm *SharedSessionManager) reapDownstream() {
 		slog.Int("pid", pid),
 		slog.Duration("idle_timeout", sm.idleTimeout),
 	)
+
+	if sm.metrics != nil {
+		sm.metrics.IncReaped("idle_timeout")
+	}
 
 	sm.refMu.Unlock()
 	sm.mu.Unlock()

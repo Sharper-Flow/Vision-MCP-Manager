@@ -1756,7 +1756,7 @@ func TestNewProxyHandler_PanicsWhenSharedManagerAndSessionManagerBothSet(t *test
 	_ = NewProxyHandler(ProxyConfig{
 		ServerName:    "both-set",
 		SessionManager: mgr,
-		SharedManager: session.NewSharedSessionManager("shared", testServerConfig(), logger, 0),
+		SharedManager: session.NewSharedSessionManager("shared", testServerConfig(), logger, 0, nil),
 		Logger:        logger,
 	})
 }
@@ -1771,7 +1771,7 @@ func TestNewProxyHandler_PanicsWhenSharedManagerAndSelectorBothSet(t *testing.T)
 	logger := testLogger(t)
 	_ = NewProxyHandler(ProxyConfig{
 		ServerName:    "shared+selector",
-		SharedManager: session.NewSharedSessionManager("shared", testServerConfig(), logger, 0),
+		SharedManager: session.NewSharedSessionManager("shared", testServerConfig(), logger, 0, nil),
 		Selector:      &testSelector{},
 		Logger:        logger,
 	})
@@ -1792,7 +1792,7 @@ func TestProxyHandler_SharedModeEndToEnd(t *testing.T) {
 	cfg := testServerConfig()
 
 	// Create shared session manager
-	sm := session.NewSharedSessionManager("test-shared", cfg, logger, 0)
+	sm := session.NewSharedSessionManager("test-shared", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Create proxy handler in shared mode
@@ -1911,7 +1911,7 @@ func TestProxyHandler_SharedModeCloseDownstream(t *testing.T) {
 	cfg := testServerConfig()
 
 	// Create shared session manager
-	sm := session.NewSharedSessionManager("test-shared-close", cfg, logger, 0)
+	sm := session.NewSharedSessionManager("test-shared-close", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Create proxy handler in shared mode
@@ -2035,7 +2035,7 @@ func TestProxyHandler_SharedModeConcurrentCalls(t *testing.T) {
 	cfg := testServerConfig()
 
 	// Create shared session manager
-	sm := session.NewSharedSessionManager("test-shared-concurrent", cfg, logger, 0)
+	sm := session.NewSharedSessionManager("test-shared-concurrent", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Create proxy handler in shared mode
@@ -2241,7 +2241,7 @@ func TestProxyHandler_SharedModeDisconnectReap(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testServerConfig()
 
-	sm := session.NewSharedSessionManager("test-disconnect-reap", cfg, logger, 0)
+	sm := session.NewSharedSessionManager("test-disconnect-reap", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Create proxy handler with short disconnect grace period
@@ -2335,7 +2335,7 @@ func TestProxyHandler_SharedModeDisconnectDisabled(t *testing.T) {
 	logger := testLogger(t)
 	cfg := testServerConfig()
 
-	sm := session.NewSharedSessionManager("test-disabled", cfg, logger, 0)
+	sm := session.NewSharedSessionManager("test-disabled", cfg, logger, 0, nil)
 	defer sm.CloseAll()
 
 	// Create proxy handler with disconnect disabled (grace period = 0)
