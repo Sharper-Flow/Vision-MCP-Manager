@@ -314,12 +314,13 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 
 // ListServerEntry represents a server in the vision_list response.
 type ListServerEntry struct {
-	Name   string  `json:"name"`
-	Status string  `json:"status"`
-	Port   *int    `json:"port"`
-	PID    *int    `json:"pid"`
-	Uptime *string `json:"uptime"`
-	Error  *string `json:"error"`
+	Name           string                       `json:"name"`
+	Status         string                       `json:"status"`
+	Port           *int                         `json:"port"`
+	PID            *int                         `json:"pid"`
+	Uptime         *string                      `json:"uptime"`
+	Error          *string                      `json:"error"`
+	SessionMetrics *metrics.ServerMetricsSnapshot `json:"session_metrics,omitempty"`
 }
 
 // SlotGroupEntry describes one slot group in the vision_list response.
@@ -375,6 +376,13 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 		if status.LastError != "" {
 			errStr := status.LastError
 			info.Error = &errStr
+		}
+
+		// Set session metrics if accessor available
+		if s.serverMetricsAccessor != nil {
+			if snap := s.serverMetricsAccessor.ServerMetricsSnapshot(status.Name); snap != nil {
+				info.SessionMetrics = snap
+			}
 		}
 
 		response.Servers = append(response.Servers, info)
@@ -435,6 +443,12 @@ func (s *Server) buildSlotGroups() []SlotGroupEntry {
 // The daemon wires a concrete implementation; when nil, active_sessions is 0.
 type SlotSessionAccessor interface {
 	ActiveSessionCount(slotName string) int
+}
+
+// ServerMetricsAccessor provides per-server session metrics.
+// The daemon wires a concrete implementation; when nil, metrics are omitted.
+type ServerMetricsAccessor interface {
+	ServerMetricsSnapshot(serverName string) *metrics.ServerMetricsSnapshot
 }
 
 // SlotStatusResponse is the response for vision_slot_status.

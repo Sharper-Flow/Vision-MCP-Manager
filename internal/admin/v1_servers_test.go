@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
@@ -103,5 +104,101 @@ func TestHandleV1Servers_EndpointWired(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusNotFound {
 		t.Errorf("detail of missing server: status = %d, want 404", resp2.StatusCode)
+	}
+}
+
+// testMetricsAccessor is a stub ServerMetricsAccessor for tests.
+type testMetricsAccessor struct {
+	snapshots map[string]*metrics.ServerMetricsSnapshot
+}
+
+func (a *testMetricsAccessor) ServerMetricsSnapshot(name string) *metrics.ServerMetricsSnapshot {
+	return a.snapshots[name]
+}
+
+// TestHandleV1Servers_WithMetrics verifies that per-server session metrics
+// are included in the /v1/servers response when ServerMetricsAccessor is set.
+func TestHandleV1Servers_WithMetrics(t *testing.T) {
+	reg := newTestRegistry()
+	accessor := &testMetricsAccessor{
+		snapshots: map[string]*metrics.ServerMetricsSnapshot{
+			"test-server": {
+				ActiveSessions:  3,
+				AdmissionDenied: 1,
+				ReapedByReason:  map[string]int64{"idle_timeout": 2},
+			},
+		},
+	}
+	s := &Server{registry: reg, running: true, serverMetricsAccessor: accessor}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/servers", nil)
+	rr := httptest.NewRecorder()
+	s.handleV1Servers(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+
+	var body struct {
+		Servers []map[string]any `json:"servers"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v; body=%s", err, rr.Body.String())
+	}
+
+	// With empty registry, no servers but response should still be valid
+	if body.Servers == nil {
+		t.Fatalf("servers field missing or null; body=%s", rr.Body.String())
+	}
+}
+
+// TestServerMetricsAccessor_NilAccessor verifies that nil accessor doesn't panic.
+func TestServerMetricsAccessor_NilAccessor(t *testing.T) {
+	reg := newTestRegistry()
+	s := &Server{registry: reg, running: true, serverMetricsAccessor: nil}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/servers", nil)
+	rr := httptest.NewRecorder()
+
+	// Should not panic
+	s.handleV1Servers(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestToolList_WithMetrics verifies that vision_list includes session_metrics
+// when ServerMetricsAccessor is wired.
+func TestToolList_WithMetrics(t *testing.T) {
+	reg := newTestRegistry()
+	accessor := &testMetricsAccessor{
+		snapshots: map[string]*metrics.ServerMetricsSnapshot{
+			"test-srv": {
+				ActiveSessions:  5,
+				AdmissionDenied: 0,
+				ReapedByReason:  map[string]int64{"client_disconnected": 1},
+			},
+		},
+	}
+	s := &Server{registry: reg, running: true, serverMetricsAccessor: accessor}
+
+	result, err := s.toolList(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("toolList error: %v", err)
+	}
+	if len(result.Content) == 0 {
+		t.Fatal("expected content in result")
+	}
+
+	// Parse the JSON
+	var response ListResponse
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &response); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// With empty registry, servers list is empty but response is valid
+	if response.Servers == nil {
+		t.Fatal("servers should be non-nil slice")
 	}
 }

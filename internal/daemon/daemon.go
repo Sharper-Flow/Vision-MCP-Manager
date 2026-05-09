@@ -49,6 +49,10 @@ type Daemon struct {
 
 	// Proxy setup deduplication (prevents race between handleServerEvent and setupHTTPProxies)
 	proxySetupInProgress sync.Map
+
+	// Per-server session metrics, keyed by server name.
+	serverMetrics   map[string]*metrics.ServerMetrics
+	serverMetricsMu sync.RWMutex
 }
 
 // Config configures the daemon.
@@ -124,10 +128,14 @@ func New(cfg Config) (*Daemon, error) {
 		logger:             cfg.Logger,
 		ctx:                ctx,
 		cancel:             cancel,
+		serverMetrics:      make(map[string]*metrics.ServerMetrics),
 	}
 
 	// Register event handler for dynamic server lifecycle management
 	reg.SetEventHandler(d.handleServerEvent)
+
+	// Wire per-server metrics accessor into admin server.
+	adminSrv.SetServerMetricsAccessor(d)
 
 	return d, nil
 }
@@ -685,6 +693,9 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	// Per-server metrics for session observability.
 	srvMetrics := metrics.NewServerMetrics()
 	proxyCfg.Metrics = srvMetrics
+	d.serverMetricsMu.Lock()
+	d.serverMetrics[srv.Name] = srvMetrics
+	d.serverMetricsMu.Unlock()
 
 	var closer mcp.SessionCloser
 
@@ -815,4 +826,17 @@ func (d *Daemon) Config() *config.Config {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.cfg
+}
+
+// ServerMetricsSnapshot returns per-server session metrics for the named server.
+// Implements admin.ServerMetricsAccessor.
+func (d *Daemon) ServerMetricsSnapshot(serverName string) *metrics.ServerMetricsSnapshot {
+	d.serverMetricsMu.RLock()
+	m, ok := d.serverMetrics[serverName]
+	d.serverMetricsMu.RUnlock()
+	if !ok || m == nil {
+		return nil
+	}
+	snap := m.Snapshot()
+	return &snap
 }

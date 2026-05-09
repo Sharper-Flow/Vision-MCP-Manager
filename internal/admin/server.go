@@ -34,8 +34,9 @@ type Server struct {
 	httpSrv              *http.Server
 	mcpServer            *mcp.Server
 	startedAt            time.Time
-	slotSessionAccessor  SlotSessionAccessor // Optional: provides live session counts
-	Metrics              *metrics.DaemonMetrics
+	slotSessionAccessor   SlotSessionAccessor   // Optional: provides live session counts
+	serverMetricsAccessor ServerMetricsAccessor  // Optional: provides per-server session metrics
+	Metrics               *metrics.DaemonMetrics
 
 	mu      sync.RWMutex
 	running bool
@@ -50,8 +51,9 @@ type Config struct {
 	ConfigPath          string         // Path to servers.yaml for config persistence
 	Port                int
 	Logger              *slog.Logger
-	SlotSessionAccessor SlotSessionAccessor // Optional: provides live session counts
-	Metrics             *metrics.DaemonMetrics
+	SlotSessionAccessor   SlotSessionAccessor   // Optional: provides live session counts
+	ServerMetricsAccessor ServerMetricsAccessor  // Optional: provides per-server session metrics
+	Metrics               *metrics.DaemonMetrics
 }
 
 // NewServer creates a new Admin MCP server.
@@ -84,8 +86,9 @@ func NewServer(cfg Config) *Server {
 		configPath:          cfg.ConfigPath,
 		port:                cfg.Port,
 		logger:              cfg.Logger,
-		slotSessionAccessor: cfg.SlotSessionAccessor,
-		Metrics:             cfg.Metrics,
+		slotSessionAccessor:   cfg.SlotSessionAccessor,
+		serverMetricsAccessor: cfg.ServerMetricsAccessor,
+		Metrics:               cfg.Metrics,
 	}
 }
 
@@ -259,4 +262,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "# HELP vision_subprocesses_active Number of active subprocesses\n")
 	_, _ = fmt.Fprintf(w, "# TYPE vision_subprocesses_active gauge\n")
 	_, _ = fmt.Fprintf(w, "vision_subprocesses_active %d\n", snap.SubprocessesActive)
+}
+
+// SetServerMetricsAccessor wires the per-server metrics accessor after construction.
+func (s *Server) SetServerMetricsAccessor(a ServerMetricsAccessor) {
+	s.serverMetricsAccessor = a
 }
