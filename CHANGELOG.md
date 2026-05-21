@@ -1,3 +1,9 @@
+## 2026-05-21 (v1.3.0)
+
+### Added
+
+- add deploy-local.sh for dev-loop binary deploys
+
 ## 2026-05-09 (v1.2.5)
 
 
