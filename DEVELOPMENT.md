@@ -40,6 +40,48 @@ All development and testing uses local fixtures:
 VISION_CONFIG=./testdata/configs/valid-servers.yaml ./bin/vision daemon start
 ```
 
+### Local Dev Deploy
+
+Vision installs as a real binary at `~/.local/bin/vision`, supervised by the
+user systemd unit `vision.service`. During development you should NOT run the
+daemon out of `./bin/vision` against your live `~/.config/vision/servers.yaml`
+— do all out-of-tree work with `--config testdata/...` (see above), and use
+the deploy script to flip the installed binary when you want to test against
+the real machine config.
+
+```bash
+# Build + copy to ~/.local/bin/vision (daemon keeps running OLD binary)
+./scripts/deploy-local.sh
+# or: make deploy-local
+
+# Build + copy + restart vision.service (daemon flips to NEW binary)
+./scripts/deploy-local.sh --restart
+# or: make deploy-local-restart
+
+# Drift check (exit 1 if installed differs from a fresh build)
+./scripts/deploy-local.sh --check
+# or: make deploy-local-check
+
+# Preview without writing
+./scripts/deploy-local.sh --dry-run
+```
+
+Properties:
+
+- **Real file copy, never a symlink.** Stale symlinks across the dev/install
+  boundary fail under `realpath`, backup tools, and dev-path moves.
+- **Idempotent.** Re-running with no code changes is a no-op (`cmp -s`).
+- **Scoped writes.** Only `~/.local/bin/vision` is touched. Protected
+  locations (`~/.config/vision/`, `~/.config/opencode/`, `~/.opencode.json`)
+  are never modified by this script — those remain `scripts/install.sh`'s
+  responsibility for first-time setup.
+- **Explicit restart.** Service restart is opt-in via `--restart` so you can
+  stage a new binary without disrupting a running daemon.
+
+This is the deploy-local pattern used across the toolbox (see
+`~/dev/advance/scripts/deploy-local.sh` and `~/dev/omp/Makefile install`).
+Do not edit `~/.local/bin/vision` directly — always redeploy from source.
+
 ### Pre-Release Checklist
 
 Before modifying global config:

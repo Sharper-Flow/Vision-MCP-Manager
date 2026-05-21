@@ -17,7 +17,7 @@ CMD_DIR := ./cmd/vision
 BIN_DIR := ./bin
 DIST_DIR := ./dist
 
-.PHONY: all build test lint clean fmt vet install dev run help
+.PHONY: all build test lint clean fmt vet install dev run help deploy-local deploy-local-restart deploy-local-check
 
 # Default target
 all: lint test build
@@ -38,6 +38,22 @@ run:
 # Install to GOPATH/bin
 install:
 	$(GO) install $(LDFLAGS) $(CMD_DIR)
+
+# Build and deploy to ~/.local/bin (real file copy; no symlinks).
+# Single source of truth for "this dev repo HEAD == live binary on this machine".
+# See scripts/deploy-local.sh for details and DEVELOPMENT.md "Local Dev Deploy".
+deploy-local:
+	@./scripts/deploy-local.sh
+
+# Build, deploy, AND restart the user vision.service so the live daemon picks
+# up the new binary.
+deploy-local-restart:
+	@./scripts/deploy-local.sh --restart
+
+# Drift check: exits non-zero if installed binary differs from a fresh build.
+# Useful in CI or precommit to detect "I forgot to redeploy".
+deploy-local-check:
+	@./scripts/deploy-local.sh --check
 
 # Run all tests
 test:
@@ -106,6 +122,9 @@ help:
 	@echo "  dev           Alias for build"
 	@echo "  run           Run without building (use ARGS=... for arguments)"
 	@echo "  install       Install to GOPATH/bin"
+	@echo "  deploy-local  Build + copy real binary to ~/.local/bin/vision (no restart)"
+	@echo "  deploy-local-restart  Build + copy + restart user vision.service"
+	@echo "  deploy-local-check    Compare installed binary vs fresh build (exit 1 if drift)"
 	@echo "  test          Run all tests with race detection"
 	@echo "  test-coverage Run tests with coverage report"
 	@echo "  lint          Run golangci-lint"
