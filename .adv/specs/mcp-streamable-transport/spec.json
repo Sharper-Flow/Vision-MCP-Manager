@@ -3,8 +3,8 @@
   "name": "mcp-streamable-transport",
   "title": "Mcp Streamable Transport",
   "purpose": "Capability: Mcp Streamable Transport",
-  "version": "1.0.0",
-  "updated_at": "2026-02-07T21:55:27.921Z",
+  "version": "1.0.1",
+  "updated_at": "2026-05-24T22:46:00.000Z",
   "requirements": [
     {
       "id": "rq-mcpstr01",
@@ -48,9 +48,9 @@
           "title": "Disconnect-triggered cleanup reaps stale shared sessions",
           "given": [
             "A shared-mode server has an active upstream session",
-            "The client disconnects without sending DELETE"
+            "The client disconnects the session-bound GET/SSE receive stream without sending DELETE"
           ],
-          "when": "The configured disconnect grace period expires after the last HTTP connection closes",
+          "when": "The configured disconnect grace period expires after the last session-bound GET/SSE stream closes",
           "then": [
             "The upstream session is removed from tracking",
             "Admission capacity is freed for new sessions",
@@ -71,6 +71,20 @@
             "A structured audit event is logged with server name, PID, and idle duration",
             "The next GetOrCreateSession spawns a fresh downstream subprocess",
             "Admission state is unaffected (already at zero)"
+          ]
+        },
+        {
+          "id": "rq-mcpstr01.5",
+          "title": "POST completion does not trigger shared disconnect cleanup",
+          "given": [
+            "A shared-mode server has an active upstream session",
+            "A normal POST request with Mcp-Session-Id completes successfully"
+          ],
+          "when": "No DELETE is sent and no session-bound GET/SSE stream closes",
+          "then": [
+            "Vision does not start the disconnect grace period for that POST completion",
+            "The upstream session remains tracked",
+            "No session.disconnect_detected event is emitted for ordinary POST completion"
           ]
         }
       ]

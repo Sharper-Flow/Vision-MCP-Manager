@@ -1,7 +1,7 @@
 # Mcp Streamable Transport
 
-> **Version:** 1.0.0
-> **Updated:** 2026-02-07
+> **Version:** 1.0.1
+> **Updated:** 2026-05-24
 
 ## Purpose
 
@@ -47,9 +47,9 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 
 **Given:**
 - A shared-mode server has an active upstream session
-- The client disconnects without sending DELETE
+- The client disconnects the session-bound GET/SSE receive stream without sending DELETE
 
-**When:** The configured disconnect grace period expires after the last HTTP connection closes
+**When:** The configured disconnect grace period expires after the last session-bound GET/SSE stream closes
 
 **Then:**
 - The upstream session is removed from tracking
@@ -70,6 +70,19 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 - A structured audit event is logged with server name, PID, and idle duration
 - The next `GetOrCreateSession` spawns a fresh downstream subprocess
 - Admission state is unaffected (already at zero)
+
+**POST completion does not trigger shared disconnect cleanup** (`rq-mcpstr01.5`)
+
+**Given:**
+- A shared-mode server has an active upstream session
+- A normal POST request with `Mcp-Session-Id` completes successfully
+
+**When:** No DELETE is sent and no session-bound GET/SSE stream closes
+
+**Then:**
+- Vision does not start the disconnect grace period for that POST completion
+- The upstream session remains tracked
+- No `session.disconnect_detected` event is emitted for ordinary POST completion
 
 ---
 

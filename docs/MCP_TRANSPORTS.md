@@ -21,14 +21,15 @@ The MCP specification defines two standard transports:
 ### 2. Streamable HTTP
 
 - Server runs as HTTP service on a dedicated port
-- Client sends JSON-RPC via HTTP POST to `/mcp`
-- Server responds with `application/json` or `text/event-stream` (SSE)
+- Client sends JSON-RPC requests and notifications via HTTP POST to `/mcp`
+- Client opens a long-lived GET/SSE receive stream for server-initiated messages
+- Server responds to POST with `application/json` or `text/event-stream` (SSE)
 - Supports multiple concurrent sessions via `Mcp-Session-Id` header
 - Session teardown via `DELETE /mcp`
 
 **Endpoints:**
-- `POST /mcp` - Send requests/notifications, receive responses
-- `GET /mcp` - Open SSE stream for server-initiated messages
+- `POST /mcp` - Send requests/notifications, receive responses; normal completion is not a session disconnect signal
+- `GET /mcp` - Open SSE stream for server-initiated messages; stream closure is the disconnect signal used for shared-session grace cleanup
 - `DELETE /mcp` - Close session and release resources
 
 **Go SDK types:**
@@ -39,7 +40,7 @@ The MCP specification defines two standard transports:
 
 ## Vision's Architecture
 
-Vision bridges these two transports: it exposes **Streamable HTTP** to upstream clients (AI agents) and manages **stdio subprocesses** downstream. Each upstream MCP session gets its own isolated subprocess.
+Vision bridges these two transports: it exposes **Streamable HTTP** to upstream clients (AI agents) and manages **stdio subprocesses** downstream. Stateful servers use one isolated downstream subprocess per upstream MCP session. Shared-mode servers keep one downstream subprocess and refcount multiple upstream sessions.
 
 ```
                     AI Agent (e.g. Claude Code)
@@ -68,9 +69,9 @@ Vision bridges these two transports: it exposes **Streamable HTTP** to upstream 
   +----------------------------------------------------------+
 ```
 
-### Per-Session Subprocess Model
+### Per-Session and Shared Subprocess Models
 
-Every upstream MCP session results in a **dedicated downstream subprocess**. There is no process sharing between sessions.
+Stateful servers (`stateful: true`) give every upstream MCP session a **dedicated downstream subprocess**. Shared-mode servers (`stateful: false`, the default) route multiple upstream sessions through one shared downstream subprocess and remove only the upstream session/refcount on session cleanup.
 
 **Session lifecycle:**
 
@@ -83,7 +84,13 @@ Every upstream MCP session results in a **dedicated downstream subprocess**. The
    - Each tool is registered on the upstream `mcp.Server` via `Server.AddTool(tool, handler)` with a proxy handler that forwards `CallTool` to the downstream `ClientSession`
 4. The upstream client sees all downstream tools in its initialize response
 5. Subsequent `tools/call` requests are proxied to the downstream subprocess
-6. On `DELETE /mcp` or session close, `Manager.RemoveSession()` calls `ClientSession.Close()` which triggers `CommandTransport.Close()` following the MCP spec teardown: close stdin, wait, SIGTERM, wait, SIGKILL
+6. On `DELETE /mcp` or session cleanup, Vision removes the upstream session. Stateful cleanup terminates that session's subprocess; shared-mode cleanup decrements the shared refcount and leaves the downstream subprocess healthy for other sessions.
+
+### Shared-Mode Disconnect Tracking
+
+For shared-mode servers, disconnect detection tracks session-bound GET/SSE receive streams. When the last tracked stream closes and no reconnect arrives before `disconnect_grace_period`, Vision removes the upstream session and frees admission capacity.
+
+Normal POST completion does **not** start disconnect grace. In Go, an incoming request context is cancelled when `ServeHTTP` returns, so treating POST completion as disconnect would create false `session.disconnect_detected` / `session.disconnect_cancelled` churn while the logical MCP session is still alive.
 
 ### Notification Relay
 
