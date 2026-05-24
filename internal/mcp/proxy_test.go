@@ -186,7 +186,7 @@ func (s *testSelector) Rebind(oldKey, newKey string) {
 	s.rebound = append(s.rebound, [2]string{oldKey, newKey})
 }
 func (s *testSelector) ReportSpawnResult(sessionKey string, err error) {}
-func (s *testSelector) SetOnSessionRemoved(fn func(sessionID string)) {}
+func (s *testSelector) SetOnSessionRemoved(fn func(sessionID string))  {}
 func (s *testSelector) Release(upstreamSessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1754,10 +1754,10 @@ func TestNewProxyHandler_PanicsWhenSharedManagerAndSessionManagerBothSet(t *test
 	logger := testLogger(t)
 	mgr := session.NewManager("both-set", testServerConfig(), logger)
 	_ = NewProxyHandler(ProxyConfig{
-		ServerName:    "both-set",
+		ServerName:     "both-set",
 		SessionManager: mgr,
-		SharedManager: session.NewSharedSessionManager("shared", testServerConfig(), logger, 0, nil),
-		Logger:        logger,
+		SharedManager:  session.NewSharedSessionManager("shared", testServerConfig(), logger, 0, nil),
+		Logger:         logger,
 	})
 }
 
@@ -2323,6 +2323,65 @@ func TestProxyHandler_SharedModeDisconnectReap(t *testing.T) {
 		t.Fatalf("expected 0 sessions after disconnect + grace period, got %d", count)
 	}
 	t.Logf("session successfully reaped after disconnect")
+}
+
+func TestProxyHandler_SharedModePostCompletionDoesNotReap(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testServerConfig()
+
+	sm := session.NewSharedSessionManager("test-post-no-reap", cfg, logger, 0, nil)
+	defer sm.CloseAll()
+
+	handler := NewProxyHandler(ProxyConfig{
+		ServerName:            "test-post-no-reap",
+		SharedManager:         sm,
+		Logger:                logger,
+		DisconnectGracePeriod: 50 * time.Millisecond,
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test-post-no-reap","version":"1.0.0"}}}`
+	initReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(initBody))
+	initReq.Header.Set("Content-Type", "application/json")
+	initReq.Header.Set("Accept", "application/json, text/event-stream")
+
+	initResp, err := http.DefaultClient.Do(initReq)
+	if err != nil {
+		t.Fatalf("initialize failed: %v", err)
+	}
+	initResp.Body.Close()
+
+	sessionID := initResp.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("initialize response missing Mcp-Session-Id")
+	}
+
+	notifBody := `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
+	notifReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/mcp", strings.NewReader(notifBody))
+	notifReq.Header.Set("Content-Type", "application/json")
+	notifReq.Header.Set("Accept", "application/json, text/event-stream")
+	notifReq.Header.Set("Mcp-Session-Id", sessionID)
+	notifResp, err := http.DefaultClient.Do(notifReq)
+	if err != nil {
+		t.Fatalf("notifications/initialized failed: %v", err)
+	}
+	notifResp.Body.Close()
+
+	if count := sm.SessionCount(); count != 1 {
+		t.Fatalf("expected 1 session after initialized notification, got %d", count)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	if count := sm.SessionCount(); count != 1 {
+		t.Fatalf("POST completion should not reap shared session, got count %d", count)
+	}
 }
 
 // TestProxyHandler_SharedModeDisconnectDisabled verifies that when

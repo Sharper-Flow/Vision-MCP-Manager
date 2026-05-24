@@ -120,6 +120,32 @@ func TestDisconnectTracker_SkipNoSessionID(t *testing.T) {
 	}
 }
 
+func TestDisconnectTracker_PostWithSessionIDNotTracked(t *testing.T) {
+	tracker := newDisconnectTracker("test", 50*time.Millisecond, nil, nil)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	})
+	handler := tracker.Wrap(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Mcp-Session-Id", "sess-post")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+
+	tracker.mu.Lock()
+	count := len(tracker.sessions)
+	tracker.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("tracked sessions after POST completion = %d, want 0", count)
+	}
+}
+
 func TestDisconnectTracker_SkipDELETE(t *testing.T) {
 	tracker := newDisconnectTracker("test", 50*time.Millisecond, nil, nil)
 

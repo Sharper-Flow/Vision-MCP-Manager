@@ -58,27 +58,36 @@ func newDisconnectTracker(
 	return dt
 }
 
-// Wrap returns middleware that tracks HTTP connection lifecycle per session.
+// Wrap returns middleware that tracks long-lived HTTP stream lifecycle per session.
 func (dt *DisconnectTracker) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sessionID := r.Header.Get("Mcp-Session-Id")
-
-		// Skip: no session ID, DELETE method, or probe GET
-		if sessionID == "" || r.Method == http.MethodDelete || isProbeGet(r) {
+		if !shouldTrackDisconnect(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
+		sessionID := r.Header.Get("Mcp-Session-Id")
 		dt.trackRequest(sessionID)
-
-		// Watch for context cancellation (client disconnect or response sent)
-		go func() {
-			<-r.Context().Done()
-			dt.releaseConnection(sessionID)
-		}()
+		defer dt.releaseConnection(sessionID)
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// shouldTrackDisconnect reports whether a request represents a long-lived
+// client receive stream whose closure is a useful disconnect signal.
+//
+// Normal POST requests are deliberately excluded. For incoming Go HTTP
+// requests, r.Context() is cancelled when ServeHTTP returns, so tracking POSTs
+// would treat ordinary request completion as client/session disconnect.
+func shouldTrackDisconnect(r *http.Request) bool {
+	if r.Header.Get("Mcp-Session-Id") == "" {
+		return false
+	}
+	if r.Method != http.MethodGet {
+		return false
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 }
 
 // trackRequest increments the connection count for a session and cancels any
