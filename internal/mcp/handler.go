@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"sync"
 )
 
@@ -161,8 +160,7 @@ func ProbeCompatibilityMiddleware(serverName string) func(http.Handler) http.Han
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodGet && r.Header.Get("Mcp-Session-Id") == "" {
-				accept := r.Header.Get("Accept")
-				if strings.Contains(accept, "text/event-stream") {
+				if acceptsEventStream(r) {
 					w.Header().Set("Content-Type", "text/event-stream")
 					w.Header().Set("Cache-Control", "no-cache, no-transform")
 					w.Header().Set("Connection", "keep-alive")

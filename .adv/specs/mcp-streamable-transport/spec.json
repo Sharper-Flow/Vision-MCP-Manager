@@ -91,8 +91,8 @@
     },
     {
       "id": "rq-mcpstr02",
-      "title": "Enforce one subprocess per MCP session",
-      "body": "Vision MUST maintain strict 1:1 mapping between each upstream MCP session and a supervised downstream subprocess. Session teardown or timeout MUST terminate only the owning subprocess and remove the mapping.",
+      "title": "Enforce subprocess isolation per MCP session (stateful) or shared subprocess (stateless)",
+      "body": "Vision MUST maintain strict 1:1 mapping between each upstream MCP session and a supervised downstream subprocess when the server is configured with stateful: true. When the server is configured with stateful: false (default), multiple upstream sessions MAY share a single downstream subprocess managed by a SharedSessionManager. Session teardown or timeout MUST terminate only the owning subprocess (stateful) or decrement the shared refcount (stateless).",
       "priority": "must",
       "tags": [
         "sessions",
@@ -123,6 +123,21 @@
           "then": [
             "The owned subprocess is terminated gracefully then forcefully if needed",
             "The session mapping is removed and cannot be reused"
+          ]
+        },
+        {
+          "id": "rq-mcpstr02.3",
+          "title": "Concurrent clients share a single subprocess for stateless servers",
+          "given": [
+            "A server is configured with stateful: false (default)",
+            "Two clients connect concurrently to the same server port",
+            "Both establish independent MCP sessions"
+          ],
+          "when": "Both clients perform tool calls",
+          "then": [
+            "Both sessions route tool calls through the same shared downstream subprocess",
+            "The shared subprocess is alive as long as at least one upstream session is active",
+            "When the last upstream session disconnects, the shared subprocess is eligible for teardown"
           ]
         }
       ]

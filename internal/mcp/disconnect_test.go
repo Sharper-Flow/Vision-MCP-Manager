@@ -102,9 +102,9 @@ func TestDisconnectTracker_SkipNoSessionID(t *testing.T) {
 	})
 	handler := tracker.Wrap(inner)
 
-	// Request without Mcp-Session-Id
-	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
-	req.Header.Set("Content-Type", "application/json")
+	// GET/SSE request without Mcp-Session-Id
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Accept", "text/event-stream")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -117,6 +117,83 @@ func TestDisconnectTracker_SkipNoSessionID(t *testing.T) {
 	tracker.mu.Unlock()
 	if count != 0 {
 		t.Fatalf("tracked sessions = %d, want 0", count)
+	}
+}
+
+func TestDisconnectTracker_GetSSEWithSessionIDIsTracked(t *testing.T) {
+	tracker := newDisconnectTracker("test", 50*time.Millisecond, nil, nil)
+	defer tracker.Stop()
+
+	const sessionID = "sess-sse"
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := tracker.Wrap(inner)
+
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	req.Header.Set("Accept", "application/json, Text/Event-Stream; q=1")
+
+	go func() {
+		defer close(done)
+		handler.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not enter")
+	}
+
+	if got := tracker.refCount(sessionID); got != 1 {
+		t.Fatalf("refcount while SSE handler active = %d, want 1", got)
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not finish")
+	}
+
+	if got := tracker.refCount(sessionID); got != 0 {
+		t.Fatalf("refcount after SSE handler returned = %d, want 0", got)
+	}
+
+	tracker.mu.Lock()
+	ct, exists := tracker.sessions[sessionID]
+	tracker.mu.Unlock()
+	if !exists || ct.timer == nil {
+		t.Fatal("expected grace timer after tracked SSE handler returned")
+	}
+}
+
+func TestAcceptsEventStreamParsesMediaTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		accept string
+		want   bool
+	}{
+		{name: "exact", accept: "text/event-stream", want: true},
+		{name: "list with params and mixed case", accept: "application/json, Text/Event-Stream; q=1", want: true},
+		{name: "missing", accept: "application/json", want: false},
+		{name: "substring only", accept: "text/event-stream-v2", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+			req.Header.Set("Accept", tt.accept)
+			if got := acceptsEventStream(req); got != tt.want {
+				t.Fatalf("acceptsEventStream(%q) = %v, want %v", tt.accept, got, tt.want)
+			}
+		})
 	}
 }
 

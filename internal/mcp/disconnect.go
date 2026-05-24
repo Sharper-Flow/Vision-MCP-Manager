@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -87,7 +88,20 @@ func shouldTrackDisconnect(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
 	}
-	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+	return acceptsEventStream(r)
+}
+
+func acceptsEventStream(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(part))
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(mediaType, "text/event-stream") {
+			return true
+		}
+	}
+	return false
 }
 
 // trackRequest increments the connection count for a session and cancels any
@@ -228,17 +242,4 @@ func (dt *DisconnectTracker) defaultReap(sessionID string) {
 	)
 
 	ps.closeDownstream("client_disconnected")
-}
-
-// isProbeGet detects GET /mcp requests without a session ID that are
-// liveness probes (Accept: text/event-stream).
-func isProbeGet(r *http.Request) bool {
-	if r.Method != http.MethodGet {
-		return false
-	}
-	if r.Header.Get("Mcp-Session-Id") != "" {
-		return false
-	}
-	accept := r.Header.Get("Accept")
-	return strings.Contains(accept, "text/event-stream")
 }
