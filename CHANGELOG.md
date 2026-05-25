@@ -1,3 +1,9 @@
+## 2026-05-25 (v1.3.1)
+
+### Changed
+
+- enable Vision Admin MCP for project (chore)
+
 ## 2026-05-21 (v1.3.0)
 
 ### Added
