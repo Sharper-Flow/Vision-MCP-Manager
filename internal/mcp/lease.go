@@ -1,0 +1,367 @@
+package mcp
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+var (
+	ErrLeaseCapacity       = errors.New("mcp lease capacity reached")
+	ErrLeaseNotActive      = errors.New("mcp lease is not active")
+	ErrReservationNotFound = errors.New("mcp lease reservation not found")
+	ErrLeaseExists         = errors.New("mcp lease already exists")
+)
+
+// LeaseClock makes lease expiry deterministic in tests.
+type LeaseClock interface {
+	Now() time.Time
+}
+
+type realLeaseClock struct{}
+
+func (realLeaseClock) Now() time.Time { return time.Now() }
+
+type LeaseState string
+
+const (
+	LeaseStateActive           LeaseState = "active"
+	LeaseStateExpiring         LeaseState = "expiring"
+	LeaseStateCleanupUncertain LeaseState = "cleanup_uncertain"
+)
+
+// Reservation is an opaque capacity claim created before a downstream server
+// returns its session identifier.
+type Reservation struct{ token uint64 }
+
+type leaseRecord struct {
+	sessionID    string
+	safeID       string
+	state        LeaseState
+	createdAt    time.Time
+	lastActivity time.Time
+	inFlight     int
+	sseCount     int
+	reason       string
+}
+
+type LeaseSnapshotRow struct {
+	SafeID          string
+	State           LeaseState
+	Age             time.Duration
+	Idle            time.Duration
+	InFlight        int
+	SSEConnections  int
+	LifecycleReason string
+}
+
+type LeaseSnapshot struct {
+	CapacityUsed int
+	CapacityMax  int
+	Rows         []LeaseSnapshotRow
+	Omitted      int
+}
+
+// LeaseManager is the sole mutation authority for managed HTTP admission and
+// per-session lifecycle state.
+type LeaseManager struct {
+	mu           sync.Mutex
+	maxSessions  int
+	idleTimeout  time.Duration
+	clock        LeaseClock
+	nextToken    atomic.Uint64
+	reservations map[uint64]struct{}
+	leases       map[string]*leaseRecord
+}
+
+func NewLeaseManager(maxSessions int, idleTimeout time.Duration, clock LeaseClock) *LeaseManager {
+	if clock == nil {
+		clock = realLeaseClock{}
+	}
+	return &LeaseManager{
+		maxSessions:  maxSessions,
+		idleTimeout:  idleTimeout,
+		clock:        clock,
+		reservations: make(map[uint64]struct{}),
+		leases:       make(map[string]*leaseRecord),
+	}
+}
+
+func (m *LeaseManager) Reserve() (Reservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.maxSessions > 0 && len(m.reservations)+len(m.leases) >= m.maxSessions {
+		return Reservation{}, ErrLeaseCapacity
+	}
+	token := m.nextToken.Add(1)
+	m.reservations[token] = struct{}{}
+	return Reservation{token: token}, nil
+}
+
+func (m *LeaseManager) Commit(res Reservation, sessionID string) error {
+	if sessionID == "" {
+		return errors.New("mcp lease session id is empty")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.reservations[res.token]; !ok {
+		return ErrReservationNotFound
+	}
+	if _, ok := m.leases[sessionID]; ok {
+		return ErrLeaseExists
+	}
+	delete(m.reservations, res.token)
+	now := m.clock.Now()
+	m.leases[sessionID] = &leaseRecord{
+		sessionID:    sessionID,
+		safeID:       safeLeaseID(sessionID),
+		state:        LeaseStateActive,
+		createdAt:    now,
+		lastActivity: now,
+	}
+	return nil
+}
+
+func (m *LeaseManager) ReleaseReservation(res Reservation) {
+	m.mu.Lock()
+	delete(m.reservations, res.token)
+	m.mu.Unlock()
+}
+
+func (m *LeaseManager) CapacityUsed() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.reservations) + len(m.leases)
+}
+
+// BeginRequest atomically admits an active session request and returns an
+// idempotent completion guard. Only structurally classified application
+// requests refresh lastActivity.
+func (m *LeaseManager) BeginRequest(sessionID string, applicationActivity bool) (func(), error) {
+	m.mu.Lock()
+	lease := m.leases[sessionID]
+	if lease == nil || lease.state != LeaseStateActive {
+		m.mu.Unlock()
+		return nil, ErrLeaseNotActive
+	}
+	lease.inFlight++
+	if applicationActivity {
+		lease.lastActivity = m.clock.Now()
+	}
+	m.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			current := m.leases[sessionID]
+			if current != lease || current.inFlight == 0 {
+				return
+			}
+			current.inFlight--
+			if applicationActivity {
+				current.lastActivity = m.clock.Now()
+			}
+		})
+	}, nil
+}
+
+func (m *LeaseManager) BeginSSE(sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lease := m.leases[sessionID]
+	if lease == nil || lease.state != LeaseStateActive {
+		return ErrLeaseNotActive
+	}
+	lease.sseCount++
+	return nil
+}
+
+func (m *LeaseManager) EndSSE(sessionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lease := m.leases[sessionID]; lease != nil && lease.sseCount > 0 {
+		lease.sseCount--
+	}
+}
+
+func (m *LeaseManager) InFlight(sessionID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lease := m.leases[sessionID]; lease != nil {
+		return lease.inFlight
+	}
+	return 0
+}
+
+// ExpireIdle atomically transitions eligible leases to expiring. Cleanup IO
+// happens outside the manager; FinalizeClose releases capacity after proof.
+func (m *LeaseManager) ExpireIdle() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.idleTimeout <= 0 {
+		return nil
+	}
+	now := m.clock.Now()
+	var expired []string
+	for id, lease := range m.leases {
+		if lease.state != LeaseStateActive || lease.inFlight != 0 {
+			continue
+		}
+		if now.Sub(lease.lastActivity) >= m.idleTimeout {
+			lease.state = LeaseStateExpiring
+			lease.reason = "idle_timeout"
+			expired = append(expired, id)
+		}
+	}
+	sort.Strings(expired)
+	return expired
+}
+
+func (m *LeaseManager) TryBeginExpiry(sessionID, reason string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lease := m.leases[sessionID]
+	if lease == nil || lease.state != LeaseStateActive || lease.inFlight != 0 {
+		return false
+	}
+	lease.state = LeaseStateExpiring
+	lease.reason = reason
+	return true
+}
+
+func (m *LeaseManager) MarkCleanupUncertain(sessionID, reason string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lease := m.leases[sessionID]
+	if lease == nil {
+		return false
+	}
+	lease.state = LeaseStateCleanupUncertain
+	lease.reason = reason
+	return true
+}
+
+func (m *LeaseManager) FinalizeClose(sessionID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.leases[sessionID]; !ok {
+		return false
+	}
+	delete(m.leases, sessionID)
+	return true
+}
+
+func (m *LeaseManager) AggregateInFlight() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	total := 0
+	for _, lease := range m.leases {
+		total += lease.inFlight
+	}
+	return total
+}
+
+func (m *LeaseManager) Snapshot(limit int) LeaseSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.clock.Now()
+	rows := make([]LeaseSnapshotRow, 0, len(m.leases))
+	for _, lease := range m.leases {
+		rows = append(rows, LeaseSnapshotRow{
+			SafeID:          lease.safeID,
+			State:           lease.state,
+			Age:             now.Sub(lease.createdAt),
+			Idle:            now.Sub(lease.lastActivity),
+			InFlight:        lease.inFlight,
+			SSEConnections:  lease.sseCount,
+			LifecycleReason: lease.reason,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].SafeID < rows[j].SafeID })
+	omitted := 0
+	if limit > 0 && len(rows) > limit {
+		omitted = len(rows) - limit
+		rows = rows[:limit]
+	}
+	return LeaseSnapshot{
+		CapacityUsed: len(m.reservations) + len(m.leases),
+		CapacityMax:  m.maxSessions,
+		Rows:         rows,
+		Omitted:      omitted,
+	}
+}
+
+func safeLeaseID(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return hex.EncodeToString(sum[:6])
+}
+
+// ClassifyApplicationActivity returns true only when a JSON-RPC envelope
+// contains a client request that is not protocol-maintenance ping traffic.
+func ClassifyApplicationActivity(body []byte) (bool, error) {
+	if len(body) == 0 {
+		return false, errors.New("empty JSON-RPC envelope")
+	}
+	var raw json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return false, fmt.Errorf("decode JSON-RPC envelope: %w", err)
+	}
+	if len(raw) == 0 {
+		return false, errors.New("empty JSON-RPC envelope")
+	}
+	if raw[0] == '[' {
+		var batch []json.RawMessage
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			return false, fmt.Errorf("decode JSON-RPC batch: %w", err)
+		}
+		if len(batch) == 0 {
+			return false, errors.New("empty JSON-RPC batch")
+		}
+		active := false
+		for _, member := range batch {
+			memberActive, err := classifyJSONRPCMessage(member)
+			if err != nil {
+				return false, err
+			}
+			active = active || memberActive
+		}
+		return active, nil
+	}
+	return classifyJSONRPCMessage(raw)
+}
+
+func classifyJSONRPCMessage(raw json.RawMessage) (bool, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return false, fmt.Errorf("decode JSON-RPC message: %w", err)
+	}
+	if len(fields) == 0 {
+		return false, errors.New("empty JSON-RPC message")
+	}
+	methodRaw, hasMethod := fields["method"]
+	_, hasID := fields["id"]
+	_, hasResult := fields["result"]
+	_, hasError := fields["error"]
+	if hasMethod {
+		var method string
+		if err := json.Unmarshal(methodRaw, &method); err != nil || method == "" {
+			return false, errors.New("invalid JSON-RPC method")
+		}
+		if !hasID { // notification
+			return false, nil
+		}
+		return method != "ping", nil
+	}
+	if hasID && (hasResult || hasError) { // response
+		return false, nil
+	}
+	return false, errors.New("unrecognized JSON-RPC message")
+}
