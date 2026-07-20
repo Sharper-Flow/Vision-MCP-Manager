@@ -2,11 +2,44 @@
 
 ## Window
 
-- Status: running
+- Status: closed — disposition recorded 2026-07-20 (accept-accumulated-evidence)
 - Started: `2026-07-20T01:11:20Z` (`2026-07-19T21:11:20-04:00`)
-- Earliest completion: `2026-07-22T01:11:20Z`
+- Original earliest completion: `2026-07-22T01:11:20Z`
 - Environment: shared development host
 - Change: `fixPlaywrightSessionIsolation`
+
+## Disposition (2026-07-20)
+
+The original 48-hour window was interrupted before completion when the operator
+deployed the reconciled bridge binary and restarted `vision.service` (violating
+success signal #3 and changing the baseline binary). The window is therefore
+not clean and cannot be read at its original completion time.
+
+Decision (user-approved): accept the canary as satisfied by accumulated
+equivalent-code evidence rather than restart a fresh 48-hour soak, because:
+
+- The reconciled bridge binary `v1.3.1-18-g6c55628` contains the identical
+  managed-native-HTTP implementation as the prior canary baseline
+  `v1.3.1-7-g2f8c0c4-dirty` (`2f8c0c4`); the only added code is the disjoint
+  `alignVisionCodeMode` work, which does not touch the managed-http/Playwright
+  path (verified: `git diff 3ecd6fd..alignVisionCodeMode -- opencode-plugin/`
+  and admin/catalog/config changes do not intersect the gateway/lease/supervisor
+  files).
+- Correctness is independently proven by the pinned real Playwright integration
+  test `tr_mrsifq9i_9e216350` (AC1-AC9: two-client BrowserContext isolation over
+  10 alternating rounds, six-session capacity/no-eviction, 30-minute
+  application-idle expiry, in-flight boundary, forced process kill + readiness-
+  gated restart within 30s, stale-ID pre-dispatch 404, bounded secret-safe
+  lifecycle diagnostics), plus race repeat `tr_mrsighk4_8b104675`.
+- Live smoke on the bridge binary confirms `state=running`,
+  `transport=managed-http` semantics via `session_lifecycle` present in
+  `vision_list`, backend ready, external endpoint unchanged at
+  `http://127.0.0.1:6287/mcp`.
+
+Rollback path remains available and tested (`tr_mrsirgqc_c50f2893`, navigable
+browser in 1.921s). No cross-session leakage, capacity false-denial, or restart
+loop was observed during the ~20h of pre-interruption soak under equivalent
+code.
 
 ## Deployment Baseline
 
