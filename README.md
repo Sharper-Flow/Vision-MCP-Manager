@@ -355,6 +355,7 @@ vision init --servers time,context7   # Specific servers only
 - [Configuration Reference](docs/CONFIGURATION.md) — Complete server options
 - [AI Agents Guide](docs/agents.md) — Deep dive into agent integration
 - [MCP Transports](docs/MCP_TRANSPORTS.md) — Streamable HTTP proxy and per-session subprocess model
+- [MCP 2026-07-28 Alignment Decision](docs/decisions/0001-mcp-2026-07-28-alignment.md) — Stateless transport migration and isolation stance
 - [Development Guide](DEVELOPMENT.md) — Building and contributing
 
 ## Roadmap
@@ -362,6 +363,7 @@ vision init --servers time,context7   # Specific servers only
 - [x] Structured audit logging for session lifecycle and security events
 - [x] Per-session admission controls (max concurrent sessions, idle timeout, TTL)
 - [x] Automatic downstream respawn on idle reap or crash
+- [x] Document MCP 2026-07-28 alignment and migration trigger
 - [ ] Usage analytics dashboard
 - [ ] Multi-machine sync
 
