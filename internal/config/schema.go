@@ -67,7 +67,8 @@ type ServerConfig struct {
 	// Port is the HTTP port Vision exposes this server on (6276-6300).
 	Port int `yaml:"port" env:"PORT"`
 
-	// Transport is "stdio", "http", or "sse". Inferred if not set.
+	// Transport is "stdio", "managed-http", "http", or "sse". Inferred if not set,
+	// except managed-http which must be explicit because it owns command + URL.
 	Transport TransportType `yaml:"transport,omitempty" env:"TRANSPORT"`
 
 	// Command is the executable to run (for stdio transport).

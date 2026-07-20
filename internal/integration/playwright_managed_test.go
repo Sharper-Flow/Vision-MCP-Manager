@@ -187,6 +187,66 @@ servers:
 	t.Logf("verified @playwright/mcp=%s sessions_closed=%d restart_count=%d", realPlaywrightMCPVersion, len(final.SessionLifecycle.Closed), final.RestartCount)
 }
 
+func TestPlaywrightStatefulStdioRollback(t *testing.T) {
+	if os.Getenv("VISION_PLAYWRIGHT_REAL_TEST") != "1" {
+		t.Skip("set VISION_PLAYWRIGHT_REAL_TEST=1 for pinned rollback rehearsal")
+	}
+	started := time.Now()
+	npx, err := exec.LookPath("npx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalPort := freeVisionPort(t)
+	adminPort := freeTCPPort(t)
+	pageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "<!doctype html><body>rollback-ready</body>")
+	}))
+	defer pageServer.Close()
+
+	configPath := filepath.Join(t.TempDir(), "rollback-servers.yaml")
+	configBody := fmt.Sprintf(`
+supervision:
+  shutdown_timeout: 5s
+servers:
+  playwright-real:
+    port: %d
+    transport: stdio
+    command: %q
+    args: ["-y", "@playwright/mcp@%s", "--browser", "chromium", "--headless", "--isolated"]
+    stateful: true
+    max_sessions: 6
+    session_timeout: 30m
+    autostart: true
+`, externalPort, npx, realPlaywrightMCPVersion)
+	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := daemon.New(daemon.Config{ConfigPath: configPath, ManagementPort: adminPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Stop(10 * time.Second) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d/mcp", externalPort)
+	_, session := connectPlaywright(t, ctx, endpoint, "rollback-rehearsal")
+	callPlaywright(t, ctx, session, "browser_navigate", map[string]any{"url": pageServer.URL})
+	result := callPlaywright(t, ctx, session, "browser_snapshot", map[string]any{})
+	if !strings.Contains(result, "rollback-ready") {
+		t.Fatalf("rollback browser result missing marker: %s", result)
+	}
+	session.Close()
+	if elapsed := time.Since(started); elapsed >= 10*time.Minute {
+		t.Fatalf("rollback rehearsal exceeded 10 minutes: %s", elapsed)
+	} else {
+		t.Logf("stateful-stdio rollback rehearsal ready in %s", elapsed.Round(time.Millisecond))
+	}
+}
+
 type lifecycleDetail struct {
 	RestartCount     int `json:"restart_count"`
 	SessionLifecycle *struct {
@@ -292,7 +352,7 @@ func readLifecycle(url string) (lifecycleDetail, error) {
 
 func freeVisionPort(t *testing.T) int {
 	t.Helper()
-	for port := 6276; port <= 6300; port++ {
+	for port := 6276; port <= 6325; port++ {
 		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue
@@ -300,7 +360,7 @@ func freeVisionPort(t *testing.T) int {
 		_ = listener.Close()
 		return port
 	}
-	t.Fatal("no free Vision MCP port in 6276-6300")
+	t.Fatal("no free Vision MCP port in 6276-6325")
 	return 0
 }
 

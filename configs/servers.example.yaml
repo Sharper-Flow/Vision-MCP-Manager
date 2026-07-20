@@ -62,6 +62,34 @@ servers:
   #   shared_read_only_tools: ["kagi_search_fetch", "kagi_summarizer"]
 
   #############################################################################
+  # MANAGED NATIVE HTTP (Playwright system default)
+  # Vision owns one loopback backend process and preserves native MCP sessions.
+  #############################################################################
+
+  # playwright:
+  #   port: 6287                         # Stable external Vision endpoint
+  #   transport: managed-http
+  #   command: npx
+  #   args:
+  #     - "-y"
+  #     - "@playwright/mcp@0.0.77"
+  #     - "--browser"
+  #     - "chromium"                    # Playwright-managed Chrome/headless shell
+  #     - "--headless"
+  #     - "--isolated"                  # One BrowserContext per MCP session
+  #     - "--host"
+  #     - "127.0.0.1"
+  #     - "--allowed-hosts"
+  #     - "127.0.0.1:16287"             # Exact host:port required
+  #     - "--port"
+  #     - "16287"
+  #   url: "http://127.0.0.1:16287/mcp" # Internal endpoint; never advertise
+  #   autostart: true
+  #   restart_policy: on-failure
+  #   max_sessions: 6
+  #   session_timeout: 30m               # Application activity, not SSE
+
+  #############################################################################
   # HTTP SERVERS (Native Streamable HTTP)
   # Vision proxies to these - no subprocess spawning
   #############################################################################
@@ -112,9 +140,8 @@ servers:
   # Vision routes each session to the least-loaded healthy slot.
   #############################################################################
 
-  # Example: 4-slot Playwright pool for concurrent browser automation
-  # Creates playwright-slot-{1..4} on ports 6284-6287.
-  # Agents connect to the virtual port 6283 — Vision handles routing.
+  # Rollback/alternative: 4-slot stateful-stdio Playwright pool
+  # Prefer managed-http above for the normal system default.
   #
   # slot_groups:
   #   playwright:
@@ -124,7 +151,7 @@ servers:
   #     group_port: 6283                # Virtual endpoint agents connect to
   #     defaults:
   #       command: npx
-  #       args: ["-y", "@anthropic/mcp-playwright", "--browser", "chromium"]
+  #       args: ["-y", "@playwright/mcp@0.0.77", "--browser", "chromium", "--headless", "--isolated"]
   #       autostart: true
   #       stateful: true               # Each slot runs its own subprocess
   #       max_sessions: 1              # One session per slot (one browser context)

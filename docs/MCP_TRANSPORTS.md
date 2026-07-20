@@ -1,6 +1,6 @@
 # MCP Transport Architecture
 
-This document describes how Vision bridges MCP transports: accepting Streamable HTTP from upstream clients and managing stdio subprocesses downstream, with strict per-session subprocess isolation.
+This document describes how Vision exposes Streamable HTTP to clients and owns three downstream models: per-session stdio, shared stdio, and supervised managed native HTTP.
 
 ## MCP Transport Types
 
@@ -40,7 +40,7 @@ The MCP specification defines two standard transports:
 
 ## Vision's Architecture
 
-Vision bridges these two transports: it exposes **Streamable HTTP** to upstream clients (AI agents) and manages **stdio subprocesses** downstream. Stateful servers use one isolated downstream subprocess per upstream MCP session. Shared-mode servers keep one downstream subprocess and refcount multiple upstream sessions.
+Vision exposes **Streamable HTTP** to upstream clients (AI agents). Most servers use stdio downstream. `managed-http` servers instead retain native Streamable HTTP and are supervised by Vision.
 
 ```
                     AI Agent (e.g. Claude Code)
@@ -68,6 +68,27 @@ Vision bridges these two transports: it exposes **Streamable HTTP** to upstream 
   |    proxy.NewProxyHandler  (wires it all together)        |
   +----------------------------------------------------------+
 ```
+
+### Managed Native HTTP Model
+
+`transport: managed-http` is for a loopback native HTTP MCP server whose process and public gateway are both owned by Vision. Playwright is the canonical use case:
+
+```text
+OpenCode -> Vision :6287/mcp -> security -> reservation/lease gateway
+         -> fixed 127.0.0.1:<internal-port>/mcp -> @playwright/mcp
+```
+
+- Vision launches and restarts the configured command through Suture.
+- The internal URL must be `http`, loopback-only, and exactly `/mcp`.
+- Readiness is an at-most-once initialize/delete probe, not PID existence.
+- Backend-generated `Mcp-Session-Id` values pass through unchanged. Vision stores raw IDs only internally and exposes bounded hashes.
+- One opaque reservation owns capacity during initialize; a lease owns it after a valid response ID.
+- Only structurally valid non-`ping` JSON-RPC requests refresh application activity. Notifications, responses, GET/SSE reconnects, and keepalives do not.
+- Expiry waits for session in-flight count zero. Cleanup sends one DELETE; success or `404` proves disposal.
+- Unknown, expired, and process-lost IDs receive pre-dispatch `404`.
+- Ambiguous initialize, application, or DELETE results are never replayed. Vision drains admitted application requests, recycles the shared backend process, invalidates old IDs, and probes the replacement before reopening.
+
+Playwright uses one shared browser process with one BrowserContext per MCP session. The required `--isolated` option makes profiles ephemeral; do not pass `--shared-browser-context`.
 
 ### Per-Session and Shared Subprocess Models
 
@@ -106,26 +127,39 @@ Notification handlers are set via `ClientOptions` at `mcp.NewClient()` time. The
 
 ### Downstream Respawn
 
-When a downstream subprocess becomes unavailable — reaped by idle timeout, crashed, or otherwise closed — the proxy transparently respawns a new subprocess instead of returning `ErrDownstreamUnavailable` to the upstream client.
+For stdio proxy sessions, Vision may replace an unavailable downstream **only before the application operation was dispatched**. A closed subprocess detected before dispatch can be recreated and then receive the operation once.
 
-**Respawn triggers:**
-- Tool call (`tools/call`) hits a closed downstream
-- Tool list refresh (`tools/list_changed` notification relay) hits a closed downstream
+Vision does not replay a tool call after uncertain downstream execution. Stale/unknown upstream session IDs return pre-dispatch `404`; managed native HTTP transport uses backend drain/recycle rather than synthetic request replay. This distinction prevents duplicate browser mutations.
 
-**Respawn flow:**
-1. Handler detects `downstreamClosed == true` or `downstream == nil`
-2. Calls `proxySession.respawnDownstream()` which:
-   - Acquires `respawnMu` to serialize concurrent attempts (only one subprocess spawns)
-   - Double-checks state (another goroutine may have already respawned)
-   - Spawns a new subprocess via `session.Manager.SpawnSession()`
-   - Re-discovers tools via `ListTools` and re-registers proxy handlers
-   - Atomically swaps the downstream pointer and resets the closed flag
-3. If respawn succeeds, the original operation proceeds against the new downstream
-4. If respawn fails, the error propagates as before
+### Managed Playwright Server
 
-**Concurrency:** `respawnMu` ensures only one goroutine spawns a subprocess. Other concurrent callers block, then see the already-respawned downstream via double-check.
+```yaml
+servers:
+  playwright:
+    port: 6287
+    transport: managed-http
+    command: npx
+    args:
+      - "-y"
+      - "@playwright/mcp@0.0.77"
+      - "--browser"
+      - "chromium"
+      - "--headless"
+      - "--isolated"
+      - "--host"
+      - "127.0.0.1"
+      - "--allowed-hosts"
+      - "127.0.0.1:16287"
+      - "--port"
+      - "16287"
+    url: "http://127.0.0.1:16287/mcp"
+    autostart: true
+    restart_policy: on-failure
+    max_sessions: 6
+    session_timeout: 30m
+```
 
-**Overhead:** ~20ms for subprocess spawn + initialize handshake (Node.js servers). Transparent to the upstream client.
+`--browser chromium` selects Playwright-managed Chrome for Testing; headless mode uses the matching headless shell. The default MCP browser channel is branded Chrome and fails when `/opt/google/chrome/chrome` is absent. Prefer channel selection over hardcoded `--executable-path`.
 
 ### Structured Fallback Suggestions
 
@@ -200,7 +234,7 @@ Vision:
 
 ### Subprocess Lifecycle Ownership
 
-Vision has **two independent subprocess lifecycles** for the same configured server. The design branches by transport type to avoid unnecessary accumulation:
+Vision branches lifecycle ownership by transport type to avoid duplicate or orphaned processes:
 
 **stdio transport:**
 - `registry.Start()` skips the supervisor — no daemon-scoped subprocess is created
@@ -209,10 +243,17 @@ Vision has **two independent subprocess lifecycles** for the same configured ser
 - Subprocesses are spawned **lazily** on first HTTP session connect, not at daemon startup
 - Subprocesses are cleaned up by the session reaper (idle timeout / TTL) or on session close
 
+**managed-http transport:**
+- `registry.Start()` registers one daemon-scoped native HTTP child with the supervisor.
+- A lifecycle generation monitor invalidates all old leases on process loss.
+- The public listener remains on the configured Vision port while the backend binds only its configured loopback URL.
+- Requests are rejected until initialize/delete readiness succeeds.
+- `LeaseManager` owns application-idle expiry, capacity, in-flight guards, and bounded diagnostics.
+
 **HTTP/SSE transport:**
-- `registry.Start()` registers the server with the supervisor
-- The supervisor owns the subprocess lifecycle, with automatic restart on crash
-- `session.Manager` forwards requests to the existing server process (no per-session subprocess)
+- The configured URL identifies an externally owned service; Vision does not launch its command.
+- Registry/supervisor state represents the proxy service, not a child process.
+- Requests forward to the configured existing server endpoint.
 
 This distinction matters for process accounting: stdio servers report `PID=0` in registry status because no daemon-scoped process exists. This is **correct and expected** — it means "the proxy endpoint is active, but subprocess lifecycle is managed per-session by the session manager."
 
@@ -223,6 +264,9 @@ When `transport` is not specified, Vision infers it from the config:
 | Config Has | Inferred Transport |
 |------------|-------------------|
 | `command` | `stdio` |
+| explicit `transport: managed-http` plus `command` and loopback `url` | `managed-http` |
+| URL ending in `/mcp` | `http` |
+| other URL | `sse` |
 
 > **Current support:** Vision already supports HTTP and SSE proxy transports for remote/native MCP servers. Use `transport: http` or `transport: sse` with `url:` when you intentionally want Vision in front of an upstream MCP endpoint.
 
@@ -232,12 +276,13 @@ When `transport` is not specified, Vision infers it from the config:
 |---------|---------------|
 | `internal/server` | `Registry` — server registration; `Start()`/`Stop()` branch by transport type to skip supervisor for stdio servers; `ManagedServer` — per-server state |
 | `internal/session` | `Manager` — per-session subprocess lifecycle (spawn, track, teardown), reaper |
-| `internal/mcp` | `NewProxyHandler` — creates `StreamableHTTPHandler` with per-session proxy; `PortManager` — manages HTTP listeners per server |
+| `internal/mcp` | `NewProxyHandler` for stdio; `ManagedHTTPGateway` for native HTTP; lease/classification/security middleware; per-port listeners |
 | `internal/admin` | Admin MCP server on port 6275 with `vision_*` management tools |
 | `internal/daemon` | Orchestrates config, registry, supervisor, and proxy setup |
-| `internal/supervisor` | Suture-based process supervisor for non-stdio transports (HTTP/SSE); not used for stdio servers |
+| `internal/supervisor` | Suture process ownership and backend drain/readiness coordination for managed/native transports |
 
 ## References
 
+- [ADR 0001: Managed Native HTTP for Playwright](adr/0001-managed-native-http-playwright.md)
 - [MCP Spec: Transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 - [Go SDK: mcp package](https://pkg.go.dev/github.com/modelcontextprotocol/go-sdk/mcp)

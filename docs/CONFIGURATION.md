@@ -109,16 +109,18 @@ supervision:
 
 ### Transport Types
 
-Vision uses **Streamable HTTP** as the upstream transport for all servers. Downstream, stdio subprocesses are managed with per-session isolation.
+Vision uses **Streamable HTTP** as the upstream transport for all servers.
 
 | Transport | When to Use | Configuration |
 |-----------|-------------|---------------|
-| `stdio` | Most MCP servers (npx, uvx, binaries) | Set `command` and optional `args` |
+| `stdio` | Most command-based MCP servers | Set `command` and optional `args`; choose shared or `stateful` mode |
+| `managed-http` | Vision-owned native HTTP process requiring lifecycle/admission control | Set explicit transport, `command`, and exact loopback `/mcp` `url` |
+| `http` | Externally owned native Streamable HTTP server | Set `url` ending in `/mcp` |
+| `sse` | Externally owned legacy SSE server | Set legacy URL |
 
-Transport is auto-detected:
-- Has `command` → `stdio` (exposed as Streamable HTTP on the configured port)
+Transport is auto-detected for ordinary servers: `command` implies `stdio`, a URL ending in `/mcp` implies `http`, and another URL implies legacy `sse`. `managed-http` is always explicit because it intentionally owns both a command and URL.
 
-> **Note:** Each client session spawns an isolated subprocess. There is no shared state between sessions.
+> **Note:** `stateful: true` gives each stdio client an isolated subprocess. Shared stdio is the default for ordinary stateless tools.
 
 ### Example Configurations
 
@@ -150,6 +152,54 @@ servers:
 >
 > Environment variable expansion (`${CONTEXT7_API_KEY}`) is supported but not recommended—keys may fail to resolve depending on how the daemon is launched.
 
+#### Managed Playwright (system default)
+
+Use one Vision-supervised native HTTP process with six independent BrowserContexts:
+
+```yaml
+servers:
+  playwright:
+    port: 6287
+    transport: managed-http
+    command: npx
+    args:
+      - "-y"
+      - "@playwright/mcp@0.0.77"
+      - "--browser"
+      - "chromium"
+      - "--headless"
+      - "--isolated"
+      - "--host"
+      - "127.0.0.1"
+      - "--allowed-hosts"
+      - "127.0.0.1:16287"
+      - "--port"
+      - "16287"
+    url: "http://127.0.0.1:16287/mcp"
+    autostart: true
+    restart_policy: on-failure
+    max_sessions: 6
+    session_timeout: 30m
+```
+
+Rules:
+
+- Keep external port `6287`; OpenCode remains pointed at `http://127.0.0.1:6287/mcp`.
+- Internal port `16287` is loopback-only and must match URL, `--port`, and exact `--allowed-hosts` host:port.
+- `--browser chromium` maps to Playwright-managed Chrome for Testing. With `--headless`, Playwright selects its matching headless shell. Do not rely on branded Chrome at `/opt/google/chrome/chrome`, and do not hardcode `--executable-path` unless version-managed channel selection is impossible.
+- `--isolated` keeps profiles ephemeral and creates a separate BrowserContext for every native HTTP session. Never add `--shared-browser-context`.
+- Capacity is six. Idle means 30 minutes without application requests; SSE reconnects and keepalives do not refresh it.
+
+After editing:
+
+```bash
+vision config validate
+vision daemon reload
+vision status
+```
+
+The admin `vision_list` result and `GET /v1/servers/playwright` include `session_lifecycle`: backend state, capacity, up to 100 active rows, up to 1,000 closed rows, omitted counts, safe ID, age, application idle, in-flight, SSE count, and lifecycle reason. Raw MCP session IDs are never exposed.
+
 #### Native HTTP server (proxy mode)
 
 ```yaml
@@ -177,9 +227,11 @@ servers:
 
 ### Slot Groups
 
+Slot groups remain supported for process-per-session servers. For Playwright they are now the **stateful-stdio rollback architecture**, not the default: managed native HTTP provides per-client BrowserContexts inside one supervised browser process with lower process overhead and application-activity leases.
+
 Slot groups let you define a pool of identical MCP servers behind a single virtual endpoint. Vision transparently routes each incoming session to the least-loaded healthy slot — agents connect to one port and never know how many backing processes exist.
 
-**When to use:** Servers that need process-per-session isolation but can't share a single process across concurrent clients. The canonical example is Playwright MCP, where each slot holds its own `BrowserContext` and browser page state.
+**When to use:** Servers that require process-per-session isolation and cannot provide safe native HTTP session isolation. For Playwright this is a rollback option; managed native HTTP is the normal default.
 
 #### How it works
 
@@ -236,9 +288,11 @@ slot_groups:
       command: npx
       args:
         - "-y"
-        - "@anthropic/mcp-playwright"
+        - "@playwright/mcp@0.0.77"
         - "--browser"
         - "chromium"
+        - "--headless"
+        - "--isolated"
       autostart: true
       stateful: true
       max_sessions: 1
@@ -257,6 +311,58 @@ In the OpenCode client config, point Playwright at the virtual group port:
     }
   }
 }
+```
+
+#### Migration: Playwright stdio or slot group to managed HTTP
+
+1. Preserve the existing external `playwright` port (`6287`).
+2. Select an unused loopback internal port, conventionally `16287`.
+3. Replace the Playwright entry with the canonical `managed-http` configuration above.
+4. Remove the old Playwright slot-group entry only after confirming no unrelated client uses its virtual or slot ports.
+5. Run the pinned real verification before deployment:
+
+   ```bash
+   VISION_PLAYWRIGHT_REAL_TEST=1 go test -race ./internal/integration \
+     -run '^TestManagedPlaywrightNativeHTTP$' -count=1
+   ```
+
+6. Run `vision config validate`, reload Vision, and confirm backend state `ready` before browser work.
+7. Observe lifecycle/admission/restart diagnostics during the 48-hour canary.
+
+No OpenCode source, SDK, wrapper, dependency, or MCP endpoint change is required.
+
+#### Rollback: managed HTTP to isolated stateful stdio
+
+Target: restore service on port `6287` in under 10 minutes.
+
+The pinned isolated rehearsal `TestPlaywrightStatefulStdioRollback` reached a navigable browser through the rollback path in **1.921 seconds** on the target host.
+
+```yaml
+servers:
+  playwright:
+    port: 6287
+    transport: stdio
+    command: npx
+    args: ["-y", "@playwright/mcp@0.0.77", "--browser", "chromium", "--headless", "--isolated"]
+    stateful: true
+    max_sessions: 6
+    session_timeout: 30m
+    autostart: true
+```
+
+1. Restore the isolated stateful-stdio entry above (or the pre-change backup).
+2. Run `vision config validate`.
+3. Run `vision daemon reload`.
+4. Confirm `vision status` and initialize one Playwright session through `http://127.0.0.1:6287/mcp`.
+5. Retain the failed managed configuration and diagnostics for investigation.
+
+Do not roll back to shared stdio, `--shared-browser-context`, profile/lock deletion, or periodic restarts.
+
+Rehearse independently with:
+
+```bash
+VISION_PLAYWRIGHT_REAL_TEST=1 go test ./internal/integration \
+  -run '^TestPlaywrightStatefulStdioRollback$' -count=1 -v
 ```
 
 #### Routing semantics
