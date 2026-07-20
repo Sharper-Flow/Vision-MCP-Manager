@@ -195,7 +195,7 @@ After editing:
 ```bash
 vision config validate
 vision daemon reload
-vision status
+vision daemon status
 ```
 
 The admin `vision_list` result and `GET /v1/servers/playwright` include `session_lifecycle`: backend state, capacity, up to 100 active rows, up to 1,000 closed rows, omitted counts, safe ID, age, application idle, in-flight, SSE count, and lifecycle reason. Raw MCP session IDs are never exposed.
@@ -353,7 +353,7 @@ servers:
 1. Restore the isolated stateful-stdio entry above (or the pre-change backup).
 2. Run `vision config validate`.
 3. Run `vision daemon reload`.
-4. Confirm `vision status` and initialize one Playwright session through `http://127.0.0.1:6287/mcp`.
+4. Confirm `vision daemon status` and initialize one Playwright session through `http://127.0.0.1:6287/mcp`.
 5. Retain the failed managed configuration and diagnostics for investigation.
 
 Do not roll back to shared stdio, `--shared-browser-context`, profile/lock deletion, or periodic restarts.

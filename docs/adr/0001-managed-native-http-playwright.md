@@ -81,6 +81,6 @@ Rollback uses Vision's existing stateful stdio model, not shared stdio:
 2. Keep external port `6287`; OpenCode configuration remains unchanged.
 3. Run `vision config validate`.
 4. Run `vision daemon reload`.
-5. Confirm `vision status` and one isolated Playwright session.
+5. Confirm `vision daemon status` and one isolated Playwright session.
 
 Rollback target: under 10 minutes. The pinned stateful-stdio rehearsal reached a navigable real browser in 1.921 seconds (`TestPlaywrightStatefulStdioRollback`). Never roll back to shared stdio, shared browser context, profile/lock deletion, or periodic restart cleanup.

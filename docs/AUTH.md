@@ -77,7 +77,7 @@ If you expose Vision to a network (not recommended without additional hardening)
 
 ### Status warning: "No bearer_token configured"
 
-Run `vision status` — if you see:
+Run `vision daemon status` — if you see:
 
 ```
 ⚠ No bearer_token configured — see docs/AUTH.md for secure setup
