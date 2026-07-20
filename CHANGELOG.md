@@ -1,3 +1,17 @@
+## 2026-07-20 (v1.3.3)
+
+### Changed
+
+- checkpoint tk-ef3c415e946e (chore: adv)
+- recover uncommitted execution artifacts (doc command fixes + canary log) (chore: adv)
+- checkpoint tk-9a9f7a3c97f7 (chore: adv)
+- checkpoint tk-bdee41e3a1dc (chore: adv)
+- checkpoint tk-843acba2614a (chore: adv)
+- checkpoint tk-aa51a2ac11e1 (chore: adv)
+- checkpoint tk-1b69bde98992 (chore: adv)
+- checkpoint tk-bdb9cacc8c32 (chore: adv)
+- checkpoint tk-88088081a3ba (chore: adv)
+
 ## 2026-07-20 (v1.3.2)
 
 ### Changed
