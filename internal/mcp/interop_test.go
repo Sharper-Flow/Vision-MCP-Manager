@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -266,22 +267,18 @@ func TestInterop_InitializeAtCapacity_Returns429ClearError(t *testing.T) {
 	}
 }
 
-// --- Test: Unknown Session ID triggers recovery (not 404) ---
+// --- Test: Unknown Session ID returns 404 before dispatch ---
 
-func TestInterop_UnknownSessionID_TriggersRecovery(t *testing.T) {
+func TestInterop_UnknownSessionID_Returns404(t *testing.T) {
 	ts, _ := setupInteropProxy(t)
 
-	// Send a tools/list with a completely fabricated session ID.
-	// With stale session recovery, this should trigger transparent recovery:
-	// the handler creates a new session and forwards the request.
 	body := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`
 	resp := jsonRPCRequest(t, ts.URL, "nonexistent-session-id-12345", body)
 	defer resp.Body.Close()
 
-	// Recovery should succeed — the handler creates a new session transparently.
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusNotFound {
 		respBody, _ := io.ReadAll(resp.Body)
-		t.Errorf("expected 200 after stale session recovery, got %d: %s", resp.StatusCode, respBody)
+		t.Errorf("expected 404 for unknown session before dispatch, got %d: %s", resp.StatusCode, respBody)
 	}
 }
 
@@ -644,11 +641,11 @@ func TestInterop_WrongHTTPMethod(t *testing.T) {
 	}
 }
 
-// --- Test: Stale session recovery ---
+// --- Test: Stale sessions are rejected without replay ---
 
 // setupInteropProxyPair creates two independent proxy handlers that simulate
 // a daemon restart. The first handler establishes sessions; the second handler
-// starts fresh (no sessions) but should recover stale session IDs from the first.
+// starts fresh and must reject stale IDs so the client owns reinitialization.
 func setupInteropProxyPair(t *testing.T) (ts1URL string, cleanup1 func(), ts2 *httptest.Server) {
 	t.Helper()
 	skipIfNoNode(t)
@@ -701,15 +698,10 @@ func setupInteropProxyPair(t *testing.T) (ts1URL string, cleanup1 func(), ts2 *h
 	}, server2
 }
 
-func TestInterop_StaleSessionRecovery(t *testing.T) {
-	// Simulate daemon restart: get session from handler 1, then use it on handler 2.
+func TestInterop_StaleSession_Returns404(t *testing.T) {
 	ts1URL, cleanup1, ts2 := setupInteropProxyPair(t)
 
-	// Establish session on handler 1
 	sessionID := initializeSession(t, ts1URL)
-	t.Logf("session from handler 1: %s", sessionID)
-
-	// Verify session works on handler 1
 	body := `{"jsonrpc":"2.0","id":10,"method":"tools/list","params":{}}`
 	resp := jsonRPCRequest(t, ts1URL, sessionID, body)
 	if resp.StatusCode != http.StatusOK {
@@ -717,77 +709,47 @@ func TestInterop_StaleSessionRecovery(t *testing.T) {
 		t.Fatalf("tools/list on handler 1 failed: %d: %s", resp.StatusCode, respBody)
 	}
 	resp.Body.Close()
-
-	// "Restart" daemon — close handler 1
 	cleanup1()
 
-	// Use stale session ID on handler 2 — should trigger recovery
-	body2 := `{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}}`
-	resp2 := jsonRPCRequest(t, ts2.URL, sessionID, body2)
+	resp2 := jsonRPCRequest(t, ts2.URL, sessionID, `{"jsonrpc":"2.0","id":11,"method":"tools/list","params":{}}`)
 	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusOK {
+	if resp2.StatusCode != http.StatusNotFound {
 		respBody, _ := io.ReadAll(resp2.Body)
-		t.Fatalf("expected 200 after stale session recovery, got %d: %s", resp2.StatusCode, respBody)
+		t.Fatalf("expected 404 for stale session, got %d: %s", resp2.StatusCode, respBody)
 	}
-
-	// The response should contain tools (echo tool from the echo server)
-	respBody, _ := io.ReadAll(resp2.Body)
-	t.Logf("recovered session response: %s", string(respBody))
 }
 
-func TestInterop_StaleSessionRecovery_ToolCall(t *testing.T) {
-	// Verify that tool calls work after stale session recovery (not just tools/list).
+func TestInterop_StaleSession_ToolCallNotReplayed(t *testing.T) {
 	ts1URL, cleanup1, ts2 := setupInteropProxyPair(t)
-
 	sessionID := initializeSession(t, ts1URL)
-	cleanup1() // "Restart" daemon
+	cleanup1()
 
-	// Call a tool using the stale session ID on handler 2
-	body := `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hello-after-recovery"}}}`
+	body := `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"echo","arguments":{"message":"must-not-run"}}}`
 	resp := jsonRPCRequest(t, ts2.URL, sessionID, body)
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		t.Fatalf("expected 200 for tool call after recovery, got %d: %s", resp.StatusCode, respBody)
-	}
-
 	respBody, _ := io.ReadAll(resp.Body)
-	bodyStr := string(respBody)
-	if !strings.Contains(bodyStr, "hello-after-recovery") {
-		t.Errorf("expected tool call result to contain echo message, got: %s", bodyStr)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for stale tool call, got %d: %s", resp.StatusCode, respBody)
 	}
-	t.Logf("tool call after recovery: %s", bodyStr)
+	if strings.Contains(string(respBody), "must-not-run") {
+		t.Fatalf("stale tool call appears to have been replayed: %s", respBody)
+	}
 }
 
-func TestInterop_StaleSessionRecovery_SubsequentReuse(t *testing.T) {
-	// After recovery, subsequent requests with the same stale ID should use staleMap
-	// (fast path, no re-recovery).
+func TestInterop_StaleSession_SubsequentRequestsRemain404(t *testing.T) {
 	ts1URL, cleanup1, ts2 := setupInteropProxyPair(t)
-
 	sessionID := initializeSession(t, ts1URL)
 	cleanup1()
 
-	// First request triggers recovery
-	body := `{"jsonrpc":"2.0","id":20,"method":"tools/list","params":{}}`
-	resp := jsonRPCRequest(t, ts2.URL, sessionID, body)
-	if resp.StatusCode != http.StatusOK {
+	for id := 20; id <= 21; id++ {
+		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/list","params":{}}`, id)
+		resp := jsonRPCRequest(t, ts2.URL, sessionID, body)
 		respBody, _ := io.ReadAll(resp.Body)
-		t.Fatalf("first request (recovery): expected 200, got %d: %s", resp.StatusCode, respBody)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("request %d: expected 404, got %d: %s", id, resp.StatusCode, respBody)
+		}
 	}
-	resp.Body.Close()
-
-	// Second request should reuse staleMap (no new recovery)
-	body2 := `{"jsonrpc":"2.0","id":21,"method":"tools/list","params":{}}`
-	resp2 := jsonRPCRequest(t, ts2.URL, sessionID, body2)
-	defer resp2.Body.Close()
-
-	if resp2.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp2.Body)
-		t.Fatalf("second request (staleMap reuse): expected 200, got %d: %s", resp2.StatusCode, respBody)
-	}
-	t.Logf("staleMap reuse succeeded")
 }
 
 func TestInterop_DeletedSessionNotRecovered(t *testing.T) {

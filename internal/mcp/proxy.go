@@ -11,8 +11,8 @@
 //   - Slot-group selector: ProxyConfig.Selector is set. On each new upstream
 //     session, the selector picks which underlying manager should own the
 //     session (least-loaded healthy slot). The chosen manager is stored on the
-//     resulting proxySession so respawn and stale-session recovery stay on the
-//     same slot. Used by the virtual group listener built by the daemon for
+//     resulting proxySession so pre-dispatch respawn stays on the same slot.
+//     Used by the virtual group listener built by the daemon for
 //     transparent multi-slot routing.
 //
 // Exactly one of SessionManager or Selector must be set; NewProxyHandler panics
@@ -246,30 +246,10 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 		mu           sync.RWMutex
 		byUpstream   map[string]*proxySession // upstream MCP session ID → proxySession
 		byDownstream map[string]*proxySession // downstream manager session ID → proxySession
-
-		// staleMap maps recovered stale upstream session IDs to their replacement
-		// session IDs. After a daemon restart, a client may present a session ID
-		// from the previous daemon lifecycle. On first use, we transparently
-		// initialize a new session and record the mapping here so subsequent
-		// requests are rewritten without repeated recovery.
-		staleMap map[string]string
-
-		// tombstones tracks session IDs that were explicitly closed (via HTTP
-		// DELETE). These sessions must NOT be recovered — the client
-		// intentionally ended them. This prevents recovery for deliberately
-		// deleted sessions vs. stale-from-restart sessions.
-		tombstones map[string]struct{}
-
-		// recoveryMu serializes stale session recovery attempts to prevent
-		// duplicate subprocess spawns when multiple requests arrive
-		// simultaneously with the same stale session ID.
-		recoveryMu sync.Mutex
 	}
 	idx := &sessionIndex{
 		byUpstream:   make(map[string]*proxySession),
 		byDownstream: make(map[string]*proxySession),
-		staleMap:     make(map[string]string),
-		tombstones:   make(map[string]struct{}),
 	}
 
 	// Disconnect tracker for shared-mode servers: detects client disconnect
@@ -463,106 +443,6 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 
 		sessionHeader := r.Header.Get("Mcp-Session-Id")
 
-		// --- Stale session recovery ---
-		// If a POST arrives with a session ID we don't recognize AND that
-		// session was not explicitly deleted (tombstoned), attempt transparent
-		// recovery by initializing a new session and replaying the request.
-		if r.Method == http.MethodPost && sessionHeader != "" {
-			idx.mu.RLock()
-			_, known := idx.byUpstream[sessionHeader]
-			_, tombstoned := idx.tombstones[sessionHeader]
-			mapped, hasMapped := idx.staleMap[sessionHeader]
-			idx.mu.RUnlock()
-
-			if tombstoned {
-				// Session was explicitly deleted — never recover or rewrite.
-				// Clean up any stale mapping that may have been created before
-				// the tombstone was recorded (e.g., false-positive recovery
-				// during the initialize handshake window).
-				if hasMapped {
-					idx.mu.Lock()
-					delete(idx.staleMap, sessionHeader)
-					idx.mu.Unlock()
-				}
-				// Fall through to handler which will return 404.
-			} else if hasMapped {
-				// Already recovered — rewrite header to the new session ID.
-				r.Header.Set("Mcp-Session-Id", mapped)
-				sessionHeader = mapped
-			} else if !known {
-				// Unknown, not tombstoned, not in staleMap — handler-first interceptor.
-				// Let the go-sdk handler try first; it may still know this session
-				// internally (e.g., after health probe closed the downstream but
-				// the go-sdk session was not removed). Only attempt stale
-				// recovery if the handler returns 404.
-
-				// Buffer the request body for potential replay after recovery.
-				bodyBytes, err := io.ReadAll(r.Body)
-				if err != nil {
-					http.Error(w, "failed to read request body", http.StatusBadRequest)
-					return
-				}
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-				// First pass: let the handler try with the original session ID.
-				capture := newResponseCapture()
-				handler.ServeHTTP(capture, r)
-
-				if capture.statusCode != http.StatusNotFound {
-					// Handler succeeded — flush the captured response to the
-					// real writer and return. No stale recovery needed.
-					capture.flushTo(w)
-					return
-				}
-
-				// Handler returned 404 — this session is truly stale (e.g.,
-				// daemon was restarted). Attempt transparent recovery.
-				idx.recoveryMu.Lock()
-				// Double-check after acquiring lock — another goroutine may have
-				// already completed recovery for this stale session ID.
-				idx.mu.RLock()
-				mapped2, alreadyRecovered := idx.staleMap[sessionHeader]
-				_, tombstonedNow := idx.tombstones[sessionHeader]
-				idx.mu.RUnlock()
-				if tombstonedNow {
-					idx.recoveryMu.Unlock()
-					// Tombstoned while waiting for lock — flush the 404.
-					capture.flushTo(w)
-					return
-				} else if alreadyRecovered {
-					idx.recoveryMu.Unlock()
-					r.Header.Set("Mcp-Session-Id", mapped2)
-					sessionHeader = mapped2
-					// Restore body for replay via handler.ServeHTTP below.
-					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				} else {
-					newSessionID, err := recoverStaleSession(handler, r, logger)
-					idx.recoveryMu.Unlock()
-					if err != nil {
-						logger.Warn("stale session recovery failed",
-							slog.String("stale_session", sessionHeader),
-							slog.String("error", err.Error()),
-						)
-						// Flush the original 404 response.
-						capture.flushTo(w)
-						return
-					}
-					logger.Info("stale session recovered",
-						slog.String("stale_session", sessionHeader),
-						slog.String("new_session", newSessionID),
-					)
-					idx.mu.Lock()
-					idx.staleMap[sessionHeader] = newSessionID
-					idx.mu.Unlock()
-
-					r.Header.Set("Mcp-Session-Id", newSessionID)
-					sessionHeader = newSessionID
-					// Restore body for replay via handler.ServeHTTP below.
-					r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-				}
-			}
-		}
-
 		if sessionHeader != "" {
 			idx.mu.RLock()
 			ps := idx.byUpstream[sessionHeader]
@@ -575,19 +455,6 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 		handler.ServeHTTP(w, r)
 
 		if r.Method == http.MethodDelete && sessionHeader != "" {
-			idx.mu.Lock()
-			// Record tombstone so this session ID is never recovered.
-			idx.tombstones[sessionHeader] = struct{}{}
-			// Also tombstone any stale IDs that mapped to this session,
-			// and clean up the staleMap entries.
-			for staleID, mappedID := range idx.staleMap {
-				if mappedID == sessionHeader {
-					idx.tombstones[staleID] = struct{}{}
-					delete(idx.staleMap, staleID)
-				}
-			}
-			idx.mu.Unlock()
-
 			idx.mu.RLock()
 			ps := idx.byUpstream[sessionHeader]
 			idx.mu.RUnlock()
@@ -638,103 +505,6 @@ func isInitializeRequest(r *http.Request) bool {
 		return false
 	}
 	return payload.Method == "initialize"
-}
-
-// responseCapture is an http.ResponseWriter that buffers the response instead
-// of sending it to a real client. Used for synthetic requests during stale
-// session recovery (initialize + notifications/initialized).
-type responseCapture struct {
-	statusCode int
-	headers    http.Header
-	body       bytes.Buffer
-}
-
-func newResponseCapture() *responseCapture {
-	return &responseCapture{
-		statusCode: http.StatusOK,
-		headers:    make(http.Header),
-	}
-}
-
-func (rc *responseCapture) Header() http.Header         { return rc.headers }
-func (rc *responseCapture) WriteHeader(code int)        { rc.statusCode = code }
-func (rc *responseCapture) Write(b []byte) (int, error) { return rc.body.Write(b) }
-func (rc *responseCapture) Flush()                      {} // no-op; satisfies http.Flusher
-
-// flushTo writes the captured response (headers, status, body) to a real writer.
-func (rc *responseCapture) flushTo(w http.ResponseWriter) {
-	for k, vals := range rc.headers {
-		for _, v := range vals {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(rc.statusCode)
-	_, _ = w.Write(rc.body.Bytes())
-}
-
-// recoverStaleSession creates a new session by sending synthetic initialize
-// and notifications/initialized requests through the go-sdk handler, then
-// returns the new session ID. The original request is NOT forwarded here —
-// that's done by the caller after rewriting the session header.
-//
-// This function is called while holding idx.recoveryMu to prevent duplicate
-// subprocess spawns for concurrent requests with the same stale session ID.
-func recoverStaleSession(handler http.Handler, originalReq *http.Request, logger *slog.Logger) (string, error) {
-	// Step 1: Send synthetic initialize request (no Mcp-Session-Id header).
-	initBody := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"vision-recovery","version":"1.0.0"}}}`
-	initReq, err := http.NewRequestWithContext(
-		originalReq.Context(),
-		http.MethodPost,
-		originalReq.URL.String(),
-		strings.NewReader(initBody),
-	)
-	if err != nil {
-		return "", fmt.Errorf("create init request: %w", err)
-	}
-	initReq.Header.Set("Content-Type", "application/json")
-	initReq.Header.Set("Accept", "application/json, text/event-stream")
-
-	initCapture := newResponseCapture()
-	handler.ServeHTTP(initCapture, initReq)
-
-	if initCapture.statusCode != http.StatusOK {
-		return "", fmt.Errorf("initialize returned %d: %s", initCapture.statusCode, initCapture.body.String())
-	}
-
-	newSessionID := initCapture.headers.Get("Mcp-Session-Id")
-	if newSessionID == "" {
-		return "", fmt.Errorf("initialize response missing Mcp-Session-Id header")
-	}
-
-	// Step 2: Send synthetic notifications/initialized to complete the
-	// handshake. The go-sdk currently has the checkInitialized enforcement
-	// commented out (TODO), but we future-proof by sending it.
-	notifBody := `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`
-	notifReq, err := http.NewRequestWithContext(
-		originalReq.Context(),
-		http.MethodPost,
-		originalReq.URL.String(),
-		strings.NewReader(notifBody),
-	)
-	if err != nil {
-		return "", fmt.Errorf("create notification request: %w", err)
-	}
-	notifReq.Header.Set("Content-Type", "application/json")
-	notifReq.Header.Set("Accept", "application/json, text/event-stream")
-	notifReq.Header.Set("Mcp-Session-Id", newSessionID)
-
-	notifCapture := newResponseCapture()
-	handler.ServeHTTP(notifCapture, notifReq)
-	// notifications/initialized returns 202 Accepted (no response body expected).
-	// We don't check the status code strictly — some implementations return 200.
-
-	logger.Debug("stale session recovery: init handshake complete",
-		slog.String("new_session", newSessionID),
-		slog.Int("init_status", initCapture.statusCode),
-		slog.Int("notif_status", notifCapture.statusCode),
-	)
-
-	return newSessionID, nil
 }
 
 // proxySession holds the state for a single proxied session, used to relay
@@ -1310,97 +1080,50 @@ func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToo
 	}
 	defer release()
 
-	var lastErr error
 	requestCtx, requestCancel := withRequestTimeoutBudget(ctx, ps.requestTimeout)
 	defer requestCancel()
 
-	for attempt := 1; attempt <= ps.retryConfig.MaxAttempts; attempt++ {
-		ds, closed, err := ps.getDownstream(requestCtx)
-		if err != nil {
-			lastErr = err
-			break
+	ds, closed, err := ps.getDownstream(requestCtx)
+	if err != nil {
+		return nil, classifyToolCallError(err, false, ps.retryConfig.RetryableErrors)
+	}
+	if closed || ds == nil {
+		if ps.shared {
+			return nil, classifyToolCallError(ErrDownstreamUnavailable, false, ps.retryConfig.RetryableErrors)
 		}
-
-		if closed || ds == nil {
-			if ps.shared {
-				lastErr = ErrDownstreamUnavailable
-				break
-			}
-			ps.logger.Info("downstream unavailable, attempting respawn",
-				slog.String("tool", toolName),
-				slog.Int("attempt", attempt),
-			)
-			var err error
-			ds, err = ps.respawnDownstream(requestCtx, "tool_call")
-			if err != nil {
-				lastErr = ErrDownstreamUnavailable
-			} else {
-				ps.logger.Info("downstream respawned successfully",
-					slog.String("tool", toolName),
-					slog.Int("attempt", attempt),
-				)
-				result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
-					Name:      req.Params.Name,
-					Arguments: req.Params.Arguments,
-				})
-				if err == nil {
-					ps.circuitBreaker.recordSuccess()
-					return result, nil
-				}
-				if isDownstreamClosureError(err) {
-					lastErr = ErrDownstreamUnavailable
-				} else {
-					lastErr = err
-				}
-			}
-		} else {
-			result, err := ds.CallTool(requestCtx, &mcp.CallToolParams{
-				Name:      req.Params.Name,
-				Arguments: req.Params.Arguments,
-			})
-			if err == nil {
-				ps.circuitBreaker.recordSuccess()
-				return result, nil
-			}
-			if isDownstreamClosureError(err) {
-				ps.logger.Debug("downstream closed during tool call",
-					slog.String("tool", toolName),
-					slog.Int("attempt", attempt),
-				)
-				lastErr = ErrDownstreamUnavailable
-				if ps.shared && ps.sharedMgr != nil {
-					// Force respawn on next attempt by calling GetOrCreateSession
-					// which will block until a new downstream is ready.
-					_, _ = ps.sharedMgr.GetOrCreateSession(requestCtx, ps.sessionID)
-				}
-			} else {
-				lastErr = err
-			}
-		}
-
-		if !isRetryableToolCallError(lastErr, ps.retryConfig.RetryableErrors) || attempt == ps.retryConfig.MaxAttempts {
-			break
-		}
-
-		delay := computeBackoffDelay(attempt, ps.retryConfig.InitialDelay, ps.retryConfig.MaxDelay)
-		ps.logger.Warn("retrying downstream tool call",
+		ps.logger.Info("downstream unavailable before dispatch, attempting respawn",
 			slog.String("tool", toolName),
-			slog.Int("attempt", attempt),
-			slog.Duration("backoff", delay),
-			slog.String("error", lastErr.Error()),
 		)
-		select {
-		case <-requestCtx.Done():
-			return nil, classifyToolCallError(requestCtx.Err(), false, ps.retryConfig.RetryableErrors)
-		case <-time.After(delay):
+		ds, err = ps.respawnDownstream(requestCtx, "tool_call_pre_dispatch")
+		if err != nil {
+			return nil, classifyToolCallError(ErrDownstreamUnavailable, false, ps.retryConfig.RetryableErrors)
 		}
 	}
 
-	classifiedErr := classifyToolCallError(lastErr, true, ps.retryConfig.RetryableErrors)
+	// The application request is forwarded exactly once. Any error after this
+	// call begins has uncertain execution state and must not trigger replay.
+	result, callErr := ds.CallTool(requestCtx, &mcp.CallToolParams{
+		Name:      req.Params.Name,
+		Arguments: req.Params.Arguments,
+	})
+	if callErr == nil {
+		ps.circuitBreaker.recordSuccess()
+		return result, nil
+	}
+
+	lastErr := callErr
+	if isDownstreamClosureError(callErr) {
+		lastErr = ErrDownstreamUnavailable
+		ps.logger.Warn("downstream closed after tool dispatch; request will not be retried",
+			slog.String("tool", toolName),
+			slog.String("error", callErr.Error()),
+		)
+	}
 	if shouldRecordCircuitFailure(lastErr, ps.retryConfig.RetryableErrors) {
 		ps.circuitBreaker.recordFailure()
 	}
-	ps.logger.Error("downstream tool call failed",
+	classifiedErr := classifyToolCallError(lastErr, false, ps.retryConfig.RetryableErrors)
+	ps.logger.Error("downstream tool call failed without replay",
 		slog.String("tool", toolName),
 		slog.String("error", classifiedErr.Error()),
 	)
