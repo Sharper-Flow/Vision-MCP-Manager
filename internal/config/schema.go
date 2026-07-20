@@ -5,6 +5,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -31,6 +33,11 @@ const (
 	// TransportHTTP proxies to a native Streamable HTTP MCP server.
 	// Requires: url (must end with /mcp)
 	TransportHTTP TransportType = "http"
+
+	// TransportManagedHTTP supervises a local native Streamable HTTP MCP
+	// process and exposes it through Vision's authenticated listener.
+	// Requires: command and a loopback URL ending exactly in /mcp.
+	TransportManagedHTTP TransportType = "managed-http"
 
 	// TransportSSE connects to a legacy SSE-based MCP server.
 	// Requires: url
@@ -366,14 +373,14 @@ func (s *ServerConfig) Validate(name string) error {
 
 	// Validate transport type
 	switch transport {
-	case TransportStdio, TransportHTTP, TransportSSE:
+	case TransportStdio, TransportHTTP, TransportManagedHTTP, TransportSSE:
 		// valid
 	default:
 		return fmt.Errorf("%w: server %q has transport %q", ErrInvalidTransport, name, transport)
 	}
 
-	// Conflicting config check
-	if s.Command != "" && s.URL != "" {
+	// Only managed HTTP has a typed reason to own both a process and URL.
+	if s.Command != "" && s.URL != "" && transport != TransportManagedHTTP {
 		return fmt.Errorf("%w: server %q specifies both command and url", ErrConflictingConfig, name)
 	}
 
@@ -392,6 +399,24 @@ func (s *ServerConfig) Validate(name string) error {
 		}
 		if !strings.HasSuffix(s.URL, "/mcp") {
 			return fmt.Errorf("%w: server %q has url %q", ErrInvalidHTTPURL, name, s.URL)
+		}
+	case TransportManagedHTTP:
+		if strings.TrimSpace(s.Command) == "" {
+			return fmt.Errorf("%w: managed HTTP server %q requires command", ErrMissingCommand, name)
+		}
+		if s.URL == "" {
+			return fmt.Errorf("%w: managed HTTP server %q requires url", ErrMissingURL, name)
+		}
+		if err := validateManagedHTTPURL(s.URL); err != nil {
+			return fmt.Errorf("%w: managed HTTP server %q: %v", ErrInvalidHTTPURL, name, err)
+		}
+		if s.Stateful {
+			return fmt.Errorf("%w: managed HTTP server %q cannot also set stateful", ErrConflictingConfig, name)
+		}
+		for _, arg := range s.Args {
+			if arg == "--shared-browser-context" {
+				return fmt.Errorf("%w: managed HTTP server %q forbids --shared-browser-context", ErrConflictingConfig, name)
+			}
 		}
 	case TransportSSE:
 		if s.URL == "" {
@@ -456,6 +481,36 @@ func (s *ServerConfig) Validate(name string) error {
 		return fmt.Errorf("%w: server %q has availability_profile %q", ErrInvalidAvailabilityProfile, name, s.AvailabilityProfile)
 	}
 
+	return nil
+}
+
+func validateManagedHTTPURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse url: %w", err)
+	}
+	if u.Scheme != "http" {
+		return fmt.Errorf("scheme must be http")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("host is required")
+	}
+	if host != "localhost" {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("host must be loopback")
+		}
+	}
+	if u.Path != "/mcp" {
+		return fmt.Errorf("path must be exactly /mcp")
+	}
+	if u.RawQuery != "" {
+		return fmt.Errorf("query is not allowed")
+	}
+	if u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("userinfo and fragment are not allowed")
+	}
 	return nil
 }
 
