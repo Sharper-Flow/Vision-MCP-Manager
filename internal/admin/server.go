@@ -24,19 +24,20 @@ const DefaultPort = 6275
 
 // Server is the Admin MCP server that provides management tools.
 type Server struct {
-	registry             *server.Registry
-	catalog              *catalog.Catalog
-	instructions         *config.Instructions
-	daemonConfig         *config.Config // Mutable reference for persisting changes
-	configPath           string         // Path to servers.yaml
-	port                 int
-	logger               *slog.Logger
-	httpSrv              *http.Server
-	mcpServer            *mcp.Server
-	startedAt            time.Time
-	slotSessionAccessor   SlotSessionAccessor   // Optional: provides live session counts
-	serverMetricsAccessor ServerMetricsAccessor  // Optional: provides per-server session metrics
-	Metrics               *metrics.DaemonMetrics
+	registry                 *server.Registry
+	catalog                  *catalog.Catalog
+	instructions             *config.Instructions
+	daemonConfig             *config.Config // Mutable reference for persisting changes
+	configPath               string         // Path to servers.yaml
+	port                     int
+	logger                   *slog.Logger
+	httpSrv                  *http.Server
+	mcpServer                *mcp.Server
+	startedAt                time.Time
+	slotSessionAccessor      SlotSessionAccessor      // Optional: provides live session counts
+	serverMetricsAccessor    ServerMetricsAccessor    // Optional: provides per-server session metrics
+	sessionLifecycleAccessor SessionLifecycleAccessor // Optional managed-HTTP lifecycle projection
+	Metrics                  *metrics.DaemonMetrics
 
 	mu      sync.RWMutex
 	running bool
@@ -44,16 +45,17 @@ type Server struct {
 
 // Config configures the Admin MCP server.
 type Config struct {
-	Registry            *server.Registry
-	Catalog             *catalog.Catalog
-	Instructions        *config.Instructions
-	DaemonConfig        *config.Config // Mutable reference for persisting changes
-	ConfigPath          string         // Path to servers.yaml for config persistence
-	Port                int
-	Logger              *slog.Logger
-	SlotSessionAccessor   SlotSessionAccessor   // Optional: provides live session counts
-	ServerMetricsAccessor ServerMetricsAccessor  // Optional: provides per-server session metrics
-	Metrics               *metrics.DaemonMetrics
+	Registry                 *server.Registry
+	Catalog                  *catalog.Catalog
+	Instructions             *config.Instructions
+	DaemonConfig             *config.Config // Mutable reference for persisting changes
+	ConfigPath               string         // Path to servers.yaml for config persistence
+	Port                     int
+	Logger                   *slog.Logger
+	SlotSessionAccessor      SlotSessionAccessor      // Optional: provides live session counts
+	ServerMetricsAccessor    ServerMetricsAccessor    // Optional: provides per-server session metrics
+	SessionLifecycleAccessor SessionLifecycleAccessor // Optional managed-HTTP lifecycle projection
+	Metrics                  *metrics.DaemonMetrics
 }
 
 // NewServer creates a new Admin MCP server.
@@ -79,16 +81,17 @@ func NewServer(cfg Config) *Server {
 	}
 
 	return &Server{
-		registry:            cfg.Registry,
-		catalog:             cat,
-		instructions:        inst,
-		daemonConfig:        cfg.DaemonConfig,
-		configPath:          cfg.ConfigPath,
-		port:                cfg.Port,
-		logger:              cfg.Logger,
-		slotSessionAccessor:   cfg.SlotSessionAccessor,
-		serverMetricsAccessor: cfg.ServerMetricsAccessor,
-		Metrics:               cfg.Metrics,
+		registry:                 cfg.Registry,
+		catalog:                  cat,
+		instructions:             inst,
+		daemonConfig:             cfg.DaemonConfig,
+		configPath:               cfg.ConfigPath,
+		port:                     cfg.Port,
+		logger:                   cfg.Logger,
+		slotSessionAccessor:      cfg.SlotSessionAccessor,
+		serverMetricsAccessor:    cfg.ServerMetricsAccessor,
+		sessionLifecycleAccessor: cfg.SessionLifecycleAccessor,
+		Metrics:                  cfg.Metrics,
 	}
 }
 
@@ -267,4 +270,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // SetServerMetricsAccessor wires the per-server metrics accessor after construction.
 func (s *Server) SetServerMetricsAccessor(a ServerMetricsAccessor) {
 	s.serverMetricsAccessor = a
+}
+
+func (s *Server) SetSessionLifecycleAccessor(a SessionLifecycleAccessor) {
+	s.sessionLifecycleAccessor = a
 }

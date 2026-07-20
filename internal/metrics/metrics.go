@@ -83,6 +83,8 @@ const (
 	ReapReasonSessionRemoved     = "session_removed"
 	ReapReasonHealthCheck        = "health_check"
 	ReapReasonToolsListFailed    = "tools_list_failed"
+	ReapReasonProcessLost        = "process_lost"
+	ReapReasonListenerClosed     = "listener_closed"
 	ReapReasonUnknown            = "unknown"
 )
 
@@ -152,6 +154,10 @@ func NormalizeReapReason(reason string) string {
 		return ReapReasonHealthCheck
 	case ReapReasonToolsListFailed, "initial tools/list failed":
 		return ReapReasonToolsListFailed
+	case ReapReasonProcessLost:
+		return ReapReasonProcessLost
+	case ReapReasonListenerClosed:
+		return ReapReasonListenerClosed
 	default:
 		return ReapReasonUnknown
 	}

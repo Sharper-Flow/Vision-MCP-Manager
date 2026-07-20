@@ -34,6 +34,8 @@ const (
 	LeaseStateActive           LeaseState = "active"
 	LeaseStateExpiring         LeaseState = "expiring"
 	LeaseStateCleanupUncertain LeaseState = "cleanup_uncertain"
+	LeaseStateClosed           LeaseState = "closed"
+	maxClosedLeaseHistory                 = 1000
 )
 
 // Reservation is an opaque capacity claim created before a downstream server
@@ -62,22 +64,26 @@ type LeaseSnapshotRow struct {
 }
 
 type LeaseSnapshot struct {
-	CapacityUsed int
-	CapacityMax  int
-	Rows         []LeaseSnapshotRow
-	Omitted      int
+	CapacityUsed  int
+	CapacityMax   int
+	Rows          []LeaseSnapshotRow
+	Omitted       int
+	Closed        []LeaseSnapshotRow
+	ClosedOmitted int
 }
 
 // LeaseManager is the sole mutation authority for managed HTTP admission and
 // per-session lifecycle state.
 type LeaseManager struct {
-	mu           sync.Mutex
-	maxSessions  int
-	idleTimeout  time.Duration
-	clock        LeaseClock
-	nextToken    atomic.Uint64
-	reservations map[uint64]struct{}
-	leases       map[string]*leaseRecord
+	mu            sync.Mutex
+	maxSessions   int
+	idleTimeout   time.Duration
+	clock         LeaseClock
+	nextToken     atomic.Uint64
+	reservations  map[uint64]struct{}
+	leases        map[string]*leaseRecord
+	closed        []LeaseSnapshotRow
+	closedOmitted int
 }
 
 func NewLeaseManager(maxSessions int, idleTimeout time.Duration, clock LeaseClock) *LeaseManager {
@@ -124,6 +130,7 @@ func (m *LeaseManager) Commit(res Reservation, sessionID string) error {
 		state:        LeaseStateActive,
 		createdAt:    now,
 		lastActivity: now,
+		reason:       "initialized",
 	}
 	return nil
 }
@@ -266,9 +273,11 @@ func (m *LeaseManager) RestoreActive(sessionID string) bool {
 func (m *LeaseManager) FinalizeClose(sessionID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.leases[sessionID]; !ok {
+	lease, ok := m.leases[sessionID]
+	if !ok {
 		return false
 	}
+	m.recordClosedLocked(lease, lease.reason)
 	delete(m.leases, sessionID)
 	return true
 }
@@ -276,11 +285,51 @@ func (m *LeaseManager) FinalizeClose(sessionID string) bool {
 // InvalidateAll clears every lease and pending reservation after the owning
 // backend process or public listener has been torn down. No downstream session
 // can remain reachable after that ownership boundary disappears.
-func (m *LeaseManager) InvalidateAll() {
+func (m *LeaseManager) InvalidateAll(reason ...string) int {
 	m.mu.Lock()
+	closeReason := "backend_lost"
+	if len(reason) > 0 && reason[0] != "" {
+		closeReason = reason[0]
+	}
+	ids := make([]string, 0, len(m.leases))
+	for id := range m.leases {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		m.recordClosedLocked(m.leases[id], closeReason)
+	}
+	closedCount := len(m.leases)
 	m.reservations = make(map[uint64]struct{})
 	m.leases = make(map[string]*leaseRecord)
 	m.mu.Unlock()
+	return closedCount
+}
+
+func (m *LeaseManager) recordClosedLocked(lease *leaseRecord, reason string) {
+	if lease == nil {
+		return
+	}
+	now := m.clock.Now()
+	if reason == "" {
+		reason = "closed"
+	}
+	row := LeaseSnapshotRow{
+		SafeID:          lease.safeID,
+		State:           LeaseStateClosed,
+		Age:             now.Sub(lease.createdAt),
+		Idle:            now.Sub(lease.lastActivity),
+		InFlight:        lease.inFlight,
+		SSEConnections:  lease.sseCount,
+		LifecycleReason: reason,
+	}
+	if len(m.closed) == maxClosedLeaseHistory {
+		copy(m.closed, m.closed[1:])
+		m.closed[len(m.closed)-1] = row
+		m.closedOmitted++
+		return
+	}
+	m.closed = append(m.closed, row)
 }
 
 func (m *LeaseManager) AggregateInFlight() int {
@@ -316,10 +365,12 @@ func (m *LeaseManager) Snapshot(limit int) LeaseSnapshot {
 		rows = rows[:limit]
 	}
 	return LeaseSnapshot{
-		CapacityUsed: len(m.reservations) + len(m.leases),
-		CapacityMax:  m.maxSessions,
-		Rows:         rows,
-		Omitted:      omitted,
+		CapacityUsed:  len(m.reservations) + len(m.leases),
+		CapacityMax:   m.maxSessions,
+		Rows:          rows,
+		Omitted:       omitted,
+		Closed:        append([]LeaseSnapshotRow(nil), m.closed...),
+		ClosedOmitted: m.closedOmitted,
 	}
 }
 

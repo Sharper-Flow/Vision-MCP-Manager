@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 )
 
 func TestManagedHTTPGatewayPreservesDistinctSessionIdentity(t *testing.T) {
@@ -142,6 +144,36 @@ func TestManagedHTTPGatewayCapacityRejectsWithoutEviction(t *testing.T) {
 	gateway.ServeHTTP(active, request)
 	if active.Code != http.StatusOK {
 		t.Fatalf("existing session status = %d, want 200", active.Code)
+	}
+}
+
+func TestManagedHTTPGatewayPublishesBoundedLifecycleMetrics(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" {
+			w.Header().Set("Mcp-Session-Id", "metrics-session")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL + "/mcp")
+	serverMetrics := metrics.NewServerMetrics()
+	gateway, err := NewManagedHTTPGateway(ManagedHTTPGatewayConfig{
+		Target: target, MaxSessions: 1, IdleTimeout: 30 * time.Minute,
+		Transport: backend.Client().Transport, Metrics: serverMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := initializeManagedSession(t, gateway)
+	denied := httptest.NewRecorder()
+	gateway.ServeHTTP(denied, newInitializeRequest())
+	deleted := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
+	deleted.Header.Set("Mcp-Session-Id", id)
+	gateway.ServeHTTP(httptest.NewRecorder(), deleted)
+
+	snapshot := serverMetrics.Snapshot()
+	if snapshot.ActiveSessions != 0 || snapshot.AdmissionDenied != 1 || snapshot.ReapedByReason[metrics.ReapReasonUpstreamDelete] != 1 {
+		t.Fatalf("metrics snapshot = %#v", snapshot)
 	}
 }
 

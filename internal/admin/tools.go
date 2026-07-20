@@ -314,13 +314,14 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 
 // ListServerEntry represents a server in the vision_list response.
 type ListServerEntry struct {
-	Name           string                         `json:"name"`
-	Status         string                         `json:"status"`
-	Port           *int                           `json:"port"`
-	PID            *int                           `json:"pid"`
-	Uptime         *string                        `json:"uptime"`
-	Error          *string                        `json:"error"`
-	SessionMetrics *metrics.ServerMetricsSnapshot `json:"session_metrics,omitempty"`
+	Name             string                         `json:"name"`
+	Status           string                         `json:"status"`
+	Port             *int                           `json:"port"`
+	PID              *int                           `json:"pid"`
+	Uptime           *string                        `json:"uptime"`
+	Error            *string                        `json:"error"`
+	SessionMetrics   *metrics.ServerMetricsSnapshot `json:"session_metrics,omitempty"`
+	SessionLifecycle *SessionLifecycleSnapshot      `json:"session_lifecycle,omitempty"`
 }
 
 // SlotGroupEntry describes one slot group in the vision_list response.
@@ -383,6 +384,9 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 			if snap := s.serverMetricsAccessor.ServerMetricsSnapshot(status.Name); snap != nil {
 				info.SessionMetrics = snap
 			}
+		}
+		if s.sessionLifecycleAccessor != nil {
+			info.SessionLifecycle = s.sessionLifecycleAccessor.SessionLifecycleSnapshot(status.Name)
 		}
 
 		response.Servers = append(response.Servers, info)

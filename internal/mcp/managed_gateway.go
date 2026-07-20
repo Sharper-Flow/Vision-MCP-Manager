@@ -13,6 +13,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -25,6 +26,13 @@ type ManagedBackendGate interface {
 	Ready() bool
 }
 
+type ManagedGatewayMetrics interface {
+	IncActiveSessions()
+	DecActiveSessions()
+	IncAdmissionDenied()
+	IncReaped(reason string)
+}
+
 type ManagedHTTPGatewayConfig struct {
 	Target             *url.URL
 	MaxSessions        int
@@ -33,6 +41,7 @@ type ManagedHTTPGatewayConfig struct {
 	Transport          http.RoundTripper
 	Backend            ManagedBackendGate
 	OnAmbiguousFailure func(error)
+	Metrics            ManagedGatewayMetrics
 	Logger             *slog.Logger
 }
 
@@ -47,6 +56,8 @@ type ManagedHTTPGateway struct {
 	onAmbiguousFailure func(error)
 	leases             *LeaseManager
 	logger             *slog.Logger
+	metrics            ManagedGatewayMetrics
+	lifecycleMu        sync.Mutex
 }
 
 func NewManagedHTTPGateway(cfg ManagedHTTPGatewayConfig) (*ManagedHTTPGateway, error) {
@@ -72,6 +83,7 @@ func NewManagedHTTPGateway(cfg ManagedHTTPGatewayConfig) (*ManagedHTTPGateway, e
 		onAmbiguousFailure: cfg.OnAmbiguousFailure,
 		leases:             NewLeaseManager(cfg.MaxSessions, cfg.IdleTimeout, cfg.Clock),
 		logger:             logger,
+		metrics:            cfg.Metrics,
 	}, nil
 }
 
@@ -148,6 +160,9 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			state.kind = managedRequestInitialize
 			reservation, err := g.reserveWithPrune(r.Context())
 			if err != nil {
+				if g.metrics != nil {
+					g.metrics.IncAdmissionDenied()
+				}
 				writeManagedError(w, http.StatusTooManyRequests, -32000,
 					fmt.Sprintf("max sessions reached: limit %d (current %d)", g.leases.Snapshot(0).CapacityMax, g.leases.CapacityUsed()))
 				return
@@ -265,7 +280,7 @@ func (g *ManagedHTTPGateway) pruneIdle(ctx context.Context) {
 		}
 		_ = resp.Body.Close()
 		if isSuccessfulStatus(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
-			g.leases.FinalizeClose(sessionID)
+			g.finalizeClose(sessionID, "idle_timeout")
 			continue
 		}
 		g.leases.MarkCleanupUncertain(sessionID, "cleanup_rejected")
@@ -313,14 +328,20 @@ func (g *ManagedHTTPGateway) observeResponse(state *managedProxyRequest, resp *h
 		if sessionID == "" {
 			return errors.New("managed MCP initialize response missing Mcp-Session-Id")
 		}
+		g.lifecycleMu.Lock()
 		if err := g.leases.Commit(state.reservation, sessionID); err != nil {
+			g.lifecycleMu.Unlock()
 			return fmt.Errorf("commit managed MCP session: %w", err)
 		}
+		if g.metrics != nil {
+			g.metrics.IncActiveSessions()
+		}
+		g.lifecycleMu.Unlock()
 		state.hasReservation = false
 
 	case managedRequestDelete:
 		if isSuccessfulStatus(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
-			g.leases.FinalizeClose(state.sessionID)
+			g.finalizeClose(state.sessionID, "upstream_delete")
 		} else {
 			g.leases.MarkCleanupUncertain(state.sessionID, "cleanup_rejected")
 			g.reportAmbiguousFailure(fmt.Errorf("session cleanup returned status %d", resp.StatusCode))
@@ -351,6 +372,18 @@ func (g *ManagedHTTPGateway) Snapshot(limit int) LeaseSnapshot {
 	return g.leases.Snapshot(limit)
 }
 
+func (g *ManagedHTTPGateway) finalizeClose(sessionID, reason string) {
+	g.lifecycleMu.Lock()
+	defer g.lifecycleMu.Unlock()
+	if !g.leases.FinalizeClose(sessionID) {
+		return
+	}
+	if g.metrics != nil {
+		g.metrics.DecActiveSessions()
+		g.metrics.IncReaped(reason)
+	}
+}
+
 func (g *ManagedHTTPGateway) StartReaper(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -373,7 +406,20 @@ func (g *ManagedHTTPGateway) StartReaper(ctx context.Context, interval time.Dura
 // process teardown, so all in-memory claims can be invalidated without sending
 // synthetic DELETE requests.
 func (g *ManagedHTTPGateway) CloseAll() {
-	g.leases.InvalidateAll()
+	g.InvalidateAll("listener_closed")
+}
+
+func (g *ManagedHTTPGateway) InvalidateAll(reason string) {
+	g.lifecycleMu.Lock()
+	defer g.lifecycleMu.Unlock()
+	closed := g.leases.InvalidateAll(reason)
+	if g.metrics == nil {
+		return
+	}
+	for i := 0; i < closed; i++ {
+		g.metrics.DecActiveSessions()
+		g.metrics.IncReaped(reason)
+	}
 }
 
 type managedRequestKind uint8

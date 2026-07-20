@@ -1,11 +1,43 @@
 package mcp
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestLeaseSnapshotBoundsClosedHistoryAndNeverExposesRawID(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
+	mgr := NewLeaseManager(0, time.Minute, clock)
+	for i := 0; i < maxClosedLeaseHistory+5; i++ {
+		reservation, err := mgr.Reserve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("raw-private-session-id-%d", i)
+		if err := mgr.Commit(reservation, id); err != nil {
+			t.Fatal(err)
+		}
+		if !mgr.TryBeginExpiry(id, "idle_timeout") || !mgr.FinalizeClose(id) {
+			t.Fatalf("failed to close %q", id)
+		}
+	}
+	snapshot := mgr.Snapshot(100)
+	if len(snapshot.Closed) != maxClosedLeaseHistory || snapshot.ClosedOmitted != 5 {
+		t.Fatalf("closed=%d omitted=%d", len(snapshot.Closed), snapshot.ClosedOmitted)
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "raw-private-session-id") {
+		t.Fatal("snapshot exposed raw session identifier")
+	}
+}
 
 type fakeLeaseClock struct {
 	mu  sync.Mutex

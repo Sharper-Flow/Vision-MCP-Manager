@@ -27,27 +27,32 @@ func (s *Server) handleV1Servers(w http.ResponseWriter, r *http.Request) {
 
 	statuses := make([]map[string]any, 0)
 	if s.registry != nil {
-	for _, srv := range s.registry.List() {
-		st := srv.Status()
-		entry := map[string]any{
-			"name":           st.Name,
-			"port":           st.Port,
-			"transport":      string(st.Transport),
-			"state":          string(st.State),
-			"autostart":      st.Autostart,
-			"required":       st.Required,
-			"pid":            st.PID,
-			"uptime_seconds": int64(st.Uptime.Seconds()),
-			"restart_count":  st.RestartCount,
-			"last_error":     scrubSecrets(st.LastError),
-		}
-		if s.serverMetricsAccessor != nil {
-			if snap := s.serverMetricsAccessor.ServerMetricsSnapshot(st.Name); snap != nil {
-				entry["session_metrics"] = snap
+		for _, srv := range s.registry.List() {
+			st := srv.Status()
+			entry := map[string]any{
+				"name":           st.Name,
+				"port":           st.Port,
+				"transport":      string(st.Transport),
+				"state":          string(st.State),
+				"autostart":      st.Autostart,
+				"required":       st.Required,
+				"pid":            st.PID,
+				"uptime_seconds": int64(st.Uptime.Seconds()),
+				"restart_count":  st.RestartCount,
+				"last_error":     scrubSecrets(st.LastError),
 			}
+			if s.serverMetricsAccessor != nil {
+				if snap := s.serverMetricsAccessor.ServerMetricsSnapshot(st.Name); snap != nil {
+					entry["session_metrics"] = snap
+				}
+			}
+			if s.sessionLifecycleAccessor != nil {
+				if snap := s.sessionLifecycleAccessor.SessionLifecycleSnapshot(st.Name); snap != nil {
+					entry["session_lifecycle"] = snap
+				}
+			}
+			statuses = append(statuses, entry)
 		}
-		statuses = append(statuses, entry)
-	}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -98,6 +103,11 @@ func (s *Server) handleV1ServerDetail(w http.ResponseWriter, r *http.Request) {
 		if s.serverMetricsAccessor != nil {
 			if snap := s.serverMetricsAccessor.ServerMetricsSnapshot(st.Name); snap != nil {
 				entry["session_metrics"] = snap
+			}
+		}
+		if s.sessionLifecycleAccessor != nil {
+			if snap := s.sessionLifecycleAccessor.SessionLifecycleSnapshot(st.Name); snap != nil {
+				entry["session_lifecycle"] = snap
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")

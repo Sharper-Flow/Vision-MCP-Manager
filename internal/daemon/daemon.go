@@ -57,6 +57,7 @@ type Daemon struct {
 	serverMetricsMu sync.RWMutex
 
 	managedGateways   map[string]*mcp.ManagedHTTPGateway
+	managedBackends   map[string]*supervisor.BackendCoordinator
 	managedCancels    map[string]context.CancelFunc
 	managedGatewaysMu sync.RWMutex
 }
@@ -136,6 +137,7 @@ func New(cfg Config) (*Daemon, error) {
 		cancel:             cancel,
 		serverMetrics:      make(map[string]*metrics.ServerMetrics),
 		managedGateways:    make(map[string]*mcp.ManagedHTTPGateway),
+		managedBackends:    make(map[string]*supervisor.BackendCoordinator),
 		managedCancels:     make(map[string]context.CancelFunc),
 	}
 
@@ -144,6 +146,7 @@ func New(cfg Config) (*Daemon, error) {
 
 	// Wire per-server metrics accessor into admin server.
 	adminSrv.SetServerMetricsAccessor(d)
+	adminSrv.SetSessionLifecycleAccessor(d)
 
 	return d, nil
 }
@@ -832,6 +835,7 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 	}
 	coordinator := supervisor.NewBackendCoordinator()
 	coordinator.MarkProbing()
+	srvMetrics := metrics.NewServerMetrics()
 	process := srv.Process
 	if process == nil {
 		return errors.New("managed HTTP server has no supervised process")
@@ -845,7 +849,8 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 		OnAmbiguousFailure: func(cause error) {
 			go d.recycleManagedHTTPBackend(srv.Name, process, coordinator, cause)
 		},
-		Logger: d.logger.With(slog.String("server", srv.Name)),
+		Metrics: srvMetrics,
+		Logger:  d.logger.With(slog.String("server", srv.Name)),
 	})
 	if err != nil {
 		return fmt.Errorf("create managed HTTP gateway: %w", err)
@@ -868,8 +873,12 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 	gateway.StartReaper(monitorCtx, reapInterval)
 	d.managedGatewaysMu.Lock()
 	d.managedGateways[srv.Name] = gateway
+	d.managedBackends[srv.Name] = coordinator
 	d.managedCancels[srv.Name] = monitorCancel
 	d.managedGatewaysMu.Unlock()
+	d.serverMetricsMu.Lock()
+	d.serverMetrics[srv.Name] = srvMetrics
+	d.serverMetricsMu.Unlock()
 
 	d.wg.Add(1)
 	go d.monitorManagedHTTPBackend(monitorCtx, srv.Name, process, target, gateway, coordinator)
@@ -906,7 +915,7 @@ func (d *Daemon) monitorManagedHTTPBackend(ctx context.Context, name string, pro
 			if generation != 0 && generation != attemptedGeneration {
 				if activeGeneration != 0 && generation != activeGeneration {
 					coordinator.MarkProcessLost()
-					gateway.CloseAll()
+					gateway.InvalidateAll(metrics.ReapReasonProcessLost)
 					activeGeneration = 0
 				}
 				attemptedGeneration = generation
@@ -924,7 +933,7 @@ func (d *Daemon) monitorManagedHTTPBackend(ctx context.Context, name string, pro
 						slog.String("server", name), slog.Uint64("generation", generation))
 				} else {
 					coordinator.MarkProcessLost()
-					gateway.CloseAll()
+					gateway.InvalidateAll(metrics.ReapReasonProcessLost)
 					d.logger.Error("managed HTTP readiness probe failed; requesting restart",
 						slog.String("server", name), slog.String("error", err.Error()))
 					_ = process.RequestRestart()
@@ -932,7 +941,7 @@ func (d *Daemon) monitorManagedHTTPBackend(ctx context.Context, name string, pro
 			}
 		case supervisor.StateCrashed, supervisor.StateStopped, supervisor.StateFailed:
 			coordinator.MarkProcessLost()
-			gateway.CloseAll()
+			gateway.InvalidateAll(metrics.ReapReasonProcessLost)
 			activeGeneration = 0
 		}
 
@@ -979,6 +988,7 @@ func (d *Daemon) teardownProxyForServer(name string) {
 		cancel()
 	}
 	delete(d.managedGateways, name)
+	delete(d.managedBackends, name)
 	delete(d.managedCancels, name)
 	d.managedGatewaysMu.Unlock()
 	d.deleteServerMetrics(name)
@@ -1013,4 +1023,45 @@ func (d *Daemon) ServerMetricsSnapshot(serverName string) *metrics.ServerMetrics
 	}
 	snap := m.Snapshot()
 	return &snap
+}
+
+// SessionLifecycleSnapshot returns the bounded secret-safe managed HTTP
+// lifecycle projection used by both admin MCP and /v1 status surfaces.
+func (d *Daemon) SessionLifecycleSnapshot(serverName string) *admin.SessionLifecycleSnapshot {
+	d.managedGatewaysMu.RLock()
+	gateway := d.managedGateways[serverName]
+	backend := d.managedBackends[serverName]
+	d.managedGatewaysMu.RUnlock()
+	if gateway == nil || backend == nil {
+		return nil
+	}
+	snapshot := gateway.Snapshot(100)
+	result := &admin.SessionLifecycleSnapshot{
+		BackendState:  string(backend.State()),
+		CapacityUsed:  snapshot.CapacityUsed,
+		CapacityMax:   snapshot.CapacityMax,
+		Sessions:      make([]admin.SessionLifecycleRow, 0, len(snapshot.Rows)),
+		Closed:        make([]admin.SessionLifecycleRow, 0, len(snapshot.Closed)),
+		Omitted:       snapshot.Omitted,
+		ClosedOmitted: snapshot.ClosedOmitted,
+	}
+	for _, row := range snapshot.Rows {
+		result.Sessions = append(result.Sessions, lifecycleRow(row))
+	}
+	for _, row := range snapshot.Closed {
+		result.Closed = append(result.Closed, lifecycleRow(row))
+	}
+	return result
+}
+
+func lifecycleRow(row mcp.LeaseSnapshotRow) admin.SessionLifecycleRow {
+	return admin.SessionLifecycleRow{
+		SafeID:                 row.SafeID,
+		State:                  string(row.State),
+		AgeSeconds:             int64(row.Age.Seconds()),
+		ApplicationIdleSeconds: int64(row.Idle.Seconds()),
+		InFlight:               row.InFlight,
+		SSEConnections:         row.SSEConnections,
+		LifecycleReason:        row.LifecycleReason,
+	}
 }
