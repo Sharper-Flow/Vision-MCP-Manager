@@ -314,13 +314,14 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 
 // ListServerEntry represents a server in the vision_list response.
 type ListServerEntry struct {
-	Name           string                         `json:"name"`
-	Status         string                         `json:"status"`
-	Port           *int                           `json:"port"`
-	PID            *int                           `json:"pid"`
-	Uptime         *string                        `json:"uptime"`
-	Error          *string                        `json:"error"`
-	SessionMetrics *metrics.ServerMetricsSnapshot `json:"session_metrics,omitempty"`
+	Name              string                         `json:"name"`
+	CodemodeNamespace string                         `json:"codemode_namespace"`
+	Status            string                         `json:"status"`
+	Port              *int                           `json:"port"`
+	PID               *int                           `json:"pid"`
+	Uptime            *string                        `json:"uptime"`
+	Error             *string                        `json:"error"`
+	SessionMetrics    *metrics.ServerMetricsSnapshot `json:"session_metrics,omitempty"`
 }
 
 // SlotGroupEntry describes one slot group in the vision_list response.
@@ -350,8 +351,9 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 	for _, srv := range servers {
 		status := srv.Status()
 		info := ListServerEntry{
-			Name:   status.Name,
-			Status: mapStateToStatus(string(status.State)),
+			Name:              status.Name,
+			CodemodeNamespace: s.codemodeNamespace(status.Name),
+			Status:            mapStateToStatus(string(status.State)),
 		}
 
 		// Set port if available
@@ -402,6 +404,15 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 			{Type: "text", Text: string(jsonBytes)},
 		},
 	}, nil
+}
+
+func (s *Server) codemodeNamespace(name string) string {
+	if s.catalog != nil {
+		if entry := s.catalog.Get(name); entry != nil {
+			return entry.GetCodemodeNamespace()
+		}
+	}
+	return name
 }
 
 // buildSlotGroups produces the slot_groups section for vision_list. It reads
@@ -867,10 +878,11 @@ func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCa
 
 // SearchResultEntry represents a server in search results.
 type SearchResultEntry struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Capabilities []string `json:"capabilities"`
-	Installed    bool     `json:"installed"`
+	Name              string   `json:"name"`
+	CodemodeNamespace string   `json:"codemode_namespace"`
+	Description       string   `json:"description"`
+	Capabilities      []string `json:"capabilities"`
+	Installed         bool     `json:"installed"`
 }
 
 // SearchResponse is the response for vision_search.
@@ -913,10 +925,11 @@ func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCal
 		}
 
 		response.Results = append(response.Results, SearchResultEntry{
-			Name:         entry.Name,
-			Description:  entry.Description,
-			Capabilities: entry.Capabilities,
-			Installed:    installed,
+			Name:              entry.Name,
+			CodemodeNamespace: entry.GetCodemodeNamespace(),
+			Description:       entry.Description,
+			Capabilities:      entry.Capabilities,
+			Installed:         installed,
 		})
 	}
 

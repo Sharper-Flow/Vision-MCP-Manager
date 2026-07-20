@@ -26,6 +26,35 @@ func TestCatalog_AddAndGet(t *testing.T) {
 	}
 }
 
+func TestEntry_GetCodemodeNamespace(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry Entry
+		want  string
+	}{
+		{name: "defaults to entry name", entry: Entry{Name: "context7"}, want: "context7"},
+		{name: "uses explicit override", entry: Entry{Name: "svelte", CodemodeNamespace: "svelte-mcp"}, want: "svelte-mcp"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.entry.GetCodemodeNamespace(); got != tt.want {
+				t.Fatalf("GetCodemodeNamespace() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDefaultCatalog_CodemodeNamespaces(t *testing.T) {
+	c := Default()
+	if got := c.Get("context7").GetCodemodeNamespace(); got != "context7" {
+		t.Fatalf("context7 namespace = %q, want context7", got)
+	}
+	if got := c.Get("svelte").GetCodemodeNamespace(); got != "svelte-mcp" {
+		t.Fatalf("svelte namespace = %q, want svelte-mcp", got)
+	}
+}
+
 func TestCatalog_GetNotFound(t *testing.T) {
 	c := New()
 

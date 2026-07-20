@@ -135,7 +135,7 @@ func TestToolInit_ReconcilesExistingOpenCodeConfig(t *testing.T) {
 
 func TestToolSearch_EmptyQueryReturnsAlphabetical(t *testing.T) {
 	c := catalog.New()
-	c.Add(&catalog.Entry{Name: "zebra", Description: "Last"})
+	c.Add(&catalog.Entry{Name: "zebra", Description: "Last", CodemodeNamespace: "zebra-tools"})
 	c.Add(&catalog.Entry{Name: "alpha", Description: "First"})
 	c.Add(&catalog.Entry{Name: "beta", Description: "Second"})
 
@@ -159,6 +159,12 @@ func TestToolSearch_EmptyQueryReturnsAlphabetical(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("results = %#v, want %#v", got, want)
 		}
+	}
+	if got := response.Results[2].CodemodeNamespace; got != "zebra-tools" {
+		t.Fatalf("zebra codemode_namespace = %q, want zebra-tools", got)
+	}
+	if got := response.Results[0].CodemodeNamespace; got != "alpha" {
+		t.Fatalf("alpha codemode_namespace = %q, want alpha", got)
 	}
 }
 
