@@ -38,6 +38,10 @@ type Entry struct {
 
 	// Transport is "stdio", "http", or "sse" (default: stdio)
 	Transport string `json:"transport,omitempty" yaml:"transport,omitempty"`
+
+	// CodemodeNamespace is the OpenCode Code Mode namespace used to call the
+	// server's tools (tools.<namespace>.*). It defaults to Name.
+	CodemodeNamespace string `json:"codemode_namespace,omitempty" yaml:"codemode_namespace,omitempty"`
 }
 
 // Catalog is a searchable collection of server entries.
@@ -302,4 +306,13 @@ func (e *Entry) GetTransport() string {
 		return "stdio"
 	}
 	return e.Transport
+}
+
+// GetCodemodeNamespace returns the configured OpenCode Code Mode namespace,
+// defaulting to the catalog entry name for backward compatibility.
+func (e *Entry) GetCodemodeNamespace() string {
+	if e.CodemodeNamespace != "" {
+		return e.CodemodeNamespace
+	}
+	return e.Name
 }

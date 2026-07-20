@@ -4,15 +4,9 @@
 # This file provides AI agents with guidance on which tools to use for different tasks.
 # The vision_guidance tool returns this information to help agents make better tool choices.
 #
-# IMPORTANT: Tool names in `guidance` and `examples` strings should be the
-# AGENT-FACING FUNCTION NAMES, not MCP server registry names. In OpenCode-style
-# runtimes, function names are typically `mcp_*` CamelCase (e.g.
-# `mcp_KagiKagiSearchFetch`, `mcp_Context7QueryDocs`). Registry names like
-# `kagi_search_fetch` or `context7_query-docs` are what Vision uses internally
-# (and what appears in `shared_read_only_tools` config), but agents that try to
-# invoke those literal strings will fail with `Model tried to call unavailable
-# tool 'X'`. When in doubt, instruct agents to look up the function name in
-# their own tool schema before calling.
+# Tool map keys are canonical callable names. Add `namespaced_name` when an
+# OpenCode Code Mode spelling is known. Vision returns both forms through
+# vision_guidance; older files without namespaced_name remain valid.
 
 # Global guidance that applies to all tool selection decisions
 global_guidance: |
@@ -154,7 +148,47 @@ servers:
 
 # Tool-level guidance (for specific tools across any server)
 tools:
-  # Override guidance for specific tools if needed
+  lgrep_search_semantic:
+    namespaced_name: tools.lgrep.search_semantic
+    priority: high
+    guidance: First local concept/intent code search.
+    prefer_for:
+      - local semantic code search
+      - code flow discovery
+
+  context7_resolve-library-id:
+    namespaced_name: 'tools.context7["resolve-library-id"]'
+    priority: high
+    guidance: Resolve the library ID before querying Context7 documentation.
+    prefer_for:
+      - library lookup
+      - framework lookup
+
+  context7_query-docs:
+    namespaced_name: 'tools.context7["query-docs"]'
+    priority: high
+    guidance: Query library or framework documentation after resolving an ID.
+    prefer_for:
+      - API reference
+      - framework behavior
+
+  # ADV tools are OpenCode host/plugin tools, not MCP tools inside the confined
+  # Code Mode runtime. Keep their canonical names; do not invent tools.advance.*.
+  adv_change_validate:
+    priority: high
+    guidance: Validate an ADV change against specifications and active conflicts.
+    prefer_for:
+      - spec validation
+      - proposal conflict detection
+
+  adv_run_test:
+    priority: high
+    guidance: Run commands and record typed verification evidence for an ADV task.
+    prefer_for:
+      - task verification
+      - red green testing evidence
+
+  # Override guidance for other specific tools if needed.
   mcp_webfetch:
     priority: medium
     guidance: |

@@ -107,6 +107,34 @@ supervision:
   max_restart_delay: 60s
 ```
 
+### Multi-agent / ADV workloads
+
+The default `session_timeout` is five minutes. That is appropriate for short,
+interactive calls, but code-intelligence agents often pause while they plan,
+delegate work, run tests, or wait for another sub-agent. If an idle session is
+reaped during that pause, the next tool call transparently spawns a fresh
+downstream process. No error reaches the agent, but startup and tool discovery
+add latency.
+
+When several ADV sub-agents resume together, a short timeout can also create a
+burst of simultaneous respawns. Use a longer timeout for MCP servers that are
+reused throughout a change:
+
+```yaml
+servers:
+  context7:
+    # ...command, args, env, and port...
+    session_timeout: 30m
+
+  lgrep:
+    # ...command, args, env, and port...
+    session_timeout: 30m
+```
+
+Keep the five-minute default for rarely used or resource-heavy servers. A
+longer timeout trades resident process resources for lower tail latency; it is
+not a keepalive and does not bypass `session_ttl` or `max_sessions`.
+
 ### Transport Types
 
 Vision uses **Streamable HTTP** as the upstream transport for all servers.

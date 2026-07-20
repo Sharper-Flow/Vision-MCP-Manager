@@ -44,6 +44,11 @@ type ServerInstructions struct {
 
 // ToolInstructions defines guidance for a specific tool within a server.
 type ToolInstructions struct {
+	// NamespacedName is the callable OpenCode Code Mode form, for example
+	// tools.lgrep.search_semantic. When omitted, Vision may derive it from the
+	// canonical tool name and configured server names.
+	NamespacedName string `yaml:"namespaced_name,omitempty" json:"namespaced_name,omitempty"`
+
 	// Priority indicates how preferred this tool is (high, medium, low)
 	Priority string `yaml:"priority,omitempty" json:"priority,omitempty"`
 

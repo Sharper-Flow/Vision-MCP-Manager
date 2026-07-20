@@ -53,6 +53,15 @@ export const VisionInitArgsSchema = z.object({
 
 export const VisionStatusArgsSchema = z.object({}).describe("Get Vision daemon status")
 
+export const VisionGuidanceArgsSchema = z.object({
+  context: z.string().optional().describe("Task context used to filter relevant guidance"),
+  server: z.string().optional().describe("Server name for server-specific guidance"),
+})
+
+export const VisionSlotStatusArgsSchema = z.object({}).describe("Get slot-group routing status")
+
+export const VisionMetricsArgsSchema = z.object({}).describe("Get Vision daemon metrics")
+
 // =============================================================================
 // Tool Implementations
 // =============================================================================
@@ -138,16 +147,9 @@ export async function visionSearch(args: z.infer<typeof VisionSearchArgsSchema>)
 export async function visionInit(args: z.infer<typeof VisionInitArgsSchema>): Promise<string> {
   const err = await checkDaemonRunning()
   if (err) return err
-  // Convert comma-separated servers string to array for the API
-  const servers = args.servers
-    ? args.servers
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s)
-    : undefined
   return callTool("vision_init", {
     path: args.path,
-    servers: servers,
+    servers: args.servers,
   })
 }
 
@@ -158,4 +160,30 @@ export async function visionStatus(): Promise<string> {
   const err = await checkDaemonRunning()
   if (err) return err
   return callTool("vision_status", {})
+}
+
+/** Get ranked server and tool selection guidance. */
+export async function visionGuidance(
+  args: z.infer<typeof VisionGuidanceArgsSchema>
+): Promise<string> {
+  const err = await checkDaemonRunning()
+  if (err) return err
+  return callTool("vision_guidance", {
+    context: args.context,
+    server: args.server,
+  })
+}
+
+/** Get per-slot session details for configured slot groups. */
+export async function visionSlotStatus(): Promise<string> {
+  const err = await checkDaemonRunning()
+  if (err) return err
+  return callTool("vision_slot_status", {})
+}
+
+/** Get aggregate Vision daemon metrics. */
+export async function visionMetrics(): Promise<string> {
+  const err = await checkDaemonRunning()
+  if (err) return err
+  return callTool("vision_metrics", {})
 }

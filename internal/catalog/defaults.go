@@ -223,8 +223,9 @@ func Default() *Catalog {
 
 	// Svelte
 	c.Add(&Entry{
-		Name:        "svelte",
-		Description: "Svelte 5 and SvelteKit documentation and code assistance",
+		Name:              "svelte",
+		CodemodeNamespace: "svelte-mcp",
+		Description:       "Svelte 5 and SvelteKit documentation and code assistance",
 		Capabilities: []string{
 			"documentation",
 			"svelte",

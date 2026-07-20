@@ -48,6 +48,7 @@ tools:
   custom_tool:
     priority: medium
     guidance: "Custom tool guidance"
+    namespaced_name: "tools.custom.lookup"
 `
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
 		t.Fatalf("Failed to write test file: %v", err)
@@ -105,6 +106,9 @@ tools:
 	}
 	if tool.Priority != "medium" {
 		t.Errorf("tool.Priority = %q, want %q", tool.Priority, "medium")
+	}
+	if tool.NamespacedName != "tools.custom.lookup" {
+		t.Errorf("tool.NamespacedName = %q, want %q", tool.NamespacedName, "tools.custom.lookup")
 	}
 
 	// Check nonexistent

@@ -66,6 +66,33 @@ func TestToolInit_WritesOpenCodeConfig(t *testing.T) {
 	}
 }
 
+func TestToolInit_AcceptsAdvertisedCommaSeparatedServerFilter(t *testing.T) {
+	registry := server.NewRegistry(nil, nil)
+	if err := registry.Add("kagi", &config.ServerConfig{Port: 6279, Command: "uvx"}); err != nil {
+		t.Fatalf("Add(kagi): %v", err)
+	}
+	registry.Get("kagi").State = server.StateRunning
+
+	srv := &Server{registry: registry}
+	path := filepath.Join(t.TempDir(), ".opencode.json")
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{
+		"path":    path,
+		"servers": "kagi",
+	}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v", err)
+	}
+
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if !response.Success {
+		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+	if len(response.Servers) != 1 || response.Servers[0] != "kagi" {
+		t.Fatalf("Servers = %#v, want [kagi]", response.Servers)
+	}
+}
+
 func TestToolInit_ReconcilesExistingOpenCodeConfig(t *testing.T) {
 	registry := server.NewRegistry(nil, nil)
 	if err := registry.Add("kagi", &config.ServerConfig{Port: 6279, Command: "uvx"}); err != nil {
@@ -135,7 +162,7 @@ func TestToolInit_ReconcilesExistingOpenCodeConfig(t *testing.T) {
 
 func TestToolSearch_EmptyQueryReturnsAlphabetical(t *testing.T) {
 	c := catalog.New()
-	c.Add(&catalog.Entry{Name: "zebra", Description: "Last"})
+	c.Add(&catalog.Entry{Name: "zebra", Description: "Last", CodemodeNamespace: "zebra-tools"})
 	c.Add(&catalog.Entry{Name: "alpha", Description: "First"})
 	c.Add(&catalog.Entry{Name: "beta", Description: "Second"})
 
@@ -159,6 +186,12 @@ func TestToolSearch_EmptyQueryReturnsAlphabetical(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("results = %#v, want %#v", got, want)
 		}
+	}
+	if got := response.Results[2].CodemodeNamespace; got != "zebra-tools" {
+		t.Fatalf("zebra codemode_namespace = %q, want zebra-tools", got)
+	}
+	if got := response.Results[0].CodemodeNamespace; got != "alpha" {
+		t.Fatalf("alpha codemode_namespace = %q, want alpha", got)
 	}
 }
 
