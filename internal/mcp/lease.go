@@ -249,6 +249,20 @@ func (m *LeaseManager) MarkCleanupUncertain(sessionID, reason string) bool {
 	return true
 }
 
+// RestoreActive reverses an expiry transition only when no cleanup request was
+// dispatched. It is used for pre-dispatch backend admission failures.
+func (m *LeaseManager) RestoreActive(sessionID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lease := m.leases[sessionID]
+	if lease == nil || lease.state != LeaseStateExpiring {
+		return false
+	}
+	lease.state = LeaseStateActive
+	lease.reason = ""
+	return true
+}
+
 func (m *LeaseManager) FinalizeClose(sessionID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -257,6 +271,16 @@ func (m *LeaseManager) FinalizeClose(sessionID string) bool {
 	}
 	delete(m.leases, sessionID)
 	return true
+}
+
+// InvalidateAll clears every lease and pending reservation after the owning
+// backend process or public listener has been torn down. No downstream session
+// can remain reachable after that ownership boundary disappears.
+func (m *LeaseManager) InvalidateAll() {
+	m.mu.Lock()
+	m.reservations = make(map[uint64]struct{})
+	m.leases = make(map[string]*leaseRecord)
+	m.mu.Unlock()
 }
 
 func (m *LeaseManager) AggregateInFlight() int {

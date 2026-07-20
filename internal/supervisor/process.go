@@ -33,6 +33,8 @@ type ManagedProcess struct {
 	startedAt    time.Time
 	restartCount int
 	lastError    error
+	generation   uint64
+	lifecycle    chan struct{}
 
 	// Suture integration
 	token suture.ServiceToken
@@ -52,6 +54,7 @@ func NewManagedProcess(name string, cfg *config.ServerConfig, supCfg config.Supe
 		supConfig: supCfg,
 		logger:    logger.With(slog.String("server", name)),
 		state:     StateStopped,
+		lifecycle: make(chan struct{}, 1),
 	}
 }
 
@@ -61,10 +64,13 @@ func (p *ManagedProcess) Serve(ctx context.Context) error {
 	p.mu.Lock()
 	p.state = StateStarting
 	p.mu.Unlock()
+	p.notifyLifecycle()
 
-	// Only handle stdio transport for now
+	// HTTP/SSE entries point at externally owned servers and need no child.
+	// Managed HTTP owns both a command and loopback URL, so it follows the
+	// supervised subprocess path while retaining native HTTP transport.
 	transport := p.config.InferTransport()
-	if transport != config.TransportStdio {
+	if transport != config.TransportStdio && transport != config.TransportManagedHTTP {
 		return p.serveProxy(ctx)
 	}
 
@@ -74,13 +80,16 @@ func (p *ManagedProcess) Serve(ctx context.Context) error {
 		p.state = StateCrashed
 		p.lastError = err
 		p.mu.Unlock()
+		p.notifyLifecycle()
 		return err
 	}
 
 	p.mu.Lock()
 	p.state = StateRunning
 	p.startedAt = time.Now()
+	p.generation++
 	p.mu.Unlock()
+	p.notifyLifecycle()
 
 	p.logger.Info("server started",
 		slog.Int("pid", p.pid),
@@ -89,6 +98,11 @@ func (p *ManagedProcess) Serve(ctx context.Context) error {
 
 	// Start stderr collector to prevent stream corruption
 	go p.collectStderr()
+	if transport == config.TransportManagedHTTP {
+		// Native HTTP servers do not use stdout for protocol traffic. Drain and
+		// log it so a verbose child cannot block on a full pipe.
+		go p.collectStdout()
+	}
 
 	// Wait for process exit or context cancellation
 	return p.wait(ctx)
@@ -178,6 +192,7 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 			p.logger.Info("server exited normally")
 		}
 		p.mu.Unlock()
+		p.notifyLifecycle()
 		return err
 
 	case <-ctx.Done():
@@ -205,6 +220,7 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 		p.mu.Lock()
 		p.state = StateStopped
 		p.mu.Unlock()
+		p.notifyLifecycle()
 		return ctx.Err()
 	}
 }
@@ -266,6 +282,24 @@ func (p *ManagedProcess) collectStderr() {
 	}
 	if err := scanner.Err(); err != nil {
 		p.logger.Debug("stderr scanner error", slog.String("error", err.Error()))
+	}
+}
+
+func (p *ManagedProcess) collectStdout() {
+	p.ioMu.RLock()
+	stdout := p.stdout
+	p.ioMu.RUnlock()
+	if stdout == nil {
+		return
+	}
+	defer func() { _ = stdout.Close() }()
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		p.logger.Debug("server stdout", slog.String("line", scanner.Text()))
+	}
+	if err := scanner.Err(); err != nil {
+		p.logger.Debug("stdout scanner error", slog.String("error", err.Error()))
 	}
 }
 
@@ -341,6 +375,27 @@ func (p *ManagedProcess) LastError() error {
 	defer p.mu.RUnlock()
 	return p.lastError
 }
+
+// LifecycleEvents coalesces process lifecycle transitions. Consumers must read
+// LifecycleSnapshot after each signal; the snapshot is the durable truth.
+func (p *ManagedProcess) LifecycleEvents() <-chan struct{} { return p.lifecycle }
+
+func (p *ManagedProcess) LifecycleSnapshot() (ServiceState, uint64) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.state, p.generation
+}
+
+func (p *ManagedProcess) notifyLifecycle() {
+	select {
+	case p.lifecycle <- struct{}{}:
+	default:
+	}
+}
+
+// RequestRestart terminates the current child process. Suture owns the
+// subsequent restart and lifecycle generation.
+func (p *ManagedProcess) RequestRestart() error { return p.terminate() }
 
 // Status returns a snapshot of the current service status.
 func (p *ManagedProcess) Status() ServiceStatus {

@@ -42,6 +42,12 @@ func (c *BackendCoordinator) State() BackendState {
 	return c.state
 }
 
+func (c *BackendCoordinator) Ready() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.state == BackendReady
+}
+
 func (c *BackendCoordinator) MarkProbing() {
 	c.mu.Lock()
 	c.state = BackendProbing

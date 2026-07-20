@@ -63,8 +63,9 @@ func (s *Supervisor) AddServer(name string, serverCfg *config.ServerConfig) (*Ma
 	proc := NewManagedProcess(name, serverCfg, s.config, s.logger)
 	s.services[name] = proc
 
-	// Add to suture supervisor
-	s.Add(proc)
+	// Keep the exact registration token so dynamic stop removes the supervised
+	// child rather than leaving an orphaned restart loop.
+	proc.token = s.Add(proc)
 
 	s.logger.Info("registered server",
 		slog.String("name", name),

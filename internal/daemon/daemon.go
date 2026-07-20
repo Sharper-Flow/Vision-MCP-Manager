@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"reflect"
 	"sort"
 	"sync"
@@ -53,6 +55,10 @@ type Daemon struct {
 	// Per-server session metrics, keyed by server name.
 	serverMetrics   map[string]*metrics.ServerMetrics
 	serverMetricsMu sync.RWMutex
+
+	managedGateways   map[string]*mcp.ManagedHTTPGateway
+	managedCancels    map[string]context.CancelFunc
+	managedGatewaysMu sync.RWMutex
 }
 
 // Config configures the daemon.
@@ -129,6 +135,8 @@ func New(cfg Config) (*Daemon, error) {
 		ctx:                ctx,
 		cancel:             cancel,
 		serverMetrics:      make(map[string]*metrics.ServerMetrics),
+		managedGateways:    make(map[string]*mcp.ManagedHTTPGateway),
+		managedCancels:     make(map[string]context.CancelFunc),
 	}
 
 	// Register event handler for dynamic server lifecycle management
@@ -643,8 +651,13 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		return nil
 	}
 
-	// Skip HTTP transport servers (they don't need a proxy)
-	if srv.Config.InferTransport() != config.TransportStdio {
+	transport := srv.Config.InferTransport()
+	if transport == config.TransportManagedHTTP {
+		return d.setupManagedHTTPProxy(srv)
+	}
+
+	// Externally owned HTTP transports do not need a Vision proxy.
+	if transport != config.TransportStdio {
 		d.logger.Debug("skipping non-stdio server",
 			slog.String("server", srv.Name),
 			slog.String("transport", string(srv.Config.InferTransport())),
@@ -804,6 +817,151 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	return nil
 }
 
+func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
+	if d.portManager.Get(srv.Name) != nil {
+		return nil
+	}
+	if _, loaded := d.proxySetupInProgress.LoadOrStore(srv.Name, true); loaded {
+		return nil
+	}
+	defer d.proxySetupInProgress.Delete(srv.Name)
+
+	target, err := url.Parse(srv.Config.URL)
+	if err != nil {
+		return fmt.Errorf("parse managed HTTP target: %w", err)
+	}
+	coordinator := supervisor.NewBackendCoordinator()
+	coordinator.MarkProbing()
+	process := srv.Process
+	if process == nil {
+		return errors.New("managed HTTP server has no supervised process")
+	}
+	var gateway *mcp.ManagedHTTPGateway
+	gateway, err = mcp.NewManagedHTTPGateway(mcp.ManagedHTTPGatewayConfig{
+		Target:      target,
+		MaxSessions: srv.Config.MaxSessions,
+		IdleTimeout: srv.Config.SessionTimeout.Duration(),
+		Backend:     coordinator,
+		OnAmbiguousFailure: func(cause error) {
+			go d.recycleManagedHTTPBackend(srv.Name, process, coordinator, cause)
+		},
+		Logger: d.logger.With(slog.String("server", srv.Name)),
+	})
+	if err != nil {
+		return fmt.Errorf("create managed HTTP gateway: %w", err)
+	}
+
+	d.mu.RLock()
+	secCfg := mcp.SecurityConfig{
+		BearerToken:    d.cfg.Security.BearerToken,
+		AllowedOrigins: d.cfg.Security.AllowedOrigins,
+	}
+	d.mu.RUnlock()
+	if err := d.portManager.AddStreamable(srv.Name, srv.Config.Port, gateway, gateway, secCfg); err != nil {
+		return fmt.Errorf("add managed HTTP listener: %w", err)
+	}
+	reapInterval := srv.Config.SessionTimeout.Duration() / 2
+	if reapInterval <= 0 || reapInterval > 30*time.Second {
+		reapInterval = 30 * time.Second
+	}
+	monitorCtx, monitorCancel := context.WithCancel(d.ctx)
+	gateway.StartReaper(monitorCtx, reapInterval)
+	d.managedGatewaysMu.Lock()
+	d.managedGateways[srv.Name] = gateway
+	d.managedCancels[srv.Name] = monitorCancel
+	d.managedGatewaysMu.Unlock()
+
+	d.wg.Add(1)
+	go d.monitorManagedHTTPBackend(monitorCtx, srv.Name, process, target, gateway, coordinator)
+	return nil
+}
+
+func (d *Daemon) recycleManagedHTTPBackend(name string, process *supervisor.ManagedProcess, coordinator *supervisor.BackendCoordinator, cause error) {
+	ctx, cancel := context.WithTimeout(d.ctx, 30*time.Second)
+	defer cancel()
+	err := coordinator.DrainAndRecycle(ctx, func() error {
+		if process == nil {
+			return supervisor.ErrBackendUnavailable
+		}
+		return process.RequestRestart()
+	})
+	if err != nil && !errors.Is(err, supervisor.ErrBackendUnavailable) && !errors.Is(err, context.Canceled) {
+		d.logger.Error("managed HTTP recycle failed",
+			slog.String("server", name), slog.String("cause", cause.Error()), slog.String("error", err.Error()))
+	}
+}
+
+func (d *Daemon) monitorManagedHTTPBackend(ctx context.Context, name string, process *supervisor.ManagedProcess, target *url.URL, gateway *mcp.ManagedHTTPGateway, coordinator *supervisor.BackendCoordinator) {
+	defer d.wg.Done()
+	if process == nil {
+		coordinator.MarkProcessLost()
+		return
+	}
+	var attemptedGeneration uint64
+	var activeGeneration uint64
+	for {
+		state, generation := process.LifecycleSnapshot()
+		switch state {
+		case supervisor.StateRunning:
+			if generation != 0 && generation != attemptedGeneration {
+				if activeGeneration != 0 && generation != activeGeneration {
+					coordinator.MarkProcessLost()
+					gateway.CloseAll()
+					activeGeneration = 0
+				}
+				attemptedGeneration = generation
+				coordinator.MarkProbing()
+				probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				err := waitForManagedHTTPBackend(probeCtx, target)
+				if err == nil {
+					err = mcp.ProbeManagedHTTPBackend(probeCtx, target, nil)
+				}
+				cancel()
+				if err == nil {
+					coordinator.MarkReady()
+					activeGeneration = generation
+					d.logger.Info("managed HTTP gateway ready",
+						slog.String("server", name), slog.Uint64("generation", generation))
+				} else {
+					coordinator.MarkProcessLost()
+					gateway.CloseAll()
+					d.logger.Error("managed HTTP readiness probe failed; requesting restart",
+						slog.String("server", name), slog.String("error", err.Error()))
+					_ = process.RequestRestart()
+				}
+			}
+		case supervisor.StateCrashed, supervisor.StateStopped, supervisor.StateFailed:
+			coordinator.MarkProcessLost()
+			gateway.CloseAll()
+			activeGeneration = 0
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-process.LifecycleEvents():
+		}
+	}
+}
+
+func waitForManagedHTTPBackend(ctx context.Context, target *url.URL) error {
+	dialer := net.Dialer{Timeout: 250 * time.Millisecond}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		conn, err := dialer.DialContext(ctx, "tcp", target.Host)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for %s: %w", target.Host, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
 // teardownProxyForServer removes the HTTP proxy for a server.
 func (d *Daemon) teardownProxyForServer(name string) {
 	if err := d.portManager.Remove(name); err != nil {
@@ -816,6 +974,13 @@ func (d *Daemon) teardownProxyForServer(name string) {
 			slog.String("server", name),
 		)
 	}
+	d.managedGatewaysMu.Lock()
+	if cancel := d.managedCancels[name]; cancel != nil {
+		cancel()
+	}
+	delete(d.managedGateways, name)
+	delete(d.managedCancels, name)
+	d.managedGatewaysMu.Unlock()
 	d.deleteServerMetrics(name)
 }
 
