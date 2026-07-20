@@ -11,6 +11,9 @@ const MANAGED_TOOLS = [
   ["vision_search", "Search for servers by name or capability"],
   ["vision_init", "Generate .opencode.json config"],
   ["vision_status", "Check daemon health"],
+  ["vision_guidance", "Get ranked tool-selection guidance"],
+  ["vision_slot_status", "Inspect slot-group routing health"],
+  ["vision_metrics", "Inspect daemon and tool-call metrics"],
 ] as const
 
 function toolName(name: string, codeMode: boolean): string {

@@ -26,12 +26,29 @@ import {
   visionSearch,
   visionInit,
   visionStatus,
+  visionGuidance,
+  visionSlotStatus,
+  visionMetrics,
   VisionAddArgsSchema,
   VisionRemoveArgsSchema,
   VisionRestartArgsSchema,
   VisionSearchArgsSchema,
   VisionInitArgsSchema,
+  VisionGuidanceArgsSchema,
 } from "./tools"
+
+export const VISION_PLUGIN_TOOL_NAMES = {
+  list: "vision_list",
+  add: "vision_add",
+  remove: "vision_remove",
+  restart: "vision_restart",
+  search: "vision_search",
+  init: "vision_init",
+  status: "vision_status",
+  guidance: "vision_guidance",
+  slotStatus: "vision_slot_status",
+  metrics: "vision_metrics",
+} as const
 
 // =============================================================================
 // Event Schemas
@@ -124,7 +141,7 @@ const VisionPlugin: Plugin = async () => {
 
     tools: [
       {
-        name: "vision_list",
+        name: VISION_PLUGIN_TOOL_NAMES.list,
         description:
           "List all registered MCP servers with their current status (running/stopped/failed)",
         parameters: z.object({}),
@@ -134,7 +151,7 @@ const VisionPlugin: Plugin = async () => {
         },
       },
       {
-        name: "vision_add",
+        name: VISION_PLUGIN_TOOL_NAMES.add,
         description: "Add and optionally start an MCP server from the Vision registry",
         parameters: VisionAddArgsSchema,
         execute: async (args: z.infer<typeof VisionAddArgsSchema>) => {
@@ -143,7 +160,7 @@ const VisionPlugin: Plugin = async () => {
         },
       },
       {
-        name: "vision_remove",
+        name: VISION_PLUGIN_TOOL_NAMES.remove,
         description: "Stop and remove an MCP server from the active configuration",
         parameters: VisionRemoveArgsSchema,
         execute: async (args: z.infer<typeof VisionRemoveArgsSchema>) => {
@@ -152,7 +169,7 @@ const VisionPlugin: Plugin = async () => {
         },
       },
       {
-        name: "vision_restart",
+        name: VISION_PLUGIN_TOOL_NAMES.restart,
         description:
           "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
         parameters: VisionRestartArgsSchema,
@@ -162,7 +179,7 @@ const VisionPlugin: Plugin = async () => {
         },
       },
       {
-        name: "vision_search",
+        name: VISION_PLUGIN_TOOL_NAMES.search,
         description:
           "Search the Vision registry for MCP servers by name, capability tags, or description",
         parameters: VisionSearchArgsSchema,
@@ -172,7 +189,7 @@ const VisionPlugin: Plugin = async () => {
         },
       },
       {
-        name: "vision_init",
+        name: VISION_PLUGIN_TOOL_NAMES.init,
         description:
           "Generate MCP client configuration (.opencode.json) for currently running servers",
         parameters: VisionInitArgsSchema,
@@ -182,11 +199,38 @@ const VisionPlugin: Plugin = async () => {
         },
       },
       {
-        name: "vision_status",
+        name: VISION_PLUGIN_TOOL_NAMES.status,
         description: "Get Vision daemon status including uptime, memory usage, and server counts",
         parameters: z.object({}),
         execute: async () => {
           const result = await visionStatus()
+          return { content: result }
+        },
+      },
+      {
+        name: VISION_PLUGIN_TOOL_NAMES.guidance,
+        description: "Get ranked tool-selection guidance for a task or specific server",
+        parameters: VisionGuidanceArgsSchema,
+        execute: async (args: z.infer<typeof VisionGuidanceArgsSchema>) => {
+          const result = await visionGuidance(args)
+          return { content: result }
+        },
+      },
+      {
+        name: VISION_PLUGIN_TOOL_NAMES.slotStatus,
+        description: "Get slot-group routing status and per-slot session details",
+        parameters: z.object({}),
+        execute: async () => {
+          const result = await visionSlotStatus()
+          return { content: result }
+        },
+      },
+      {
+        name: VISION_PLUGIN_TOOL_NAMES.metrics,
+        description: "Get Vision daemon metrics for sessions, tool calls, errors, and subprocesses",
+        parameters: z.object({}),
+        execute: async () => {
+          const result = await visionMetrics()
           return { content: result }
         },
       },
