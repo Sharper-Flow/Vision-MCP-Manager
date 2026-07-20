@@ -100,16 +100,25 @@ function resetSession(): void {
   cachedSessionId = null
 }
 
+async function readWithTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error("Response body read timeout")), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+  }
+}
+
 /**
  * Read response JSON with timeout protection.
  */
 async function readJsonWithTimeout<T>(response: Response, timeoutMs: number): Promise<T> {
-  return Promise.race([
-    response.json() as Promise<T>,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error("Response body read timeout")), timeoutMs)
-    ),
-  ])
+  return readWithTimeout(response.json() as Promise<T>, timeoutMs)
 }
 
 /**
@@ -120,8 +129,8 @@ async function readJsonWithTimeout<T>(response: Response, timeoutMs: number): Pr
  * single-response POSTs (initialize, tools/call). We only need the first
  * frame because each POST we make expects a single response.
  */
-async function readSsePayload<T>(response: Response): Promise<T> {
-  const text = await response.text()
+async function readSsePayload<T>(response: Response, timeoutMs: number): Promise<T> {
+  const text = await readWithTimeout(response.text(), timeoutMs)
   for (const rawLine of text.split("\n")) {
     const line = rawLine.replace(/\r$/, "")
     if (line.startsWith("data:")) {
@@ -139,7 +148,7 @@ async function readSsePayload<T>(response: Response): Promise<T> {
 async function readRpcResponse(response: Response, timeoutMs: number): Promise<JsonRpcResponse> {
   const contentType = response.headers.get("content-type") || ""
   if (contentType.includes("text/event-stream")) {
-    return readSsePayload<JsonRpcResponse>(response)
+    return readSsePayload<JsonRpcResponse>(response, timeoutMs)
   }
   return readJsonWithTimeout<JsonRpcResponse>(response, timeoutMs)
 }
@@ -222,7 +231,7 @@ async function performInitialize(): Promise<string> {
   }
 
   try {
-    await fetch(MCP_ENDPOINT, {
+    const notificationResponse = await fetch(MCP_ENDPOINT, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -232,7 +241,9 @@ async function performInitialize(): Promise<string> {
       body: JSON.stringify(notif),
       signal: notifController.signal,
     })
-    // Daemon returns 202 with no body for notifications; we don't inspect it.
+    if (!notificationResponse.ok) {
+      throw new Error(`notifications/initialized HTTP error: ${notificationResponse.status}`)
+    }
   } finally {
     clearTimeout(notifTimeoutId)
   }

@@ -158,6 +158,58 @@ describe("MCP client session unit lifecycle", () => {
     expect(parsed.healthy).toBe(true)
   })
 
+  it("times out while reading an SSE response body", async () => {
+    const previousTimeout = process.env.VISION_BODY_TIMEOUT_MS
+    process.env.VISION_BODY_TIMEOUT_MS = "1"
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { method: string }
+      if (body.method === "initialize") {
+        return makeResponse(initResponse("sid-sse-timeout"))
+      }
+      if (body.method === "notifications/initialized") {
+        return makeResponse({ status: 202, body: "" })
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "text/event-stream" }),
+        text: () => new Promise<string>(() => {}),
+      } as Response
+    })
+
+    try {
+      const { callTool } = await loadClient()
+      const result = await callTool("vision_status", {})
+      expect(JSON.parse(result).error).toMatch(/Response body read timeout/)
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.VISION_BODY_TIMEOUT_MS
+      } else {
+        process.env.VISION_BODY_TIMEOUT_MS = previousTimeout
+      }
+    }
+  })
+
+  it("fails initialization when notifications/initialized is rejected", async () => {
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { method: string }
+      if (body.method === "initialize") {
+        return makeResponse(initResponse("sid-notification-rejected"))
+      }
+      if (body.method === "notifications/initialized") {
+        return makeResponse({ status: 500, body: "rejected" })
+      }
+      return makeResponse({ status: 500, body: "tools/call must not be sent" })
+    })
+
+    const { callTool } = await loadClient()
+    const result = await callTool("vision_status", {})
+    const parsed = JSON.parse(result)
+
+    expect(parsed.success).toBe(false)
+    expect(parsed.error).toMatch(/notifications\/initialized HTTP error: 500/)
+  })
+
   it("HTTP 404 on tools/call triggers one re-init + retry, then succeeds", async () => {
     let toolCallAttempt = 0
     fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {

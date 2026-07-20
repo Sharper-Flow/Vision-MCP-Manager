@@ -954,8 +954,8 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	}
 
 	var params struct {
-		Path    string   `json:"path"`
-		Servers []string `json:"servers"`
+		Path    string          `json:"path"`
+		Servers json.RawMessage `json:"servers"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, NewValidationError("invalid arguments: " + err.Error())
@@ -965,11 +965,24 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		params.Path = ".opencode.json"
 	}
 
-	// Build servers filter from array
+	// The public MCP schema advertises a comma-separated string. Accept the
+	// historical array form too so existing direct clients remain compatible.
+	var requestedServers []string
+	if len(params.Servers) > 0 && string(params.Servers) != "null" {
+		if err := json.Unmarshal(params.Servers, &requestedServers); err != nil {
+			var serverList string
+			if stringErr := json.Unmarshal(params.Servers, &serverList); stringErr != nil {
+				return nil, NewValidationError("servers must be a comma-separated string or string array")
+			}
+			requestedServers = strings.Split(serverList, ",")
+		}
+	}
+
+	// Build server filter from the accepted forms.
 	var serverFilter map[string]bool
-	if len(params.Servers) > 0 {
+	if len(requestedServers) > 0 {
 		serverFilter = make(map[string]bool)
-		for _, name := range params.Servers {
+		for _, name := range requestedServers {
 			name = strings.TrimSpace(name)
 			if name != "" {
 				serverFilter[name] = true

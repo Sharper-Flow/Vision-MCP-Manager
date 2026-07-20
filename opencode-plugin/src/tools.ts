@@ -147,16 +147,9 @@ export async function visionSearch(args: z.infer<typeof VisionSearchArgsSchema>)
 export async function visionInit(args: z.infer<typeof VisionInitArgsSchema>): Promise<string> {
   const err = await checkDaemonRunning()
   if (err) return err
-  // Convert comma-separated servers string to array for the API
-  const servers = args.servers
-    ? args.servers
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s)
-    : undefined
   return callTool("vision_init", {
     path: args.path,
-    servers: servers,
+    servers: args.servers,
   })
 }
 
