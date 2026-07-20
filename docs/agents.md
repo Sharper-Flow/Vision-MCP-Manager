@@ -20,8 +20,11 @@ By giving an agent access to Vision's Admin port, you empower it to maintain its
 | `vision_search` | Finds new MCP servers in the local catalog. |
 | `vision_add` | Provisions a new server from the catalog. |
 | `vision_remove` | Decommissions an existing server. |
+| `vision_restart` | Restarts a configured server without changing its port assignment. |
 | `vision_guidance` | Provides hints on which tools to prefer for specific tasks. |
 | `vision_init` | Generates configuration files for other agents. |
+| `vision_slot_status` | Reports slot-group routing and per-slot session state. |
+| `vision_metrics` | Reports daemon session, tool-call, error, and subprocess metrics. |
 
 ## Supported Agents
 

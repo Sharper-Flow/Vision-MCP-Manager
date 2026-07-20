@@ -79,14 +79,10 @@ func TestLoad_FileNotFound(t *testing.T) {
 
 func TestLoad_EmptyPath_UsesDefault(t *testing.T) {
 	// This test verifies DefaultConfigPath is used when path is empty
-	// Will fail if default config doesn't exist, which is expected
+	// Isolate HOME so a developer's live Vision configuration cannot affect it.
+	t.Setenv("HOME", t.TempDir())
 	_, err := Load("")
-	if err == nil {
-		// If it succeeds, the user has a config at the default location
-		t.Log("Default config exists, skipping file-not-found check")
-		return
-	}
-	// Should be file not found (unless user has a config there)
+	// The isolated default config must not exist.
 	if !errors.Is(err, ErrConfigNotFound) {
 		t.Errorf("Expected ErrConfigNotFound, got: %v", err)
 	}

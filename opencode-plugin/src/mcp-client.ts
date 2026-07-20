@@ -302,7 +302,9 @@ function isSessionExpiredSignal(
 ): boolean {
   if (httpStatus === 404) return true
   if (rpcError && rpcError.code === 0) {
-    if (/is invalid during session initialization/i.test(rpcError.message)) return true
+    if (rpcError.message === 'method "tools/call" is invalid during session initialization') {
+      return true
+    }
     if (/^HTTP 404/.test(rpcError.message)) return true
   }
   return false

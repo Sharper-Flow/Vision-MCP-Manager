@@ -278,6 +278,34 @@ describe("MCP client session unit lifecycle", () => {
     expect(countInitializeCalls(fetchMock)).toBe(2)
   })
 
+  it("does not retry an arbitrary RPC error that merely contains the daemon rejection text", async () => {
+    fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { method: string }
+      if (body.method === "initialize") {
+        return makeResponse(initResponse("sid-no-broad-retry"))
+      }
+      if (body.method === "notifications/initialized") {
+        return makeResponse({ status: 202, body: "" })
+      }
+      return makeResponse({
+        body: {
+          jsonrpc: "2.0",
+          id: 2,
+          error: {
+            code: 0,
+            message: 'upstream error: method "tools/call" is invalid during session initialization',
+          },
+        },
+      })
+    })
+
+    const { callTool } = await loadClient()
+    const result = await callTool("vision_add", { name: "example", start: true })
+
+    expect(JSON.parse(result).success).toBe(false)
+    expect(countInitializeCalls(fetchMock)).toBe(1)
+  })
+
   it("single-flight: 5 concurrent callTool → exactly 1 initialize POST", async () => {
     fetchMock.mockImplementation(async (_url: string, init: RequestInit) => {
       const body = JSON.parse(init.body as string) as { method: string }
