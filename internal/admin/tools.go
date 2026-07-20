@@ -1384,12 +1384,13 @@ func (s *Server) toolMetrics(_ context.Context, _ json.RawMessage) (*ToolCallRes
 
 // GuidanceEntry represents guidance for a single server or tool.
 type GuidanceEntry struct {
-	Name      string   `json:"name"`
-	Priority  string   `json:"priority,omitempty"`
-	Guidance  string   `json:"guidance,omitempty"`
-	PreferFor []string `json:"prefer_for,omitempty"`
-	AvoidFor  []string `json:"avoid_for,omitempty"`
-	Examples  []string `json:"examples,omitempty"`
+	Name           string   `json:"name"`
+	NamespacedName string   `json:"namespaced_name,omitempty"`
+	Priority       string   `json:"priority,omitempty"`
+	Guidance       string   `json:"guidance,omitempty"`
+	PreferFor      []string `json:"prefer_for,omitempty"`
+	AvoidFor       []string `json:"avoid_for,omitempty"`
+	Examples       []string `json:"examples,omitempty"`
 }
 
 // GuidanceResponse is the response for vision_guidance.
@@ -1473,7 +1474,7 @@ func (s *Server) toolGuidance(ctx context.Context, args json.RawMessage) (*ToolC
 			continue
 		}
 
-		response.Tools = append(response.Tools, toolInstructionsToEntry(name, inst))
+		response.Tools = append(response.Tools, s.toolInstructionsToEntry(name, inst))
 	}
 
 	// Sort by priority (high first)
@@ -1496,14 +1497,20 @@ func serverInstructionsToEntry(name string, inst *config.ServerInstructions) Gui
 }
 
 // toolInstructionsToEntry converts ToolInstructions to GuidanceEntry.
-func toolInstructionsToEntry(name string, inst *config.ToolInstructions) GuidanceEntry {
+func (s *Server) toolInstructionsToEntry(name string, inst *config.ToolInstructions) GuidanceEntry {
+	namespacedName := inst.NamespacedName
+	if namespacedName == "" && s.instructions != nil {
+		namespacedName = deriveNamespacedName(name, s.instructions.ServerNames())
+	}
+
 	return GuidanceEntry{
-		Name:      name,
-		Priority:  inst.Priority,
-		Guidance:  inst.Guidance,
-		PreferFor: inst.PreferFor,
-		AvoidFor:  inst.AvoidFor,
-		Examples:  inst.Examples,
+		Name:           name,
+		NamespacedName: namespacedName,
+		Priority:       inst.Priority,
+		Guidance:       inst.Guidance,
+		PreferFor:      inst.PreferFor,
+		AvoidFor:       inst.AvoidFor,
+		Examples:       inst.Examples,
 	}
 }
 
