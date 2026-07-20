@@ -42,11 +42,36 @@ OpenCode supports Vision natively via its `remote` transport.
 }
 ```
 
+#### OpenCode Code Mode
+
+When `OPENCODE_EXPERIMENTAL_CODE_MODE=true`, MCP tools are called through the
+Code Mode runtime rather than as top-level functions. Vision's Admin tools use
+the `vision` namespace:
+
+```javascript
+const servers = await tools.vision.vision_list({})
+const matches = await tools.vision.vision_search({ query: "documentation" })
+```
+
+Discover current signatures before calling an unfamiliar tool:
+
+```javascript
+return await tools.$codemode.search({
+  query: "MCP server management",
+  namespace: "vision",
+})
+```
+
+Names containing characters that are not valid JavaScript identifiers use
+bracket notation—for example `tools.context7["resolve-library-id"](...)`.
+Host/plugin tools such as `adv_change_validate` are outside the confined Code
+Mode runtime and keep their normal host-call form.
+
 ## Tool Selection Guidance
 
 Vision's `vision_guidance` tool is a critical feature for advanced agents. It helps solve the "too many tools" problem by providing metadata about which tools are most reliable or appropriate for a given task.
 
-When an agent is unsure which tool to use (e.g., "Should I use Brave Search or Kagi?"), it can call `vision_guidance(context="web search")` to receive ranked recommendations based on your local configuration.
+When an agent is unsure which tool to use (e.g., "Should I use Brave Search or Kagi?"), it can call `vision_guidance(context="web search")` to receive ranked recommendations based on your local configuration. Guidance responses may include both the canonical name and a `namespaced_name` that can be copied into Code Mode.
 
 ## Best Practices for Agent Integration
 
