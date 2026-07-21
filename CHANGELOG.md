@@ -1,3 +1,9 @@
+## 2026-07-21 (v1.3.4)
+
+### Changed
+
+- adopt canonical Bun+TS baseline for opencode-plugin (#8) (chore: dev-tooling)
+
 ## 2026-07-20 (v1.3.3)
 
 ### Changed
