@@ -36,19 +36,12 @@ import {
   VisionInitArgsSchema,
   VisionGuidanceArgsSchema,
 } from "./tools"
-
-export const VISION_PLUGIN_TOOL_NAMES = {
-  list: "vision_list",
-  add: "vision_add",
-  remove: "vision_remove",
-  restart: "vision_restart",
-  search: "vision_search",
-  init: "vision_init",
-  status: "vision_status",
-  guidance: "vision_guidance",
-  slotStatus: "vision_slot_status",
-  metrics: "vision_metrics",
-} as const
+// Tool-name constants live in a data-only sibling module so this ENTRY module
+// exports functions only. The OpenCode 1.18.4+ loader iterates
+// Object.values(entryModule) and throws "Plugin export is not a function" for
+// any non-function export (a plain object map trips it). Imported WITHOUT
+// re-export; consumers/tests import from "./tool-names" directly.
+import { VISION_PLUGIN_TOOL_NAMES } from "./tool-names"
 
 // =============================================================================
 // Event Schemas

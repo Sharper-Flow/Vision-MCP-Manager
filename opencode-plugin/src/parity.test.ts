@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { VISION_PLUGIN_TOOL_NAMES } from "./index"
+import { VISION_PLUGIN_TOOL_NAMES } from "./tool-names"
 import { listTools } from "./mcp-client"
 
 const daemonReachable = await fetch("http://localhost:6275/health")
