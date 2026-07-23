@@ -1,3 +1,9 @@
+## 2026-07-23 (v1.3.5)
+
+### Fixed
+
+- move tool-name constants out of plugin entry module (#9)
+
 ## 2026-07-21 (v1.3.4)
 
 ### Changed
