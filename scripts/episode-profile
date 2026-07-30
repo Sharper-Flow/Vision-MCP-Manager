@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+# episode-profile — no-restart memory snapshot/comparison for a Vision-managed server.
+#
+# Captures VmRSS, RssAnon, RssFile, RssShmem from /proc/<pid>/status and Pss from
+# /proc/<pid>/smaps_rollup, together with the server's Vision /v1/servers entry.
+# A second invocation with --compare classifies the trend as stable, growing, or
+# inconclusive without restarting the daemon or the target process.
+#
+# Usage: episode-profile [options]
+
+set -euo pipefail
+
+DEFAULT_NAME="Episode"
+DEFAULT_ADDR="http://localhost:6275"
+DEFAULT_SNAPSHOT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/vision/profiles"
+
+SERVER_NAME="$DEFAULT_NAME"
+ADDR="$DEFAULT_ADDR"
+SNAPSHOT_DIR="$DEFAULT_SNAPSHOT_DIR"
+OUTPUT=""
+COMPARE=""
+JSON=0
+
+usage() {
+    cat <<'EOF'
+Usage: episode-profile [options]
+
+Capture a Linux procfs memory snapshot of a Vision-managed server and optionally
+compare it with a previous snapshot.
+
+Options:
+  -n, --name NAME         Server name in the Vision registry (default: Episode)
+  -a, --addr URL          Vision admin API base URL (default: http://localhost:6275)
+  -d, --snapshot-dir DIR  Directory for saved snapshots (default: ~/.local/share/vision/profiles)
+  -o, --output FILE       Write the snapshot or comparison report to FILE (use - for stdout)
+  -c, --compare FILE      Compare current measurement against baseline FILE
+  -j, --json              Print machine-readable JSON to stdout
+  -h, --help              Show this help message
+
+Examples:
+  # Record a snapshot
+  episode-profile
+
+  # Record a snapshot for a server named differently
+  episode-profile --name my-server
+
+  # Compare with a previous snapshot
+  episode-profile --compare ~/.local/share/vision/profiles/Episode-2026-07-30T20-00-00.json
+
+Environment variables:
+  VISION_API_URL          Alias for --addr
+  PROCFS_ROOT             Root for /proc-style lookups (default: /proc; used by tests)
+  SNAPSHOT_DIR            Alias for --snapshot-dir
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -n|--name)
+            SERVER_NAME="$2"
+            shift 2
+            ;;
+        -a|--addr)
+            ADDR="$2"
+            shift 2
+            ;;
+        -d|--snapshot-dir)
+            SNAPSHOT_DIR="$2"
+            shift 2
+            ;;
+        -o|--output)
+            OUTPUT="$2"
+            shift 2
+            ;;
+        -c|--compare)
+            COMPARE="$2"
+            shift 2
+            ;;
+        -j|--json)
+            JSON=1
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Environment aliases override parsed flags.
+ADDR="${VISION_API_URL:-$ADDR}"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-$DEFAULT_SNAPSHOT_DIR}"
+
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "ERROR: required command '$1' not found on PATH" >&2
+        exit 1
+    fi
+}
+
+require_command curl
+require_command jq
+require_command date
+
+PROCFS_ROOT="${PROCFS_ROOT:-/proc}"
+
+# Fetch a single server's detail from the Vision admin API. Falls back to the
+# server list if the detail endpoint is unavailable.
+resolve_server() {
+    local name="$1" api="$2"
+    local tmp_body
+    tmp_body=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_body'" RETURN
+
+    local http_code
+    http_code=$(curl -s -S -L --max-time 5 -w "%{http_code}" -o "$tmp_body" "$api/v1/servers/$name" 2>/dev/null || true)
+    if [[ "$http_code" == "200" ]]; then
+        jq -c . "$tmp_body"
+        return 0
+    fi
+
+    http_code=$(curl -s -S -L --max-time 5 -w "%{http_code}" -o "$tmp_body" "$api/v1/servers" 2>/dev/null || true)
+    if [[ "$http_code" != "200" ]]; then
+        return 1
+    fi
+
+    local found
+    found=$(jq -c --arg name "$name" '[.servers[]? | select(.name == $name)] | first' "$tmp_body")
+    if [[ -z "$found" || "$found" == "null" ]]; then
+        return 1
+    fi
+    echo "$found"
+}
+
+fetch_daemon_health() {
+    local api="$1"
+    local tmp_body
+    tmp_body=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp_body'" RETURN
+
+    local http_code
+    http_code=$(curl -s -S -L --max-time 5 -w "%{http_code}" -o "$tmp_body" "$api/health" 2>/dev/null || true)
+    if [[ "$http_code" == "200" ]]; then
+        jq -c . "$tmp_body"
+    else
+        echo "null"
+    fi
+}
+
+read_status_value() {
+    local root="$1" pid="$2" field="$3"
+    local file="$root/$pid/status"
+    [[ -r "$file" ]] || return 1
+    local val
+    val=$(awk -v f="$field:" '$1 == f {print $2; found=1; exit} END {exit !found}' "$file")
+    [[ -n "$val" ]] || return 1
+    echo "$val"
+}
+
+read_smaps_value() {
+    local root="$1" pid="$2" field="$3"
+    local file="$root/$pid/smaps_rollup"
+    [[ -r "$file" ]] || return 1
+    local val
+    val=$(awk -v f="$field:" '$1 == f {print $2; found=1; exit} END {exit !found}' "$file")
+    [[ -n "$val" ]] || return 1
+    echo "$val"
+}
+
+# Build the current memory snapshot as JSON.
+build_snapshot() {
+    local timestamp server_json health_json procfs_root name
+    timestamp="$1"
+    server_json="$2"
+    health_json="$3"
+    procfs_root="$4"
+    name="$5"
+
+    local pid="" context_server="null"
+    if [[ -n "$server_json" ]]; then
+        pid=$(jq -r '.pid // empty' <<< "$server_json" || true)
+        context_server="$server_json"
+    fi
+
+    local vmrss="" rssl_anon="" rssl_file="" rssl_shmem="" pss=""
+    local read_errors=()
+
+    if [[ -n "$pid" && -d "$procfs_root/$pid" ]]; then
+        vmrss=$(read_status_value "$procfs_root" "$pid" "VmRSS" 2>/dev/null || true)
+        rssl_anon=$(read_status_value "$procfs_root" "$pid" "RssAnon" 2>/dev/null || true)
+        rssl_file=$(read_status_value "$procfs_root" "$pid" "RssFile" 2>/dev/null || true)
+        rssl_shmem=$(read_status_value "$procfs_root" "$pid" "RssShmem" 2>/dev/null || true)
+        pss=$(read_smaps_value "$procfs_root" "$pid" "Pss" 2>/dev/null || true)
+
+        [[ -n "$vmrss" ]] || read_errors+=("VmRSS unreadable or missing")
+        [[ -n "$rssl_anon" ]] || read_errors+=("RssAnon unreadable or missing")
+        [[ -n "$rssl_file" ]] || read_errors+=("RssFile unreadable or missing")
+        [[ -n "$rssl_shmem" ]] || read_errors+=("RssShmem unreadable or missing")
+        [[ -n "$pss" ]] || read_errors+=("Pss unreadable or smaps_rollup unavailable")
+    else
+        read_errors+=("procfs not available for resolved PID")
+    fi
+
+    local read_errors_json="[]"
+    if (( ${#read_errors[@]} > 0 )); then
+        read_errors_json=$(printf '%s\n' "${read_errors[@]}" | jq -R . | jq -s .)
+    fi
+
+    jq -n \
+        --arg timestamp "$timestamp" \
+        --arg server_name "$name" \
+        --arg pid_raw "$pid" \
+        --argjson server_context "$context_server" \
+        --argjson health "$health_json" \
+        --arg vmrss_raw "$vmrss" \
+        --arg rssl_anon_raw "$rssl_anon" \
+        --arg rssl_file_raw "$rssl_file" \
+        --arg rssl_shmem_raw "$rssl_shmem" \
+        --arg pss_raw "$pss" \
+        --argjson read_errors "$read_errors_json" \
+        '{
+            timestamp: $timestamp,
+            server_name: $server_name,
+            pid: ($pid_raw | tonumber? // null),
+            procfs: {
+                status: {
+                    VmRSS_kB: ($vmrss_raw | tonumber? // null),
+                    RssAnon_kB: ($rssl_anon_raw | tonumber? // null),
+                    RssFile_kB: ($rssl_file_raw | tonumber? // null),
+                    RssShmem_kB: ($rssl_shmem_raw | tonumber? // null)
+                },
+                smaps_rollup: {
+                    Pss_kB: ($pss_raw | tonumber? // null)
+                },
+                read_errors: $read_errors
+            },
+            context: {
+                server: $server_context,
+                daemon_health: $health
+            }
+        }'
+}
+
+# Build a comparison report from a baseline snapshot and the current snapshot.
+build_comparison_report() {
+    local current_json="$1" baseline_json="$2" baseline_file="$3" timestamp="$4"
+
+    jq -n \
+        --arg timestamp "$timestamp" \
+        --argjson current "$current_json" \
+        --argjson baseline "$baseline_json" \
+        --arg baseline_file "$baseline_file" \
+        '
+        ($current.pid == null or $baseline.pid == null or $current.pid != $baseline.pid) as $pid_changed |
+        ($current.procfs.status.VmRSS_kB == null or $baseline.procfs.status.VmRSS_kB == null) as $rss_missing |
+        ($current.procfs.status.RssAnon_kB == null or $baseline.procfs.status.RssAnon_kB == null) as $anon_missing |
+        (
+        if $pid_changed then
+            {pid_changed: $pid_changed, classification: "inconclusive", reason: "PID changed or missing between snapshots"}
+        elif $rss_missing or $anon_missing then
+            {pid_changed: $pid_changed, classification: "inconclusive", reason: "required procfs metrics missing or unreadable"}
+        else
+                ($current.procfs.status.VmRSS_kB - $baseline.procfs.status.VmRSS_kB) as $drss |
+                (if $baseline.procfs.status.VmRSS_kB > 0 then ($drss / $baseline.procfs.status.VmRSS_kB * 100) else 0 end) as $prss |
+                ($current.procfs.status.RssAnon_kB - $baseline.procfs.status.RssAnon_kB) as $danon |
+                (if $baseline.procfs.status.RssAnon_kB > 0 then ($danon / $baseline.procfs.status.RssAnon_kB * 100) else 0 end) as $panon |
+                {
+                    pid_changed: $pid_changed,
+                    delta_VmRSS_kB: $drss,
+                    delta_VmRSS_percent: $prss,
+                    delta_RssAnon_kB: $danon,
+                    delta_RssAnon_percent: $panon,
+                    classification: (
+                        if (($baseline.procfs.status.VmRSS_kB > 0 and $drss >= 1024 and $prss >= 5) or
+                            ($baseline.procfs.status.RssAnon_kB > 0 and $danon >= 1024 and $panon >= 5))
+                        then "growing"
+                        else "stable"
+                        end
+                    )
+                }
+            end
+        ) as $comparison |
+        {
+            timestamp: $timestamp,
+            server_name: $current.server_name,
+            pid: $current.pid,
+            procfs: $current.procfs,
+            context: $current.context,
+            baseline: {file: $baseline_file, timestamp: $baseline.timestamp},
+            comparison: $comparison
+        }
+        '
+}
+
+# Human-readable summary for a snapshot.
+print_snapshot_summary() {
+    local snapshot_json="$1" path="$2"
+    local name pid state vmrss ranon rfile rshmem pss
+    name=$(jq -r '.server_name' <<< "$snapshot_json")
+    pid=$(jq -r '.pid // "unresolved"' <<< "$snapshot_json")
+    state=$(jq -r '.context.server.state // "unknown"' <<< "$snapshot_json")
+    vmrss=$(jq -r '.procfs.status.VmRSS_kB // "unavailable"' <<< "$snapshot_json")
+    ranon=$(jq -r '.procfs.status.RssAnon_kB // "unavailable"' <<< "$snapshot_json")
+    rfile=$(jq -r '.procfs.status.RssFile_kB // "unavailable"' <<< "$snapshot_json")
+    rshmem=$(jq -r '.procfs.status.RssShmem_kB // "unavailable"' <<< "$snapshot_json")
+    pss=$(jq -r '.procfs.smaps_rollup.Pss_kB // "unavailable"' <<< "$snapshot_json")
+
+    cat <<EOF
+$name memory profile snapshot
+  Server: $name
+  PID:    $pid
+  State:  $state
+  VmRSS:  $vmrss kB
+  RssAnon: $ranon kB
+  RssFile: $rfile kB
+  RssShmem: $rshmem kB
+  Pss:    $pss kB
+  Snapshot: $path
+EOF
+}
+
+# Human-readable summary for a comparison report.
+print_comparison_summary() {
+    local report_json="$1"
+    local classification reason
+    classification=$(jq -r '.comparison.classification' <<< "$report_json")
+    reason=$(jq -r '.comparison.reason // empty' <<< "$report_json")
+
+    cat <<EOF
+Comparison result: $classification
+EOF
+    if [[ -n "$reason" ]]; then
+        echo "Reason: $reason"
+    fi
+    echo
+    jq -r '
+        "  VmRSS delta:  \(.comparison.delta_VmRSS_kB // "n/a") kB (\(.comparison.delta_VmRSS_percent // "n/a")%)",
+        "  RssAnon delta: \(.comparison.delta_RssAnon_kB // "n/a") kB (\(.comparison.delta_RssAnon_percent // "n/a")%)",
+        "  PID changed:   \(.comparison.pid_changed)"
+    ' <<< "$report_json"
+}
+
+TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+SERVER_JSON=$(resolve_server "$SERVER_NAME" "$ADDR" || echo "")
+HEALTH_JSON=$(fetch_daemon_health "$ADDR" || echo "null")
+
+CURRENT_JSON=$(build_snapshot "$TIMESTAMP" "$SERVER_JSON" "$HEALTH_JSON" "$PROCFS_ROOT" "$SERVER_NAME")
+
+if [[ -n "$COMPARE" ]]; then
+    if [[ ! -r "$COMPARE" ]]; then
+        echo "ERROR: baseline file not readable: $COMPARE" >&2
+        exit 1
+    fi
+    if ! jq -e '.' "$COMPARE" >/dev/null 2>&1; then
+        echo "ERROR: baseline file is not valid JSON: $COMPARE" >&2
+        exit 1
+    fi
+    BASELINE_JSON=$(cat "$COMPARE")
+    REPORT_JSON=$(build_comparison_report "$CURRENT_JSON" "$BASELINE_JSON" "$COMPARE" "$TIMESTAMP")
+
+    if [[ "$JSON" -eq 1 ]]; then
+        echo "$REPORT_JSON"
+    else
+        print_comparison_summary "$REPORT_JSON"
+    fi
+
+    if [[ -n "$OUTPUT" ]]; then
+        if [[ "$OUTPUT" == "-" ]]; then
+            echo "$REPORT_JSON"
+        else
+            echo "$REPORT_JSON" > "$OUTPUT"
+            echo "Report written to: $OUTPUT"
+        fi
+    fi
+    exit 0
+fi
+
+if [[ "$JSON" -eq 1 ]]; then
+    echo "$CURRENT_JSON"
+    exit 0
+fi
+
+if [[ -n "$OUTPUT" ]]; then
+    if [[ "$OUTPUT" == "-" ]]; then
+        echo "$CURRENT_JSON"
+    else
+        echo "$CURRENT_JSON" > "$OUTPUT"
+        print_snapshot_summary "$CURRENT_JSON" "$OUTPUT"
+    fi
+    exit 0
+fi
+
+mkdir -p "$SNAPSHOT_DIR"
+SNAPSHOT_FILE="$SNAPSHOT_DIR/${SERVER_NAME}-${TIMESTAMP}.json"
+echo "$CURRENT_JSON" > "$SNAPSHOT_FILE"
+print_snapshot_summary "$CURRENT_JSON" "$SNAPSHOT_FILE"
