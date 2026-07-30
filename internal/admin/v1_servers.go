@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"net/http"
+	"time"
+
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
 // handleV1Servers handles GET /v1/servers — returns a JSON envelope
@@ -30,7 +33,7 @@ func (s *Server) handleV1Servers(w http.ResponseWriter, r *http.Request) {
 	if s.registry != nil {
 		for _, srv := range s.registry.List() {
 			st := srv.Status()
-			entry := s.v1ServerEntry(st)
+			entry := s.v1ServerEntry(srv, st)
 			statuses = append(statuses, entry)
 		}
 	}
@@ -68,16 +71,24 @@ func (s *Server) handleV1ServerDetail(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		st := srv.Status()
-		entry := s.v1ServerEntry(st)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(entry)
+		_ = json.NewEncoder(w).Encode(s.v1ServerEntry(srv, st))
 		return
 	}
 
 	http.Error(w, "server not found", http.StatusNotFound)
 }
 
-func (s *Server) v1ServerEntry(st server.ServerStatus) map[string]any {
+// v1ServerEntry builds a JSON-serializable status map for a single server.
+//
+// It exposes two distinct timing fields:
+//   - registered_seconds: integer seconds since the server was admitted to the
+//     registry (srv.CreatedAt). This is always present.
+//   - uptime_seconds: integer seconds from the supervised process's own clock
+//     (srv.Process.Uptime()). It is JSON null when no managed process is
+//     currently attached (e.g. stdio/lazy-process servers), because the daemon
+//     does not have a single authoritative process age for those transports.
+func (s *Server) v1ServerEntry(srv *server.ManagedServer, st server.ServerStatus) map[string]any {
 	lifecycle := s.lifecycleSnapshot(st.Name)
 	effective := deriveEffectiveStatus(st.State, lifecycleBackendState(lifecycle), s.reachabilityFor(st.Name), st.Transport.IsReachabilityProbeable(), st.Uptime, s.reachabilityGrace, st.LastError)
 	reachability := effective.Reachability
@@ -85,8 +96,10 @@ func (s *Server) v1ServerEntry(st server.ServerStatus) map[string]any {
 		"name": st.Name, "port": st.Port, "transport": string(st.Transport),
 		"state": string(st.State), "process_state": string(st.State),
 		"effective_status": effective.Status, "autostart": st.Autostart,
-		"required": st.Required, "pid": st.PID, "uptime_seconds": int64(st.Uptime.Seconds()),
-		"restart_count": st.RestartCount, "last_error": scrubSecrets(st.LastError),
+		"required": st.Required, "pid": st.PID,
+		"registered_seconds": int64(time.Since(srv.CreatedAt).Seconds()),
+		"uptime_seconds":     nil,
+		"restart_count":      st.RestartCount, "last_error": scrubSecrets(st.LastError),
 		"reachability":               string(reachability.Reachability),
 		"probe_depth":                reachability.ProbeDepth,
 		"last_probe_at":              reachability.LastProbeAt,
@@ -96,6 +109,9 @@ func (s *Server) v1ServerEntry(st server.ServerStatus) map[string]any {
 	}
 	if effective.Reason != "" {
 		entry["effective_reason"] = effective.Reason
+	}
+	if srv.Process != nil {
+		entry["uptime_seconds"] = int64(srv.Process.Uptime().Seconds())
 	}
 	if s.serverMetricsAccessor != nil {
 		if snap := s.serverMetricsAccessor.ServerMetricsSnapshot(st.Name); snap != nil {

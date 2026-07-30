@@ -527,6 +527,13 @@ VISION_PLAYWRIGHT_REAL_TEST=1 go test ./internal/integration \
 | `GET /v1/slots` | All slot groups with per-slot detail |
 | `GET /v1/slots/{group}` | Single group detail (404 if unknown) |
 
+`GET /v1/servers` and `GET /v1/servers/{name}` expose server timing as two distinct fields:
+
+- `registered_seconds` — integer seconds since the server entry was admitted to the registry. Always present.
+- `uptime_seconds` — integer seconds from the supervised process's own clock when the daemon is actively managing a process (`Process != nil`). JSON `null` for servers with no currently managed process, including stdio/lazy-process transports whose subprocess lifecycle is owned by the session manager rather than the daemon.
+
+This distinction matters when diagnosing restarts: `registered_seconds` tells you how long Vision has known about the server, while `uptime_seconds` tells you how long the current daemon-managed process has actually been running.
+
 #### Validation rules
 
 - `count` must be ≥ 2.

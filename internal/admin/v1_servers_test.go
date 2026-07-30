@@ -1,15 +1,19 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/supervisor"
 )
 
 // newTestRegistry constructs a bare registry for handler tests.
@@ -243,5 +247,162 @@ func TestToolList_WithMetrics(t *testing.T) {
 	}
 	if got := response.Servers[0].SessionMetrics.ReapedByReason["client_disconnected"]; got != 1 {
 		t.Fatalf("client_disconnected reap count = %d, want 1", got)
+	}
+}
+
+// TestHandleV1Servers_Timing_NilProcess verifies that a server with no managed
+// Process (the stdio/lazy case) exposes registered_seconds but leaves
+// uptime_seconds as JSON null.
+func TestHandleV1Servers_Timing_NilProcess(t *testing.T) {
+	reg := newTestRegistry()
+	if err := reg.Add("stdio-server", &config.ServerConfig{Port: 18080, Command: "echo"}); err != nil {
+		t.Fatalf("add test server: %v", err)
+	}
+	beforeAdd := time.Now()
+	s := &Server{registry: reg, running: true}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/servers", nil)
+	rr := httptest.NewRecorder()
+	s.handleV1Servers(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+
+	var list struct {
+		Servers []map[string]any `json:"servers"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list unmarshal: %v; body=%s", err, rr.Body.String())
+	}
+	if len(list.Servers) != 1 {
+		t.Fatalf("servers length = %d, want 1; body=%s", len(list.Servers), rr.Body.String())
+	}
+	assertTiming(t, list.Servers[0], beforeAdd, true)
+
+	detailReq := httptest.NewRequest(http.MethodGet, "/v1/servers/stdio-server", nil)
+	detailReq.SetPathValue("name", "stdio-server")
+	detailRR := httptest.NewRecorder()
+	s.handleV1ServerDetail(detailRR, detailReq)
+	if detailRR.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want 200; body=%s", detailRR.Code, detailRR.Body.String())
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(detailRR.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail unmarshal: %v; body=%s", err, detailRR.Body.String())
+	}
+	assertTiming(t, detail, beforeAdd, true)
+}
+
+// TestHandleV1Servers_Timing_ManagedProcess verifies that a server whose
+// registry entry holds a running supervised Process exposes both
+// registered_seconds and an integer uptime_seconds taken from the process
+// itself, not from the server's registration age.
+func TestHandleV1Servers_Timing_ManagedProcess(t *testing.T) {
+	reg := newTestRegistry()
+	if err := reg.Add("managed-server", &config.ServerConfig{
+		Port:      6287,
+		Transport: config.TransportManagedHTTP,
+		Command:   "sh",
+		Args:      []string{"-c", "sleep 30"},
+		URL:       "http://127.0.0.1:16287/mcp",
+	}); err != nil {
+		t.Fatalf("add test server: %v", err)
+	}
+	beforeAdd := time.Now()
+
+	proc := supervisor.NewManagedProcess("managed-server", reg.Get("managed-server").Config,
+		config.SupervisionConfig{ShutdownTimeout: config.Duration(time.Second)},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- proc.Serve(ctx) }()
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		state, _ := proc.LifecycleSnapshot()
+		if state == supervisor.StateRunning {
+			break
+		}
+		select {
+		case <-proc.LifecycleEvents():
+		case <-deadline.C:
+			t.Fatalf("managed process did not reach running state; state=%s", state)
+		}
+	}
+
+	// Attach the running supervised process to the registry entry.
+	reg.Get("managed-server").Process = proc
+
+	// Let the process clock advance so uptime is non-zero.
+	time.Sleep(1100 * time.Millisecond)
+
+	s := &Server{registry: reg, running: true}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/servers", nil)
+	rr := httptest.NewRecorder()
+	s.handleV1Servers(rr, req)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("managed process did not exit after cancellation")
+	}
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+
+	var list struct {
+		Servers []map[string]any `json:"servers"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("list unmarshal: %v; body=%s", err, rr.Body.String())
+	}
+	if len(list.Servers) != 1 {
+		t.Fatalf("servers length = %d, want 1; body=%s", len(list.Servers), rr.Body.String())
+	}
+	assertTiming(t, list.Servers[0], beforeAdd, false)
+	if uptime, ok := list.Servers[0]["uptime_seconds"].(float64); !ok || uptime <= 0 {
+		t.Fatalf("uptime_seconds should be a positive integer, got %v", list.Servers[0]["uptime_seconds"])
+	}
+
+	detailReq := httptest.NewRequest(http.MethodGet, "/v1/servers/managed-server", nil)
+	detailReq.SetPathValue("name", "managed-server")
+	detailRR := httptest.NewRecorder()
+	s.handleV1ServerDetail(detailRR, detailReq)
+	if detailRR.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want 200; body=%s", detailRR.Code, detailRR.Body.String())
+	}
+	var detail map[string]any
+	if err := json.Unmarshal(detailRR.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("detail unmarshal: %v; body=%s", err, detailRR.Body.String())
+	}
+	assertTiming(t, detail, beforeAdd, false)
+}
+
+// assertTiming checks that registered_seconds is present and non-negative and
+// that uptime_seconds is null when nilProcess is true, or present otherwise.
+func assertTiming(t *testing.T, m map[string]any, since time.Time, nilProcess bool) {
+	t.Helper()
+	registered, ok := m["registered_seconds"].(float64)
+	if !ok {
+		t.Fatalf("registered_seconds missing or wrong type: %#v", m["registered_seconds"])
+	}
+	elapsed := int64(time.Since(since).Seconds())
+	if registered < 0 || int64(registered) > elapsed+1 {
+		t.Fatalf("registered_seconds = %v; want 0..%d", registered, elapsed+1)
+	}
+	if nilProcess {
+		if m["uptime_seconds"] != nil {
+			t.Fatalf("uptime_seconds should be null for nil process, got %v", m["uptime_seconds"])
+		}
+		return
+	}
+	if _, ok := m["uptime_seconds"].(float64); !ok {
+		t.Fatalf("uptime_seconds should be a number for managed process, got %v", m["uptime_seconds"])
 	}
 }
