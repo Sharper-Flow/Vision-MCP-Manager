@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/admin"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
 type rpcRequest struct {
@@ -396,5 +398,103 @@ func TestAdminServer_VisionRestart(t *testing.T) {
 	}
 	if restartPayload.Error == nil || *restartPayload.Error == "" {
 		t.Fatal("expected non-empty error message for unknown server")
+	}
+}
+
+func TestAdminServer_HealthIncludesDaemonUptime(t *testing.T) {
+	srv := admin.NewServer(admin.Config{Port: 16280})
+	ctx := context.Background()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := http.Get("http://127.0.0.1:16280/health")
+	if err != nil {
+		t.Fatalf("GET /health error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /health status = %d, want 200", resp.StatusCode)
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode /health response: %v", err)
+	}
+	if got["status"] != "ok" {
+		t.Fatalf("status = %v, want ok", got["status"])
+	}
+	if got["running"] != true {
+		t.Fatalf("running = %v, want true", got["running"])
+	}
+	startedAt, ok := got["startedAt"].(string)
+	if !ok || startedAt == "" {
+		t.Fatalf("startedAt missing or empty: %v", got["startedAt"])
+	}
+	started, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		t.Fatalf("startedAt %q not RFC3339: %v", startedAt, err)
+	}
+	if started.IsZero() || started.After(time.Now()) {
+		t.Fatalf("startedAt out of range: %v", started)
+	}
+}
+
+func TestAdminServer_HealthDegradedIncludesDaemonUptime(t *testing.T) {
+	reg := server.NewRegistry(nil, nil)
+	if err := reg.Add("failed-server", &config.ServerConfig{Port: 1}); err != nil {
+		t.Fatalf("Add failed-server: %v", err)
+	}
+	ms := reg.Get("failed-server")
+	ms.State = server.StateFailed
+	ms.LastError = errors.New("simulated failure")
+
+	srv := admin.NewServer(admin.Config{Registry: reg, Port: 16281})
+	ctx := context.Background()
+
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	time.Sleep(50 * time.Millisecond)
+
+	resp, err := http.Get("http://127.0.0.1:16281/health")
+	if err != nil {
+		t.Fatalf("GET /health error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /health status = %d, want 200", resp.StatusCode)
+	}
+
+	var got map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode /health response: %v", err)
+	}
+	if got["status"] != "degraded" {
+		t.Fatalf("status = %v, want degraded", got["status"])
+	}
+	errs, ok := got["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		t.Fatalf("errors missing or empty: %v", got["errors"])
+	}
+	if got["running"] != true {
+		t.Fatalf("running = %v, want true", got["running"])
+	}
+	startedAt, ok := got["startedAt"].(string)
+	if !ok || startedAt == "" {
+		t.Fatalf("startedAt missing or empty: %v", got["startedAt"])
+	}
+	started, err := time.Parse(time.RFC3339Nano, startedAt)
+	if err != nil {
+		t.Fatalf("startedAt %q not RFC3339: %v", startedAt, err)
+	}
+	if started.IsZero() || started.After(time.Now()) {
+		t.Fatalf("startedAt out of range: %v", started)
 	}
 }

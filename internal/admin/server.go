@@ -205,10 +205,12 @@ func (s *Server) Port() int {
 // --- HTTP Handlers ---
 
 // handleHealth handles GET /health - detailed health status.
-// Returns {"status": "ok"} when healthy, {"status": "degraded", "errors": [...]} when servers have errors.
+// Returns {"status": "ok", "running": true, "startedAt": ...} when healthy,
+// or {"status": "degraded", "errors": [...], "running": true, "startedAt": ...} when servers have errors.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	running := s.running
+	startedAt := s.startedAt
 	s.mu.RUnlock()
 
 	if !running {
@@ -242,11 +244,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if len(errors) > 0 {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "degraded",
-			"errors": errors,
+			"status":    "degraded",
+			"errors":    errors,
+			"running":   running,
+			"startedAt": startedAt,
 		})
 	} else {
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":    "ok",
+			"running":   running,
+			"startedAt": startedAt,
+		})
 	}
 }
 
