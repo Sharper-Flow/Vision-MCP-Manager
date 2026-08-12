@@ -203,13 +203,13 @@ const VisionPlugin: Plugin = async ({ client }) => {
       }),
       [VISION_PLUGIN_TOOL_NAMES.mcpConnect]: tool({
         description:
-          "Use this when you have determined you need an MCP server already declared in the OpenCode config `mcp` block but currently disabled or failed. This is a session-lifetime runtime connection: it edits no config file, does not persist, and ends when the opencode process ends. The server's tools become available on the following turn, not this one; do not call them immediately after connecting. It cannot add or connect a server that is not declared in the `mcp` block.",
+          "Use this when you have determined you need an MCP server already declared in the OpenCode config `mcp` block but currently disabled or failed. This is a session-lifetime runtime connection: it edits no config file, does not persist, and ends when the opencode process ends. The registry change takes effect immediately, so tools resolved at call time are usable right away; the list of tools advertised for the current turn was fixed when the turn began, so a newly connected server may not appear there until your next turn. It cannot add or connect a server that is not declared in the `mcp` block.",
         args: McpConnectArgsSchema.shape,
         execute: async (args) => await connectMcpServer(client, args),
       }),
       [VISION_PLUGIN_TOOL_NAMES.mcpDisconnect]: tool({
         description:
-          "Use this when you have determined you no longer need an MCP server that is already declared in the OpenCode config `mcp` block and currently connected. This is a session-lifetime runtime disconnection: it edits no config file, does not persist, and ends when the opencode process ends. The server's tools are gone from the following turn, not this one; do not call them after disconnecting. It cannot remove or change a server declaration, and it cannot manage a server that is not declared in the `mcp` block.",
+          "Use this when you have determined you no longer need an MCP server that is already declared in the OpenCode config `mcp` block and currently connected. This is a session-lifetime runtime disconnection: it edits no config file, does not persist, and ends when the opencode process ends. The registry change takes effect immediately, so the server's tools stop being callable right away; the list of tools advertised for the current turn was fixed when the turn began, so it may still appear there until your next turn. It cannot remove or change a server declaration, and it cannot manage a server that is not declared in the `mcp` block.",
         args: McpDisconnectArgsSchema.shape,
         execute: async (args) => await disconnectMcpServer(client, args),
       }),

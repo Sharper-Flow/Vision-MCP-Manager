@@ -119,10 +119,20 @@ describe("plugin tool registration", () => {
     for (const name of ["opencode_mcp_connect", "opencode_mcp_disconnect"]) {
       const def = (hooks.tool ?? {})[name]
       expect(def, `${name} is not registered`).toBeDefined()
-      // These two descriptions carry the next-turn availability and
-      // session-only non-persistence contract the agent relies on.
-      expect(def.description).toContain("following turn")
+      // These two descriptions carry the availability and session-only
+      // non-persistence contract the agent relies on.
+      //
+      // The availability pin is "takes effect immediately", not "following
+      // turn". The original next-turn claim was measured false: disconnecting
+      // a server removed it from the live tool surface within the same turn,
+      // and reconnecting restored it and allowed a successful call in that
+      // same turn. Only the turn's advertised tool list is fixed at turn start.
+      expect(def.description).toContain("takes effect immediately")
       expect(def.description).toContain("does not persist")
+      expect(
+        def.description,
+        `${name} still claims next-turn-only availability, which was measured false`
+      ).not.toContain("become available on the following turn")
     }
   })
 })
