@@ -3,50 +3,77 @@ export interface VisionContextOptions {
   codeMode: boolean
 }
 
-const MANAGED_TOOLS = [
-  ["vision_list", "List all registered servers with status"],
-  ["vision_add", "Add and start an MCP server"],
-  ["vision_remove", "Stop and remove an MCP server"],
-  ["vision_restart", "Restart a server in-place without port drift"],
-  ["vision_search", "Search for servers by name or capability"],
-  ["vision_init", "Generate .opencode.json config"],
-  ["vision_status", "Check daemon health"],
-  ["vision_guidance", "Get ranked tool-selection guidance"],
-  ["vision_slot_status", "Inspect slot-group routing health"],
-  ["vision_metrics", "Inspect daemon and tool-call metrics"],
+import { OPENCODE_MCP_TOOL_NAMES, VISION_DAEMON_TOOL_NAMES } from "./tool-names"
+
+const REGISTRY_CONTROL_TOOLS = [
+  [OPENCODE_MCP_TOOL_NAMES.mcpConnect, "Enable a declared OpenCode MCP server"],
+  [OPENCODE_MCP_TOOL_NAMES.mcpDisconnect, "Disable a declared OpenCode MCP server"],
+] as const
+
+const DAEMON_BACKED_TOOLS = [
+  [VISION_DAEMON_TOOL_NAMES.list, "List all registered servers with status"],
+  [VISION_DAEMON_TOOL_NAMES.add, "Add and start an MCP server"],
+  [VISION_DAEMON_TOOL_NAMES.remove, "Stop and remove an MCP server"],
+  [VISION_DAEMON_TOOL_NAMES.restart, "Restart a server in-place without port drift"],
+  [VISION_DAEMON_TOOL_NAMES.search, "Search for servers by name or capability"],
+  [VISION_DAEMON_TOOL_NAMES.init, "Generate .opencode.json config"],
+  [VISION_DAEMON_TOOL_NAMES.status, "Check daemon health"],
+  [VISION_DAEMON_TOOL_NAMES.guidance, "Get ranked tool-selection guidance"],
+  [VISION_DAEMON_TOOL_NAMES.slotStatus, "Inspect slot-group routing health"],
+  [VISION_DAEMON_TOOL_NAMES.metrics, "Inspect daemon and tool-call metrics"],
 ] as const
 
 function toolName(name: string, codeMode: boolean): string {
   return codeMode ? `tools.vision.${name}()` : name
 }
 
-function renderHealthy(codeMode: boolean): string {
-  const tools = MANAGED_TOOLS.map(
-    ([name, description]) => `- **${toolName(name, codeMode)}** - ${description}`
+function renderTools(healthy: boolean, codeMode: boolean): string {
+  const registryControlTools = REGISTRY_CONTROL_TOOLS.map(
+    ([name, description]) => `- **${name}** - ${description}`
   ).join("\n")
+  const daemonTools = DAEMON_BACKED_TOOLS.map(([name, description]) => {
+    const availability = healthy
+      ? ""
+      : " (daemon-backed tools are unavailable: Vision daemon is NOT running)"
+    return `- **${toolName(name, codeMode)}** - ${description}${availability}`
+  }).join("\n")
 
+  return `## Registry-Control Tools\n\n${registryControlTools}\n\n## Daemon-Backed Tools\n\n${daemonTools}`
+}
+
+export function renderVisionContext({ healthy, codeMode }: VisionContextOptions): string {
+  const search = toolName(VISION_DAEMON_TOOL_NAMES.search, codeMode)
+  const add = toolName(VISION_DAEMON_TOOL_NAMES.add, codeMode)
+  const init = toolName(VISION_DAEMON_TOOL_NAMES.init, codeMode)
   const discovery = codeMode
-    ? `\n## Code Mode Discovery\n\nUse \`tools.$codemode.search({ query: "MCP server management", namespace: "vision" })\` when you need the current callable signatures. Bare top-level \`vision_*\` calls are unavailable in Code Mode sessions.\n`
+    ? `\n## Code Mode Discovery\n\nUse \`tools.$codemode.search({ query: "MCP server management", namespace: "vision" })\` to discover the current callable signatures.\n`
     : ""
+  const status = healthy
+    ? "Vision is running and ready to help you manage MCP servers."
+    : "Vision daemon is NOT running. Daemon-backed tools are unavailable until the daemon starts; registry-control tools remain usable now."
+  const startup = healthy
+    ? ""
+    : `
+## To Start Vision
 
-  const search = toolName("vision_search", codeMode)
-  const add = toolName("vision_add", codeMode)
-  const init = toolName("vision_init", codeMode)
+Run in your terminal:
+\`\`\`bash
+vision daemon start
+\`\`\`
 
-  return `
-# Vision MCP Server Manager
+After startup, daemon-backed tools will be available. Registry-control tools remain usable now.
 
-Vision is running and ready to help you manage MCP servers.
+## Check Status
 
-## Available Tools
-
-Use these tools to manage MCP servers:
-
-${tools}
-${discovery}
+\`\`\`bash
+vision daemon status
+\`\`\`
+`
+  const quickStart = healthy
+    ? `
 ## Quick Start
 
-1. List available servers: Use ${toolName("vision_list", codeMode)}
+1. List available servers: Use ${toolName(VISION_DAEMON_TOOL_NAMES.list, codeMode)}
 2. Add a server: Use ${add} with a server name
 3. Generate config: Use ${init}
 
@@ -58,35 +85,17 @@ ${discovery}
 3. ${init}                           # Generate config file
 \`\`\`
 `
-}
-
-function renderNotRunning(codeMode: boolean): string {
-  const toolGuidance = codeMode
-    ? "Once started, use `tools.vision.*` tools for MCP server management."
-    : "Once started, you can use vision_* tools to manage MCP servers."
+    : ""
 
   return `
 # Vision MCP Server Manager
 
-Vision daemon is NOT running. MCP server management is unavailable.
+${status}
 
-## To Start Vision
+## Available Tools
 
-Run in your terminal:
-\`\`\`bash
-vision daemon start
-\`\`\`
-
-${toolGuidance}
-
-## Check Status
-
-\`\`\`bash
-vision daemon status
-\`\`\`
-`
-}
-
-export function renderVisionContext({ healthy, codeMode }: VisionContextOptions): string {
-  return healthy ? renderHealthy(codeMode) : renderNotRunning(codeMode)
+${renderTools(healthy, codeMode)}
+${discovery}
+${quickStart}
+${startup}`
 }
