@@ -122,20 +122,20 @@ func (s *Server) getTools() []Tool {
 		},
 		{
 			Name:        "vision_init",
-			Description: "Generate MCP client configuration for running servers",
+			Description: "Generate an OpenCode MCP client configuration for running servers",
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]Property{
 					"path": {
 						Type:        "string",
-						Description: "Path to write the configuration file (default: .opencode.json)",
-						Default:     ".opencode.json",
+						Description: "Path to an OpenCode configuration file to write",
 					},
 					"servers": {
 						Type:        "string",
 						Description: "Comma-separated list of server names to include (default: all running)",
 					},
 				},
+				Required: []string{"path"},
 			},
 		},
 		{
@@ -680,8 +680,6 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 			}
 		}
 	}
-	s.syncClientConfigAdd(params.Name, serverCfg.Port)
-
 	// Start the server if requested (triggers Streamable HTTP proxy setup via EventServerStarted).
 	if shouldStart {
 		if err := s.registry.Start(params.Name); err != nil {
@@ -811,8 +809,6 @@ func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCal
 			}
 		}
 	}
-	s.syncClientConfigRemove(params.Name)
-
 	response := RemoveResponse{
 		Success: true,
 		Name:    params.Name,
@@ -953,10 +949,6 @@ type InitResponse struct {
 
 // toolInit implements vision_init.
 func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
-	if s.registry == nil {
-		return nil, fmt.Errorf("registry not initialized")
-	}
-
 	var params struct {
 		Path    string          `json:"path"`
 		Servers json.RawMessage `json:"servers"`
@@ -966,7 +958,11 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	}
 
 	if params.Path == "" {
-		params.Path = ".opencode.json"
+		return nil, NewValidationError("path is required")
+	}
+
+	if s.registry == nil {
+		return nil, fmt.Errorf("registry not initialized")
 	}
 
 	// The public MCP schema advertises a comma-separated string. Accept the
@@ -1039,19 +1035,18 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		return jsonToolResult(response)
 	}
 
-	targetKind := detectClientConfigKind(params.Path, existingConfig)
 	generatedEntries := make(map[string]map[string]any, len(running))
 	for _, srv := range running {
 		status := srv.Status()
-		generatedEntries[srv.Name] = buildClientConfigEntry(targetKind, status.Port)
+		generatedEntries[srv.Name] = buildClientConfigEntry(status.Port)
 	}
-	reconciledServers := findReconciledServers(existingConfig, targetKind, generatedEntries)
+	reconciledServers := findReconciledServers(existingConfig, generatedEntries)
 
 	config := existingConfig
 	if config == nil {
 		config = make(map[string]any)
 	}
-	mergeClientConfig(config, targetKind, generatedEntries)
+	mergeClientConfig(config, generatedEntries)
 
 	configJSON, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
@@ -1116,13 +1111,6 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	return jsonToolResult(response)
 }
 
-type clientConfigKind string
-
-const (
-	clientConfigKindOpenCode clientConfigKind = "opencode"
-	clientConfigKindLegacy   clientConfigKind = "legacy"
-)
-
 func loadExistingClientConfig(path string) (map[string]any, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1142,151 +1130,31 @@ func loadExistingClientConfig(path string) (map[string]any, bool, error) {
 	return cfg, true, nil
 }
 
-func detectClientConfigKind(path string, existing map[string]any) clientConfigKind {
-	if existing != nil {
-		if _, ok := existing["mcp"].(map[string]any); ok {
-			return clientConfigKindOpenCode
-		}
-		if _, ok := existing["mcpServers"].(map[string]any); ok {
-			return clientConfigKindLegacy
-		}
-	}
-
-	base := strings.ToLower(filepath.Base(path))
-	if strings.Contains(base, "opencode") {
-		return clientConfigKindOpenCode
-	}
-
-	return clientConfigKindLegacy
-}
-
-func buildClientConfigEntry(kind clientConfigKind, port int) map[string]any {
+func buildClientConfigEntry(port int) map[string]any {
 	url := fmt.Sprintf("http://localhost:%d/mcp", port)
-	switch kind {
-	case clientConfigKindOpenCode:
-		return map[string]any{
-			"type":    "remote",
-			"url":     url,
-			"enabled": true,
-		}
-	default:
-		return map[string]any{"url": url}
+	return map[string]any{
+		"type":    "remote",
+		"url":     url,
+		"enabled": true,
 	}
 }
 
-func (s *Server) clientConfigPath() string {
-	if s.configPath != "" {
-		return filepath.Join(filepath.Dir(s.configPath), ".opencode.json")
-	}
-	return ".opencode.json"
-}
-
-func (s *Server) syncClientConfigAdd(name string, port int) {
-	path := s.clientConfigPath()
-	existing, _, err := loadExistingClientConfig(path)
-	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("failed to read OpenCode config for server add sync",
-				slog.String("server", name),
-				slog.String("path", path),
-				slog.String("error", err.Error()),
-			)
-		}
-		return
-	}
-
-	cfg := existing
-	if cfg == nil {
-		cfg = make(map[string]any)
-	}
-	kind := detectClientConfigKind(path, cfg)
-	mergeClientConfig(cfg, kind, map[string]map[string]any{name: buildClientConfigEntry(kind, port)})
-	if err := writeClientConfig(path, cfg); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("failed to sync OpenCode config after adding server",
-				slog.String("server", name),
-				slog.String("path", path),
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-}
-
-func (s *Server) syncClientConfigRemove(name string) {
-	path := s.clientConfigPath()
-	cfg, existed, err := loadExistingClientConfig(path)
-	if err != nil {
-		if s.logger != nil {
-			s.logger.Warn("failed to read OpenCode config for server remove sync",
-				slog.String("server", name),
-				slog.String("path", path),
-				slog.String("error", err.Error()),
-			)
-		}
-		return
-	}
-	if !existed || cfg == nil {
-		return
-	}
-
-	kind := detectClientConfigKind(path, cfg)
-	key := "mcpServers"
-	if kind == clientConfigKindOpenCode {
-		key = "mcp"
-	}
-	current, _ := cfg[key].(map[string]any)
-	if current == nil {
-		return
-	}
-	delete(current, name)
-	cfg[key] = current
-	if err := writeClientConfig(path, cfg); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("failed to sync OpenCode config after removing server",
-				slog.String("server", name),
-				slog.String("path", path),
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-}
-
-func writeClientConfig(path string, cfg map[string]any) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	return writeJSONFileAtomic(path, data)
-}
-
-func mergeClientConfig(config map[string]any, kind clientConfigKind, generated map[string]map[string]any) {
-	key := "mcpServers"
-	if kind == clientConfigKindOpenCode {
-		key = "mcp"
-	}
-
-	current, _ := config[key].(map[string]any)
+func mergeClientConfig(config map[string]any, generated map[string]map[string]any) {
+	current, _ := config["mcp"].(map[string]any)
 	if current == nil {
 		current = make(map[string]any)
 	}
 	for name, entry := range generated {
 		current[name] = entry
 	}
-	config[key] = current
+	config["mcp"] = current
 }
 
-func findReconciledServers(existing map[string]any, kind clientConfigKind, generated map[string]map[string]any) []string {
+func findReconciledServers(existing map[string]any, generated map[string]map[string]any) []string {
 	if len(generated) == 0 {
 		return nil
 	}
-	key := "mcpServers"
-	if kind == clientConfigKindOpenCode {
-		key = "mcp"
-	}
-	current, _ := existing[key].(map[string]any)
+	current, _ := existing["mcp"].(map[string]any)
 	var reconciled []string
 	for name, entry := range generated {
 		if current == nil {
