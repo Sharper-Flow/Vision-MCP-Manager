@@ -12,10 +12,10 @@ afterEach(() => {
 
 describe("checkHealth", () => {
   // Contract source: internal/admin/server.go handleHealth (lines 195-237).
-  // Port 6275 is the Admin MCP, NOT the legacy REST API in internal/api/
-  // handlers.go — that API was removed (internal/daemon/daemon.go:194). The
-  // legacy shape was {"status":"healthy","uptime":...}; the current one is
-  // below and carries neither uptime nor port.
+  // Port 6275 is the Admin MCP, which replaced a legacy REST API that returned
+  // {"status":"healthy","uptime":...}. Its removal is recorded in
+  // internal/daemon/daemon.go:194; the current shape below carries neither
+  // uptime nor port.
   //
   // These cases exist because the previous suite tested only the body-timeout
   // path, so nothing ever exercised a successful response and the stale
