@@ -1,3 +1,9 @@
+## 2026-08-12 (v1.4.1)
+
+### Fixed
+
+- register tools via Hooks.tool record so they actually load (#11)
+
 ## 2026-08-12 (v1.4.0)
 
 ### Added
