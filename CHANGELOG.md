@@ -1,3 +1,9 @@
+## 2026-08-12 (v1.4.0)
+
+### Added
+
+- add opencode MCP connect/disconnect tools (#10)
+
 ## 2026-07-23 (v1.3.5)
 
 ### Fixed
