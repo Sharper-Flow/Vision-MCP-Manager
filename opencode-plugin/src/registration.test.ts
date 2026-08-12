@@ -62,7 +62,7 @@ describe("plugin tool registration", () => {
     expect(
       hooks.tool,
       "Hooks.tool is missing. OpenCode reads `tool` (a record keyed by tool name); " +
-        "a `tools` array is not part of the Hooks contract and is silently ignored.",
+        "a `tools` array is not part of the Hooks contract and is silently ignored."
     ).toBeDefined()
     expect(Array.isArray(hooks.tool)).toBe(false)
     expect(typeof hooks.tool).toBe("object")
@@ -101,14 +101,14 @@ describe("plugin tool registration", () => {
     expect(typeof def.args).toBe("object")
     expect(
       (def.args as { _def?: unknown })._def,
-      `tool "${name}" passes a wrapped ZodObject; ToolDefinition wants a ZodRawShape (use .shape)`,
+      `tool "${name}" passes a wrapped ZodObject; ToolDefinition wants a ZodRawShape (use .shape)`
     ).toBeUndefined()
     expect((def.args as { parse?: unknown }).parse).toBeUndefined()
 
     for (const [key, schema] of Object.entries(def.args as Record<string, unknown>)) {
       expect(
         (schema as { _def?: unknown })?._def,
-        `arg "${key}" of tool "${name}" is not a Zod schema`,
+        `arg "${key}" of tool "${name}" is not a Zod schema`
       ).toBeDefined()
     }
   })
