@@ -16,7 +16,7 @@ const DAEMON_BACKED_TOOLS = [
   [VISION_DAEMON_TOOL_NAMES.remove, "Stop and remove an MCP server"],
   [VISION_DAEMON_TOOL_NAMES.restart, "Restart a server in-place without port drift"],
   [VISION_DAEMON_TOOL_NAMES.search, "Search for servers by name or capability"],
-  [VISION_DAEMON_TOOL_NAMES.init, "Generate .opencode.json config"],
+  [VISION_DAEMON_TOOL_NAMES.init, "Generate opencode.jsonc config"],
   [VISION_DAEMON_TOOL_NAMES.status, "Check daemon health"],
   [VISION_DAEMON_TOOL_NAMES.guidance, "Get ranked tool-selection guidance"],
   [VISION_DAEMON_TOOL_NAMES.slotStatus, "Inspect slot-group routing health"],

@@ -15,7 +15,7 @@ export const McpDisconnectArgsSchema = z.object({
 type McpControlClient = Pick<PluginInput["client"], "mcp">
 
 const notConfiguredSuggestion =
-  'Add it to the "mcp" block of opencode.json / .opencode.json, then reload. opencode_mcp_connect only enables servers that are already declared.'
+  'Add it to the "mcp" block of opencode.jsonc, then restart OpenCode. opencode_mcp_connect only enables servers that are already declared.'
 
 function notConfigured(name: string): string {
   return JSON.stringify({

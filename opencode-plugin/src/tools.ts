@@ -40,11 +40,7 @@ export const VisionSearchArgsSchema = z.object({
 })
 
 export const VisionInitArgsSchema = z.object({
-  path: z
-    .string()
-    .optional()
-    .default(".opencode.json")
-    .describe("Path to write the configuration file"),
+  path: z.string().optional().describe("Explicit OpenCode config path"),
   servers: z
     .string()
     .optional()

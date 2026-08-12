@@ -15,6 +15,7 @@
  */
 
 import { tool, type Plugin } from "@opencode-ai/plugin"
+import { resolve } from "node:path"
 import { z } from "zod"
 import { renderVisionContext } from "./context"
 import { checkHealth } from "./health"
@@ -73,7 +74,7 @@ interface PluginState {
 // Plugin Entry Point
 // =============================================================================
 
-const VisionPlugin: Plugin = async ({ client }) => {
+const VisionPlugin: Plugin = async ({ client, directory }) => {
   // Initialize state
   const state: PluginState = {
     daemonHealthy: false,
@@ -177,9 +178,13 @@ const VisionPlugin: Plugin = async ({ client }) => {
       }),
       [VISION_PLUGIN_TOOL_NAMES.init]: tool({
         description:
-          "Generate MCP client configuration (.opencode.json) for currently running servers",
+          "Generate OpenCode MCP configuration (opencode.jsonc) for currently running servers",
         args: VisionInitArgsSchema.shape,
-        execute: async (args) => await visionInit(args),
+        execute: async (args) =>
+          await visionInit({
+            ...args,
+            path: args.path ?? resolve(directory, "opencode.jsonc"),
+          }),
       }),
       [VISION_PLUGIN_TOOL_NAMES.status]: tool({
         description: "Get Vision daemon status including uptime, memory usage, and server counts",
