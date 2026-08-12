@@ -30,12 +30,15 @@ describe("renderVisionContext", () => {
     }
   })
 
-  it.each([true, false] as const)("describes unavailable daemon-backed tools when daemon is down (Code Mode: %s)", (codeMode) => {
-    const context = renderVisionContext({ healthy: false, codeMode })
+  it.each([true, false] as const)(
+    "describes unavailable daemon-backed tools when daemon is down (Code Mode: %s)",
+    (codeMode) => {
+      const context = renderVisionContext({ healthy: false, codeMode })
 
-    expect(context).toContain("Vision daemon is NOT running")
-    expect(context).toContain("daemon-backed tools are unavailable")
-  })
+      expect(context).toContain("Vision daemon is NOT running")
+      expect(context).toContain("daemon-backed tools are unavailable")
+    }
+  )
 
   it.each(states)("does not use retired capability claims in %j", (state) => {
     const context = renderVisionContext(state)
