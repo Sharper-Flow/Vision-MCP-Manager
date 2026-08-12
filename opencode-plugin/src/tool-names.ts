@@ -6,7 +6,7 @@
 // for any export that is not a function or `{ server }` object. A plain object
 // export in index.ts trips that check. index.ts and tests import from here.
 
-export const VISION_PLUGIN_TOOL_NAMES = {
+export const VISION_DAEMON_TOOL_NAMES = {
   list: "vision_list",
   add: "vision_add",
   remove: "vision_remove",
@@ -17,4 +17,14 @@ export const VISION_PLUGIN_TOOL_NAMES = {
   guidance: "vision_guidance",
   slotStatus: "vision_slot_status",
   metrics: "vision_metrics",
+} as const
+
+export const OPENCODE_MCP_TOOL_NAMES = {
+  mcpConnect: "opencode_mcp_connect",
+  mcpDisconnect: "opencode_mcp_disconnect",
+} as const
+
+export const VISION_PLUGIN_TOOL_NAMES = {
+  ...VISION_DAEMON_TOOL_NAMES,
+  ...OPENCODE_MCP_TOOL_NAMES,
 } as const
