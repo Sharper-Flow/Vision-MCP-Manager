@@ -16,7 +16,23 @@
  * impossible to ship green.
  */
 
-import { describe, it, expect } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
+
+const { checkHealthMock, visionInitMock } = vi.hoisted(() => ({
+  checkHealthMock: vi.fn(async () => ({ healthy: false })),
+  visionInitMock: vi.fn(async () => "mocked vision_init"),
+}))
+
+vi.mock("./health", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./health")>()),
+  checkHealth: checkHealthMock,
+}))
+
+vi.mock("./tools", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./tools")>()),
+  visionInit: visionInitMock,
+}))
+
 import VisionPlugin from "./index"
 import { VISION_PLUGIN_TOOL_NAMES } from "./tool-names"
 
@@ -38,8 +54,8 @@ function fakePluginInput() {
       },
     },
     project: {},
-    directory: "/tmp",
-    worktree: "/tmp",
+    directory: "/tmp/project",
+    worktree: "/tmp/project",
     experimental_workspace: { register: () => {} },
     serverUrl: new URL("http://localhost:4096"),
     $: {},
@@ -56,6 +72,11 @@ async function loadHooks(): Promise<any> {
 const expectedNames = Object.values(VISION_PLUGIN_TOOL_NAMES) as string[]
 
 describe("plugin tool registration", () => {
+  beforeEach(() => {
+    checkHealthMock.mockClear()
+    visionInitMock.mockClear()
+  })
+
   it("exposes a `tool` record, not a `tools` array", async () => {
     const hooks = await loadHooks()
 
@@ -134,5 +155,48 @@ describe("plugin tool registration", () => {
         `${name} still claims next-turn-only availability, which was measured false`
       ).not.toContain("become available on the following turn")
     }
+  })
+
+  it("forwards the plugin project config path when vision_init receives no path", async () => {
+    const hooks = await loadHooks()
+    const init = (hooks.tool ?? {})[VISION_PLUGIN_TOOL_NAMES.init]
+
+    await init.execute({})
+
+    expect(visionInitMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "/tmp/project/opencode.jsonc" })
+    )
+  })
+
+  it("preserves an explicitly supplied vision_init path", async () => {
+    const hooks = await loadHooks()
+    const init = (hooks.tool ?? {})[VISION_PLUGIN_TOOL_NAMES.init]
+
+    await init.execute({ path: "/custom/opencode.json" })
+
+    expect(visionInitMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "/custom/opencode.json" })
+    )
+  })
+
+  it("keeps vision_init path optional without embedding a schema default", async () => {
+    const hooks = await loadHooks()
+    const init = (hooks.tool ?? {})[VISION_PLUGIN_TOOL_NAMES.init]
+    const parsed = (
+      init.args as {
+        path: { safeParse: (value: unknown) => { success: boolean; data?: unknown } }
+      }
+    ).path.safeParse(undefined)
+
+    expect(parsed.success).toBe(true)
+    expect(parsed.data).toBeUndefined()
+  })
+
+  it("describes the recognized OpenCode config path", async () => {
+    const hooks = await loadHooks()
+    const init = (hooks.tool ?? {})[VISION_PLUGIN_TOOL_NAMES.init]
+
+    expect(init.description).not.toContain(".opencode.json")
+    expect(init.description).toContain("opencode.jsonc")
   })
 })

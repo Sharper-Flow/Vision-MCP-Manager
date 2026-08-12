@@ -139,7 +139,7 @@ describe("connectMcpServer", () => {
         server: "sentry",
         error: 'MCP server "sentry" is not configured in this project.',
         suggestion:
-          'Add it to the "mcp" block of opencode.json / .opencode.json, then reload. opencode_mcp_connect only enables servers that are already declared.',
+          'Add it to the "mcp" block of opencode.jsonc, then restart OpenCode. opencode_mcp_connect only enables servers that are already declared.',
       })
     )
     expect(client.mcp.status).not.toHaveBeenCalled()
@@ -185,7 +185,7 @@ describe("disconnectMcpServer", () => {
         server: "sentry",
         error: 'MCP server "sentry" is not configured in this project.',
         suggestion:
-          'Add it to the "mcp" block of opencode.json / .opencode.json, then reload. opencode_mcp_connect only enables servers that are already declared.',
+          'Add it to the "mcp" block of opencode.jsonc, then restart OpenCode. opencode_mcp_connect only enables servers that are already declared.',
       })
     )
     expect(client.mcp.status).not.toHaveBeenCalled()
@@ -204,5 +204,21 @@ describe("disconnectMcpServer", () => {
 
     expect(connectClient.mcp.status).toHaveBeenCalledTimes(1)
     expect(disconnectClient.mcp.status).toHaveBeenCalledTimes(1)
+  })
+
+  it("uses recognized config guidance and restart instructions for a missing server", async () => {
+    for (const operation of [connectMcpServer, disconnectMcpServer]) {
+      const client = makeClient({
+        [operation === connectMcpServer ? "connect" : "disconnect"]: () =>
+          Promise.resolve({ response: { status: 404 } }),
+      })
+
+      const result = await operation(client, { name: "sentry" })
+      const suggestion = JSON.parse(result).suggestion as string
+
+      expect(suggestion).toContain("opencode.jsonc")
+      expect(suggestion).toMatch(/restart/i)
+      expect(suggestion).not.toContain(".opencode.json")
+    }
   })
 })

@@ -54,4 +54,11 @@ describe("renderVisionContext", () => {
       expect(context).not.toContain("tools.vision.opencode_mcp_")
     }
   })
+
+  it.each(states)("describes the recognized OpenCode config path in %j", (state) => {
+    const context = renderVisionContext(state)
+
+    expect(context).not.toContain(".opencode.json")
+    expect(context).toContain("opencode.jsonc")
+  })
 })
