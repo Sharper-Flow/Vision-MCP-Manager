@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,42 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
-func TestToolInit_WritesOpenCodeConfig(t *testing.T) {
+func TestToolInit_RequiresExplicitPath(t *testing.T) {
+	registry := server.NewRegistry(nil, nil)
+	if err := registry.Add("kagi", &config.ServerConfig{Port: 6279, Command: "uvx"}); err != nil {
+		t.Fatalf("Add(kagi): %v", err)
+	}
+	registry.Get("kagi").State = server.StateRunning
+
+	workingDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd(): %v", err)
+	}
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatalf("Chdir(%q): %v", workingDir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	srv := &Server{registry: registry}
+	_, err = srv.toolInit(context.Background(), mustJSON(t, map[string]any{}))
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("toolInit() error = %v, want validation error", err)
+	}
+
+	for _, name := range []string{".opencode.json", "opencode.json", "opencode.jsonc"} {
+		if _, err := os.Stat(name); !os.IsNotExist(err) {
+			t.Fatalf("unexpected guessed config %q: stat error = %v", name, err)
+		}
+	}
+}
+
+func TestToolInit_WritesOpenCodeJSONCConfig(t *testing.T) {
 	registry := server.NewRegistry(nil, nil)
 	if err := registry.Add("kagi", &config.ServerConfig{Port: 6279, Command: "uvx"}); err != nil {
 		t.Fatalf("Add(kagi): %v", err)
@@ -21,7 +57,7 @@ func TestToolInit_WritesOpenCodeConfig(t *testing.T) {
 	registry.Get("kagi").State = server.StateRunning
 
 	srv := &Server{registry: registry}
-	path := filepath.Join(t.TempDir(), ".opencode.json")
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
 
 	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
 	if err != nil {
@@ -74,7 +110,7 @@ func TestToolInit_AcceptsAdvertisedCommaSeparatedServerFilter(t *testing.T) {
 	registry.Get("kagi").State = server.StateRunning
 
 	srv := &Server{registry: registry}
-	path := filepath.Join(t.TempDir(), ".opencode.json")
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
 	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{
 		"path":    path,
 		"servers": "kagi",
@@ -101,7 +137,7 @@ func TestToolInit_ReconcilesExistingOpenCodeConfig(t *testing.T) {
 	registry.Get("kagi").State = server.StateRunning
 
 	srv := &Server{registry: registry}
-	path := filepath.Join(t.TempDir(), "opencode.json")
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
 	existing := map[string]any{
 		"theme": "ayu-dark",
 		"mcp": map[string]any{
@@ -134,6 +170,19 @@ func TestToolInit_ReconcilesExistingOpenCodeConfig(t *testing.T) {
 	decodeToolJSON(t, result, &response)
 	if !response.Success {
 		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+	if len(response.ReconciledServers) != 1 || response.ReconciledServers[0] != "kagi" {
+		t.Fatalf("ReconciledServers = %#v, want [kagi]", response.ReconciledServers)
+	}
+	if !response.BackedUp || response.BackupPath != path+".backup" {
+		t.Fatalf("backup response = backed_up:%v path:%q, want true and %q", response.BackedUp, response.BackupPath, path+".backup")
+	}
+	backupData, err := os.ReadFile(response.BackupPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", response.BackupPath, err)
+	}
+	if string(backupData) != string(data) {
+		t.Fatalf("backup bytes changed: got %q, want %q", backupData, data)
 	}
 
 	updatedData, err := os.ReadFile(path)
@@ -195,10 +244,14 @@ func TestToolSearch_EmptyQueryReturnsAlphabetical(t *testing.T) {
 	}
 }
 
-func TestToolAddRemove_SyncsOpenCodeConfig(t *testing.T) {
+func TestToolAddRemove_DoesNotSyncOpenCodeConfig(t *testing.T) {
 	tmp := t.TempDir()
 	serversPath := filepath.Join(tmp, "servers.yaml")
-	opencodePath := filepath.Join(tmp, ".opencode.json")
+	explicitConfigPath := filepath.Join(tmp, "opencode.jsonc")
+	sentinel := []byte("{\n  \"sentinel\": true\n}\n")
+	if err := os.WriteFile(explicitConfigPath, sentinel, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", explicitConfigPath, err)
+	}
 
 	daemonCfg := &config.Config{Servers: make(map[string]*config.ServerConfig)}
 	registry := server.NewRegistry(nil, nil)
@@ -219,22 +272,14 @@ func TestToolAddRemove_SyncsOpenCodeConfig(t *testing.T) {
 	if !addResp.Success {
 		t.Fatalf("toolAdd() success = false, error = %v", addResp.Error)
 	}
-
-	data, err := os.ReadFile(opencodePath)
-	if err != nil {
-		t.Fatalf("ReadFile(.opencode.json) after add: %v", err)
+	if registry.Get("kagi") == nil {
+		t.Fatal("registry missing kagi after add")
 	}
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("Unmarshal .opencode.json after add: %v", err)
+	if daemonCfg.Servers["kagi"] == nil {
+		t.Fatal("daemon config missing kagi after add")
 	}
-	mcp, ok := cfg["mcp"].(map[string]any)
-	if !ok {
-		t.Fatalf(".opencode.json missing mcp map: %#v", cfg)
-	}
-	if _, ok := mcp["kagi"].(map[string]any); !ok {
-		t.Fatalf(".opencode.json missing kagi after add: %#v", mcp)
-	}
+	assertOpenCodeConfigUnchanged(t, explicitConfigPath, sentinel)
+	assertNoUnintendedOpenCodeConfig(t, tmp, explicitConfigPath)
 
 	removeResult, err := srv.toolRemove(context.Background(), mustJSON(t, map[string]any{"name": "kagi"}))
 	if err != nil {
@@ -245,20 +290,37 @@ func TestToolAddRemove_SyncsOpenCodeConfig(t *testing.T) {
 	if !removeResp.Success {
 		t.Fatalf("toolRemove() success = false, error = %v", removeResp.Error)
 	}
+	if registry.Get("kagi") != nil {
+		t.Fatal("registry still contains kagi after remove")
+	}
+	if _, ok := daemonCfg.Servers["kagi"]; ok {
+		t.Fatal("daemon config still contains kagi after remove")
+	}
+	assertOpenCodeConfigUnchanged(t, explicitConfigPath, sentinel)
+	assertNoUnintendedOpenCodeConfig(t, tmp, explicitConfigPath)
+}
 
-	data, err = os.ReadFile(opencodePath)
+func assertOpenCodeConfigUnchanged(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("ReadFile(.opencode.json) after remove: %v", err)
+		t.Fatalf("ReadFile(%q): %v", path, err)
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("Unmarshal .opencode.json after remove: %v", err)
+	if string(got) != string(want) {
+		t.Fatalf("config %q changed: got %q, want %q", path, got, want)
 	}
-	mcp, ok = cfg["mcp"].(map[string]any)
-	if !ok {
-		t.Fatalf(".opencode.json missing mcp map after remove: %#v", cfg)
-	}
-	if _, ok := mcp["kagi"]; ok {
-		t.Fatalf(".opencode.json still contains kagi after remove: %#v", mcp)
+}
+
+func assertNoUnintendedOpenCodeConfig(t *testing.T, dir, explicitPath string) {
+	t.Helper()
+	for _, name := range []string{".opencode.json", "opencode.json", "opencode.jsonc"} {
+		path := filepath.Join(dir, name)
+		if filepath.Clean(path) == filepath.Clean(explicitPath) {
+			continue
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("unexpected guessed config %q: stat error = %v", path, err)
+		}
 	}
 }
 
