@@ -36,6 +36,12 @@ import {
   VisionInitArgsSchema,
   VisionGuidanceArgsSchema,
 } from "./tools"
+import {
+  connectMcpServer,
+  disconnectMcpServer,
+  McpConnectArgsSchema,
+  McpDisconnectArgsSchema,
+} from "./mcp-control"
 // Tool-name constants live in a data-only sibling module so this ENTRY module
 // exports functions only. The OpenCode 1.18.4+ loader iterates
 // Object.values(entryModule) and throws "Plugin export is not a function" for
@@ -67,7 +73,7 @@ interface PluginState {
 // Plugin Entry Point
 // =============================================================================
 
-const VisionPlugin: Plugin = async () => {
+const VisionPlugin: Plugin = async ({ client }) => {
   // Initialize state
   const state: PluginState = {
     daemonHealthy: false,
@@ -224,6 +230,26 @@ const VisionPlugin: Plugin = async () => {
         parameters: z.object({}),
         execute: async () => {
           const result = await visionMetrics()
+          return { content: result }
+        },
+      },
+      {
+        name: VISION_PLUGIN_TOOL_NAMES.mcpConnect,
+        description:
+          "Use this when you have determined you need an MCP server already declared in the OpenCode config `mcp` block but currently disabled or failed. This is a session-lifetime runtime connection: it edits no config file, does not persist, and ends when the opencode process ends. The server's tools become available on the following turn, not this one; do not call them immediately after connecting. It cannot add or connect a server that is not declared in the `mcp` block.",
+        parameters: McpConnectArgsSchema,
+        execute: async (args: z.infer<typeof McpConnectArgsSchema>) => {
+          const result = await connectMcpServer(client, args)
+          return { content: result }
+        },
+      },
+      {
+        name: VISION_PLUGIN_TOOL_NAMES.mcpDisconnect,
+        description:
+          "Use this when you have determined you no longer need an MCP server that is already declared in the OpenCode config `mcp` block and currently connected. This is a session-lifetime runtime disconnection: it edits no config file, does not persist, and ends when the opencode process ends. The server's tools are gone from the following turn, not this one; do not call them after disconnecting. It cannot remove or change a server declaration, and it cannot manage a server that is not declared in the `mcp` block.",
+        parameters: McpDisconnectArgsSchema,
+        execute: async (args: z.infer<typeof McpDisconnectArgsSchema>) => {
+          const result = await disconnectMcpServer(client, args)
           return { content: result }
         },
       },
