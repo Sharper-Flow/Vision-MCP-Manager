@@ -2,6 +2,8 @@
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "vision": {
+      "type": "remote",
+      "url": "http://localhost:6275/mcp",
       "enabled": true
     }
   }

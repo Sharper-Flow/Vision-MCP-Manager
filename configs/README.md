@@ -13,31 +13,18 @@ These files are templates - they are NOT used directly by Vision at runtime.
 
 ## OpenCode Configuration Locations
 
-OpenCode searches for `.opencode.json` in this order (first found wins):
+Use one of OpenCode's current configuration paths:
 
-1. **Project-local**: `./.opencode.json` (current directory)
-2. **XDG Config**: `$XDG_CONFIG_HOME/opencode/.opencode.json`
-3. **Home**: `$HOME/.opencode.json`
+- **Project**: `./opencode.json` or `./opencode.jsonc`
+- **Project subdirectory**: `./.opencode/opencode.json` or `./.opencode/opencode.jsonc`
+- **Global**: `~/.config/opencode/opencode.jsonc`
 
-**Recommendation**: Use `$HOME/.opencode.json` for global config, `./.opencode.json` for project overrides.
+The project configuration takes precedence over the global configuration. The
+current schema uses a top-level `mcp` object with `remote` entries.
 
 ## Usage
 
-### Option 1: Use `vision init` (Recommended)
-
-```bash
-# Generate global config (~/.opencode.json)
-vision init --global
-
-# Generate project-specific config (./.opencode.json)
-cd /path/to/project
-vision init
-
-# Generate for specific servers only
-vision init --servers time,context7
-```
-
-### Option 2: Copy and Modify
+### Copy and Modify
 
 ```bash
 # Server registry
@@ -46,10 +33,10 @@ cp configs/servers.example.yaml ~/.config/vision/servers.yaml
 # Edit to add your servers and API keys
 
 # OpenCode (global)
-cp configs/opencode.example.json ~/.opencode.json
+cp configs/opencode.example.json ~/.config/opencode/opencode.jsonc
 
 # OpenCode (project-local)
-cp configs/opencode.example.json ./.opencode.json
+cp configs/opencode.example.json ./opencode.jsonc
 ```
 
 ## MCP Server Types in OpenCode
@@ -59,16 +46,17 @@ OpenCode supports two MCP transport types:
 | Type | Use Case | Config |
 |------|----------|--------|
 | `stdio` | Local process (direct spawn) | `command`, `args`, `env` |
-| `sse` | Remote HTTP/SSE endpoint | `url`, `headers` (optional) |
+| `remote` | Remote HTTP endpoint | `url`, `headers` (optional) |
 
-**Vision uses `sse` type** because it exposes MCP servers as HTTP endpoints:
+**Vision uses `remote` type** because it exposes MCP servers as HTTP endpoints:
 
 ```json
 {
-  "mcpServers": {
+  "mcp": {
     "time": {
-      "type": "sse",
-      "url": "http://localhost:6276/mcp"
+      "type": "remote",
+      "url": "http://localhost:6276/mcp",
+      "enabled": true
     }
   }
 }
@@ -77,7 +65,8 @@ OpenCode supports two MCP transport types:
 ## Important Notes
 
 - **Never commit `servers.yaml`** - It may contain API keys and secrets
-- **Never commit `.opencode.json`** - User-specific configuration
+- Keep machine-specific OpenCode configuration out of source control unless it is
+  an intentional project declaration.
 - Environment variables like `${CONTEXT7_API_KEY}` are expanded at runtime
 - Port numbers in client configs must match the server registry
 - Each Vision-managed server gets a dedicated port (6276-6325)

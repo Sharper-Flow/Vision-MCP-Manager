@@ -22,7 +22,7 @@ By giving an agent access to Vision's Admin port, you empower it to maintain its
 | `vision_remove` | Decommissions an existing server. |
 | `vision_restart` | Restarts a configured server without changing its port assignment. |
 | `vision_guidance` | Provides hints on which tools to prefer for specific tasks. |
-| `vision_init` | Generates configuration files for other agents. |
+| `vision_init` | Generates an OpenCode configuration at an explicit path. |
 | `vision_slot_status` | Reports slot-group routing and per-slot session state. |
 | `vision_metrics` | Reports daemon session, tool-call, error, and subprocess metrics. |
 
@@ -32,7 +32,7 @@ By giving an agent access to Vision's Admin port, you empower it to maintain its
 
 OpenCode supports Vision natively via its `remote` transport.
 
-**Global Config (`~/.opencode.json`):**
+**Global Config (`~/.config/opencode/opencode.jsonc`):**
 ```json
 {
   "mcp": {

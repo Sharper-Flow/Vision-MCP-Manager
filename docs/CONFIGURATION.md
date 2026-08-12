@@ -7,7 +7,7 @@ This document provides a complete reference for Vision's configuration files.
 Vision uses two types of configuration:
 
 1. **Server Registry** (`~/.config/vision/servers.yaml`) - Machine-wide server definitions
-2. **Client Configs** (`.opencode.json`, `.claude/settings.json`) - Per-project or global client settings
+2. **Client Configs** (`opencode.json[c]`, `.opencode/opencode.json[c]`, `.claude/settings.json`) - Per-project or global client settings
 
 ## Server Registry
 
@@ -462,35 +462,48 @@ Create `.claude/settings.json` in your project or `~/.config/Claude/Claude.json`
 }
 ```
 
-Generate with: `vision init --client claude-code`
+Configure Claude Code manually in the Claude Code settings file; the Vision CLI
+does not generate client configuration.
 
 ### OpenCode
 
-Create `.opencode.json` in your project or `~/.opencode.json` globally:
+Create `opencode.json` or `opencode.jsonc` in your project, optionally under
+`.opencode/`, or use `~/.config/opencode/opencode.jsonc` globally:
 
 ```json
 {
   "mcp": {
     "time": {
       "type": "remote",
-      "url": "http://localhost:6276/mcp"
+      "url": "http://localhost:6276/mcp",
+      "enabled": true
     },
     "context7": {
       "type": "remote",
-      "url": "http://localhost:6277/mcp"
+      "url": "http://localhost:6277/mcp",
+      "enabled": true
     },
     "gh_grep": {
       "type": "remote",
       "url": "https://mcp.grep.app",
+      "enabled": true,
       "timeout": 20000
     }
   }
 }
 ```
 
-Generate with: `vision init --client opencode`
-
-`vision_init` now reconciles existing OpenCode JSON instead of blindly replacing it, so stale Vision-managed MCP endpoint mappings can be repaired while preserving unrelated configuration keys.
+The OpenCode plugin's `vision_init` tool reconciles an existing OpenCode JSON
+configuration instead of blindly replacing it. When `path` is omitted, the
+plugin detects a sole existing recognized project config: root
+`opencode.jsonc`/`opencode.json`, or `.opencode/opencode.jsonc`/
+`.opencode/opencode.json`. If none exists, it uses the project root's
+`opencode.jsonc`; if multiple recognized configs exist, an explicit path is
+required. Explicit relative plugin paths resolve against the project directory.
+Existing JSONC comments and trailing commas are preserved during reconciliation.
+Direct Admin MCP callers must provide an absolute `path`; stale Vision-managed
+MCP endpoint mappings can then be repaired while unrelated configuration keys
+are preserved.
 
 ## Environment Variable Expansion
 

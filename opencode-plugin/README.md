@@ -46,11 +46,21 @@ the daemon is not running.
 | `vision_remove`      | Stop and remove a server                       |
 | `vision_restart`     | Restart a server in-place, preserving its port |
 | `vision_search`      | Search for servers by name or capability       |
-| `vision_init`        | Generate or reconcile .opencode.json config    |
+| `vision_init`        | Generate or reconcile an OpenCode config       |
 | `vision_status`      | Check daemon health and statistics             |
 | `vision_guidance`    | Get ranked tool-selection guidance             |
 | `vision_slot_status` | Inspect slot-group routing health              |
 | `vision_metrics`     | Inspect daemon and tool-call metrics           |
+
+`vision_init` is an OpenCode-plugin convenience. When `path` is omitted, the
+plugin detects recognized project configs in this order: a sole existing root
+`opencode.jsonc`/`opencode.json`, or a sole existing
+`.opencode/opencode.jsonc`/`.opencode/opencode.json`. If none exists, it uses
+the project root's `opencode.jsonc`; if multiple recognized configs exist, an
+explicit path is required. Explicit relative plugin paths resolve against the
+project directory. Existing JSONC comments and trailing commas are preserved
+during reconciliation. Direct Admin MCP callers must provide an absolute
+`path`; they do not use plugin path detection.
 
 ### Daemon-independent (work with the daemon stopped)
 

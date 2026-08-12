@@ -119,22 +119,19 @@ New (Vision):
 }
 ```
 
-Generate automatically:
-```bash
-# For Claude Code
-vision init --client claude-code --global
+Configure the Claude Code settings file manually. The Vision CLI no longer
+generates client configuration; use the Claude Code configuration documented
+above or the OpenCode plugin for OpenCode projects.
 
-# For project-specific
-cd /your/project
-vision init --client claude-code
-```
-
-**OpenCode:**
-
-```bash
-# For OpenCode
-vision init --client opencode --global
-```
+**OpenCode:** Use `opencode.json`/`opencode.jsonc` in the project (optionally
+under `.opencode/`), or `~/.config/opencode/opencode.jsonc` globally. Put the
+Vision server in the top-level `mcp` object with `type: "remote"`. When the
+OpenCode plugin's `vision_init` omits `path`, it detects a sole existing root
+`opencode.jsonc`/`opencode.json` or `.opencode/opencode.jsonc`/
+`.opencode/opencode.json`; with none it uses root `opencode.jsonc`, and with
+multiple it requires an explicit path. Explicit relative plugin paths resolve
+against the project directory. Existing JSONC comments and trailing commas are
+preserved. Direct Admin MCP callers must provide an absolute `path`.
 
 ### Step 5: Verify Migration
 
@@ -161,10 +158,9 @@ Vision uses a flat server list instead of profile groupings:
 - **Before**: Servers grouped into essentials, dev-core, research, data
 - **After**: Each server is independent; select per-project in client config
 
-To replicate profile behavior, use `--servers` flag:
-```bash
-vision init --servers time,context7,firecrawl
-```
+To replicate profile behavior, select the desired servers in the client's MCP
+configuration. For OpenCode, keep only the required entries in the top-level
+`mcp` object.
 
 ### 2. One Port Per Server
 

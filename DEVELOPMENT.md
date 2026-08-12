@@ -7,7 +7,7 @@
 ### Protected Locations (Do Not Touch Until Release)
 
 - `~/.config/vision/` - Vision server registry
-- `~/.opencode.json` - Global OpenCode config
+- `~/.config/opencode/opencode.jsonc` - Global OpenCode config
 - `~/.config/opencode/` - OpenCode config directory
 
 ### Development Configuration
@@ -21,7 +21,6 @@ All development and testing uses local fixtures:
 │   │   ├── valid-servers.yaml      # Valid config for happy path tests
 │   │   ├── invalid-servers.yaml    # Malformed config for error tests
 │   │   ├── empty-servers.yaml      # Empty config edge case
-│   │   └── opencode.json           # Test OpenCode config
 │   └── fixtures/
 │       └── ...                     # Other test fixtures
 ```
@@ -72,7 +71,7 @@ Properties:
   boundary fail under `realpath`, backup tools, and dev-path moves.
 - **Idempotent.** Re-running with no code changes is a no-op (`cmp -s`).
 - **Scoped writes.** Only `~/.local/bin/vision` is touched. Protected
-  locations (`~/.config/vision/`, `~/.config/opencode/`, `~/.opencode.json`)
+  locations (`~/.config/vision/`, `~/.config/opencode/`)
   are never modified by this script — those remain `scripts/install.sh`'s
   responsibility for first-time setup.
 - **Explicit restart.** Service restart is opt-in via `--restart` so you can

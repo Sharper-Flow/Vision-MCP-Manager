@@ -80,8 +80,8 @@ curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/tru
 # Start the daemon (with example servers)
 vision daemon start -d
 
-# Generate client configuration
-vision init --global
+# Add the Vision remote to OpenCode's project `opencode.jsonc` or global
+# `~/.config/opencode/opencode.jsonc` configuration.
 ```
 
 Your AI agent can now connect to Vision-managed servers at `http://localhost:627X/mcp`.
@@ -99,7 +99,6 @@ When it installs the systemd unit, it also captures your current `PATH` so shell
 
 **Options:**
 - `--systemd` — Install and enable the systemd user service
-- `--client <name>` — Auto-configure for a specific client
 
 ### From Source
 
@@ -214,11 +213,15 @@ Connect any MCP-compatible client to Vision-managed servers via Streamable HTTP:
 }
 ```
 
-Or generate automatically:
-
-```bash
-vision init --global
-```
+For OpenCode, place this declaration in the project `opencode.json`/
+`opencode.jsonc`, or in `~/.config/opencode/opencode.jsonc` for global use.
+When the Vision OpenCode plugin's `vision_init` omits `path`, it detects a sole
+existing root `opencode.jsonc`/`opencode.json` or
+`.opencode/opencode.jsonc`/`.opencode/opencode.json`; with none it uses root
+`opencode.jsonc`, and with multiple it requires an explicit path. Explicit
+relative plugin paths resolve against the project directory, while direct Admin
+MCP callers must pass an absolute `path`. Existing JSONC comments and trailing
+commas are preserved during reconciliation.
 
 ## External Configuration
 
@@ -333,12 +336,13 @@ vision server stop <name>
 
 ### Configuration
 
-```bash
-vision init                           # Project-local config
-vision init --global                  # Global config
-vision init --client opencode         # Target specific client format
-vision init --servers time,context7   # Specific servers only
-```
+Client configuration generation is provided by the OpenCode plugin's
+`vision_init` tool, not the Vision CLI. With `path` omitted, the plugin detects a
+sole existing recognized project config (root `opencode.jsonc`/`opencode.json`
+or `.opencode/opencode.jsonc`/`.opencode/opencode.json`), uses root
+`opencode.jsonc` when none exists, and requires an explicit path when multiple
+exist. Relative plugin paths resolve against the project directory; direct
+Admin MCP callers must provide an absolute path.
 
 ## Troubleshooting
 
