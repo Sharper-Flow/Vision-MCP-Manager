@@ -1,3 +1,9 @@
+## 2026-08-12 (v1.4.2)
+
+### Fixed
+
+- repair daemon health check and correct tool availability claims (#12)
+
 ## 2026-08-12 (v1.4.1)
 
 ### Fixed
