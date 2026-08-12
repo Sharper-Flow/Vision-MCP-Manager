@@ -3,6 +3,17 @@
  *
  * Provides health checking for the Vision daemon on port 6275.
  * Used to determine if the daemon is running before attempting MCP calls.
+ *
+ * Contract source: internal/admin/server.go handleHealth (lines 195-237).
+ * Port 6275 serves the Admin MCP. The legacy REST API in internal/api/
+ * handlers.go — which returned {"status":"healthy","uptime":...} — was removed
+ * (see internal/daemon/daemon.go:194). Responses are:
+ *
+ *   200 {"status":"ok"}                          daemon up, all servers fine
+ *   200 {"status":"degraded","errors":[...]}     daemon up, some servers failed
+ *   503 {"status":"unhealthy"}                   daemon not running
+ *
+ * Neither `uptime` nor `port` is ever returned.
  */
 
 import { getVisionHealthTimeoutMs } from "./timeouts"
@@ -20,8 +31,10 @@ async function readJsonWithTimeout<T>(response: Response, timeoutMs: number): Pr
 
 export interface HealthStatus {
   healthy: boolean
-  uptime?: string
-  port?: number
+  /** True when the daemon is reachable but some managed servers have failed. */
+  degraded?: boolean
+  /** Per-server failure details, present only when degraded. */
+  errors?: string[]
   error?: string
 }
 
@@ -52,14 +65,31 @@ export async function checkHealth(): Promise<HealthStatus> {
 
     const data = (await readJsonWithTimeout(response, healthTimeoutMs)) as {
       status?: string
-      uptime?: string
-      port?: number
+      errors?: string[]
     }
 
-    return {
-      healthy: data.status === "healthy",
-      uptime: data.uptime,
-      port: data.port,
+    // Explicit over the documented states. An unrecognized status fails closed
+    // rather than defaulting either way: silently treating an unknown value as
+    // healthy is how the previous "healthy" literal went unnoticed, and
+    // silently treating it as unhealthy would disable the tools on a benign
+    // contract addition without saying why.
+    switch (data.status) {
+      case "ok":
+        return { healthy: true }
+      case "degraded":
+        // The daemon itself is up and its management tools work; individual
+        // managed servers have failed. Reporting this as unhealthy would gate
+        // off the very tools needed to diagnose and restart them.
+        return {
+          healthy: true,
+          degraded: true,
+          errors: data.errors ?? [],
+        }
+      default:
+        return {
+          healthy: false,
+          error: `Unrecognized daemon health status: ${JSON.stringify(data.status)}`,
+        }
     }
   } catch (err) {
     clearTimeout(timeoutId)
