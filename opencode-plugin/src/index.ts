@@ -14,7 +14,7 @@
  * - Context injection solves the "bootstrap problem"
  */
 
-import type { Plugin } from "@opencode-ai/plugin"
+import { tool, type Plugin } from "@opencode-ai/plugin"
 import { z } from "zod"
 import { renderVisionContext } from "./context"
 import { checkHealth } from "./health"
@@ -137,123 +137,83 @@ const VisionPlugin: Plugin = async ({ client }) => {
     // ===========================================================================
     // Tool Definitions
     // ===========================================================================
+    //
+    // OpenCode reads `tool` — a record keyed by tool name — from the Hooks
+    // object. A `tools` array is not part of the contract and is silently
+    // ignored, which is why none of these were ever registered. Each entry uses
+    // the `tool()` helper from @opencode-ai/plugin so `args` (a bare
+    // ZodRawShape, not a wrapped ZodObject) and `execute` are checked by the
+    // owning mechanism rather than by hand. src/registration.test.ts guards the
+    // shape. Handlers return strings, which satisfy ToolResult directly.
 
-    tools: [
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.list,
+    tool: {
+      [VISION_PLUGIN_TOOL_NAMES.list]: tool({
         description:
           "List all registered MCP servers with their current status (running/stopped/failed)",
-        parameters: z.object({}),
-        execute: async () => {
-          const result = await visionList()
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.add,
+        args: {},
+        execute: async () => await visionList(),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.add]: tool({
         description: "Add and optionally start an MCP server from the Vision registry",
-        parameters: VisionAddArgsSchema,
-        execute: async (args: z.infer<typeof VisionAddArgsSchema>) => {
-          const result = await visionAdd(args)
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.remove,
+        args: VisionAddArgsSchema.shape,
+        execute: async (args) => await visionAdd(args),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.remove]: tool({
         description: "Stop and remove an MCP server from the active configuration",
-        parameters: VisionRemoveArgsSchema,
-        execute: async (args: z.infer<typeof VisionRemoveArgsSchema>) => {
-          const result = await visionRemove(args)
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.restart,
+        args: VisionRemoveArgsSchema.shape,
+        execute: async (args) => await visionRemove(args),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.restart]: tool({
         description:
           "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
-        parameters: VisionRestartArgsSchema,
-        execute: async (args: z.infer<typeof VisionRestartArgsSchema>) => {
-          const result = await visionRestart(args)
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.search,
+        args: VisionRestartArgsSchema.shape,
+        execute: async (args) => await visionRestart(args),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.search]: tool({
         description:
           "Search the Vision registry for MCP servers by name, capability tags, or description",
-        parameters: VisionSearchArgsSchema,
-        execute: async (args: z.infer<typeof VisionSearchArgsSchema>) => {
-          const result = await visionSearch(args)
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.init,
+        args: VisionSearchArgsSchema.shape,
+        execute: async (args) => await visionSearch(args),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.init]: tool({
         description:
           "Generate MCP client configuration (.opencode.json) for currently running servers",
-        parameters: VisionInitArgsSchema,
-        execute: async (args: z.infer<typeof VisionInitArgsSchema>) => {
-          const result = await visionInit(args)
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.status,
+        args: VisionInitArgsSchema.shape,
+        execute: async (args) => await visionInit(args),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.status]: tool({
         description: "Get Vision daemon status including uptime, memory usage, and server counts",
-        parameters: z.object({}),
-        execute: async () => {
-          const result = await visionStatus()
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.guidance,
+        args: {},
+        execute: async () => await visionStatus(),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.guidance]: tool({
         description: "Get ranked tool-selection guidance for a task or specific server",
-        parameters: VisionGuidanceArgsSchema,
-        execute: async (args: z.infer<typeof VisionGuidanceArgsSchema>) => {
-          const result = await visionGuidance(args)
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.slotStatus,
+        args: VisionGuidanceArgsSchema.shape,
+        execute: async (args) => await visionGuidance(args),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.slotStatus]: tool({
         description: "Get slot-group routing status and per-slot session details",
-        parameters: z.object({}),
-        execute: async () => {
-          const result = await visionSlotStatus()
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.metrics,
+        args: {},
+        execute: async () => await visionSlotStatus(),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.metrics]: tool({
         description: "Get Vision daemon metrics for sessions, tool calls, errors, and subprocesses",
-        parameters: z.object({}),
-        execute: async () => {
-          const result = await visionMetrics()
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.mcpConnect,
+        args: {},
+        execute: async () => await visionMetrics(),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.mcpConnect]: tool({
         description:
           "Use this when you have determined you need an MCP server already declared in the OpenCode config `mcp` block but currently disabled or failed. This is a session-lifetime runtime connection: it edits no config file, does not persist, and ends when the opencode process ends. The server's tools become available on the following turn, not this one; do not call them immediately after connecting. It cannot add or connect a server that is not declared in the `mcp` block.",
-        parameters: McpConnectArgsSchema,
-        execute: async (args: z.infer<typeof McpConnectArgsSchema>) => {
-          const result = await connectMcpServer(client, args)
-          return { content: result }
-        },
-      },
-      {
-        name: VISION_PLUGIN_TOOL_NAMES.mcpDisconnect,
+        args: McpConnectArgsSchema.shape,
+        execute: async (args) => await connectMcpServer(client, args),
+      }),
+      [VISION_PLUGIN_TOOL_NAMES.mcpDisconnect]: tool({
         description:
           "Use this when you have determined you no longer need an MCP server that is already declared in the OpenCode config `mcp` block and currently connected. This is a session-lifetime runtime disconnection: it edits no config file, does not persist, and ends when the opencode process ends. The server's tools are gone from the following turn, not this one; do not call them after disconnecting. It cannot remove or change a server declaration, and it cannot manage a server that is not declared in the `mcp` block.",
-        parameters: McpDisconnectArgsSchema,
-        execute: async (args: z.infer<typeof McpDisconnectArgsSchema>) => {
-          const result = await disconnectMcpServer(client, args)
-          return { content: result }
-        },
-      },
-    ],
+        args: McpDisconnectArgsSchema.shape,
+        execute: async (args) => await disconnectMcpServer(client, args),
+      }),
+    },
   }
 }
 

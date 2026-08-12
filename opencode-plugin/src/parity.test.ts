@@ -26,9 +26,12 @@ describe("Vision plugin ↔ daemon tool parity", () => {
 
   it("keeps every registered plugin tool represented in the plugin name constants", async () => {
     const plugin = await VisionPlugin({ client: {} } as Parameters<typeof VisionPlugin>[0])
-    const registeredToolNames = (
-      (plugin as unknown as { tools: Array<{ name: string }> }).tools ?? []
-    ).map((tool) => tool.name)
+    // Read the `tool` record OpenCode actually consumes. No `?? {}` fallback:
+    // a missing registration must fail here rather than silently compare an
+    // empty list against an empty list.
+    const registeredToolNames = Object.keys(
+      (plugin as unknown as { tool: Record<string, unknown> }).tool
+    )
 
     expect(registeredToolNames.sort()).toEqual(Object.values(VISION_PLUGIN_TOOL_NAMES).sort())
   })
