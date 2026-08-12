@@ -49,6 +49,28 @@ func TestToolInit_RequiresExplicitPath(t *testing.T) {
 	}
 }
 
+func TestToolInit_RejectsRelativeExplicitPathBeforeRegistryOrFilesystem(t *testing.T) {
+	workingDir := t.TempDir()
+	oldDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd(): %v", err)
+	}
+	if err := os.Chdir(workingDir); err != nil {
+		t.Fatalf("Chdir(%q): %v", workingDir, err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldDir) })
+
+	srv := &Server{}
+	_, err = srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": "relative.jsonc"}))
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("toolInit() error = %v, want validation error before registry access", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workingDir, "relative.jsonc")); !os.IsNotExist(statErr) {
+		t.Fatalf("relative path was touched: stat error = %v", statErr)
+	}
+}
+
 func TestToolInit_WritesOpenCodeJSONCConfig(t *testing.T) {
 	registry := server.NewRegistry(nil, nil)
 	if err := registry.Add("kagi", &config.ServerConfig{Port: 6279, Command: "uvx"}); err != nil {
@@ -207,6 +229,147 @@ func TestToolInit_ReconcilesExistingOpenCodeConfig(t *testing.T) {
 	if got := custom["url"]; got != "http://localhost:9999/mcp" {
 		t.Fatalf("custom.url = %#v, want preserved value", got)
 	}
+}
+
+func TestToolInit_ReconcilesLosslessJSONCComments(t *testing.T) {
+	registry := server.NewRegistry(nil, nil)
+	if err := registry.Add("kagi", &config.ServerConfig{Port: 6279, Command: "uvx"}); err != nil {
+		t.Fatalf("Add(kagi): %v", err)
+	}
+	registry.Get("kagi").State = server.StateRunning
+
+	srv := &Server{registry: registry}
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
+	original := []byte(`{
+  // before member: keep-before
+  "theme" /* between name and colon: keep-name */ : /* colon and value: keep-colon */ "ayu-dark" /* value and comma: keep-value */, // trailing line: keep-line
+  /* unrelated member comment: keep-unrelated */
+  "mcp": {
+    /* before server: keep-server */
+    "kagi": {"type": "remote", "url": "http://localhost:6283/mcp", "enabled": true},
+    "custom": {"type": "remote", "url": "http://localhost:9999/mcp", "enabled": true} /* trailing block: keep-block */,
+  },
+}
+`)
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path, "servers": "kagi"}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if !response.Success {
+		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+
+	backup, err := os.ReadFile(path + ".backup")
+	if err != nil {
+		t.Fatalf("ReadFile backup: %v", err)
+	}
+	if string(backup) != string(original) {
+		t.Fatalf("backup bytes changed: got %q, want %q", backup, original)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile updated config: %v", err)
+	}
+	for _, marker := range []string{
+		"keep-before", "keep-name", "keep-colon", "keep-value", "keep-line",
+		"keep-unrelated", "keep-server", "keep-block",
+		`"url": "http://localhost:6279/mcp"`,
+		`"url": "http://localhost:9999/mcp"`,
+	} {
+		if !strings.Contains(string(updated), marker) {
+			t.Errorf("updated config lost marker %q: %s", marker, updated)
+		}
+	}
+}
+
+func TestToolInit_InvalidJSONCLeavesBytesUnchanged(t *testing.T) {
+	registry := runningRegistry(t, "kagi")
+	srv := &Server{registry: registry}
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
+	original := []byte("{ invalid jsonc\n")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v, want structured failure", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if response.Success {
+		t.Fatal("toolInit() success = true for invalid JSONC")
+	}
+	assertOpenCodeConfigUnchanged(t, path, original)
+}
+
+func TestToolInit_NonObjectMCPLeavesBytesUnchanged(t *testing.T) {
+	registry := runningRegistry(t, "kagi")
+	srv := &Server{registry: registry}
+	path := filepath.Join(t.TempDir(), "opencode.json")
+	original := []byte(`{"theme":"ayu-dark","mcp":[]}`)
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v, want structured failure", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if response.Success {
+		t.Fatal("toolInit() success = true for non-object mcp")
+	}
+	assertOpenCodeConfigUnchanged(t, path, original)
+}
+
+func TestToolInit_QuotesSlashAndTildeServerNames(t *testing.T) {
+	registry := server.NewRegistry(nil, nil)
+	for _, name := range []string{"a/b", "a~b"} {
+		if err := registry.Add(name, &config.ServerConfig{Port: 6279, Command: "uvx"}); err != nil {
+			t.Fatalf("Add(%q): %v", name, err)
+		}
+		registry.Get(name).State = server.StateRunning
+	}
+
+	path := filepath.Join(t.TempDir(), "opencode.json")
+	result, err := (&Server{registry: registry}).toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if !response.Success {
+		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	for _, name := range []string{`"a/b"`, `"a~b"`} {
+		if !strings.Contains(string(data), name) {
+			t.Errorf("generated config missing literal key %s: %s", name, data)
+		}
+	}
+}
+
+func runningRegistry(t *testing.T, names ...string) *server.Registry {
+	t.Helper()
+	registry := server.NewRegistry(nil, nil)
+	for _, name := range names {
+		if err := registry.Add(name, &config.ServerConfig{Port: 6279, Command: "uvx"}); err != nil {
+			t.Fatalf("Add(%q): %v", name, err)
+		}
+		registry.Get(name).State = server.StateRunning
+	}
+	return registry
 }
 
 func TestToolSearch_EmptyQueryReturnsAlphabetical(t *testing.T) {

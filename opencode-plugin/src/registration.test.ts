@@ -17,6 +17,9 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { mkdir, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
 
 const { checkHealthMock, visionInitMock } = vi.hoisted(() => ({
   checkHealthMock: vi.fn(async () => ({ healthy: false })),
@@ -41,7 +44,7 @@ import { VISION_PLUGIN_TOOL_NAMES } from "./tool-names"
  * in registration may call the client, and this asserts it by construction
  * rather than by convention. No network, no daemon.
  */
-function fakePluginInput() {
+function fakePluginInput(directory = "/tmp/project") {
   const fail = (method: string) => async () => {
     throw new Error(`client.mcp.${method} must not be called during registration`)
   }
@@ -54,8 +57,8 @@ function fakePluginInput() {
       },
     },
     project: {},
-    directory: "/tmp/project",
-    worktree: "/tmp/project",
+    directory,
+    worktree: directory,
     experimental_workspace: { register: () => {} },
     serverUrl: new URL("http://localhost:4096"),
     $: {},
@@ -64,9 +67,15 @@ function fakePluginInput() {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function loadHooks(): Promise<any> {
+async function loadHooks(directory = "/tmp/project"): Promise<any> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return await (VisionPlugin as any)(fakePluginInput())
+  return await (VisionPlugin as any)(fakePluginInput(directory))
+}
+
+async function tempProject(): Promise<string> {
+  const directory = join(tmpdir(), `vision-plugin-registration-${Date.now()}-${Math.random()}`)
+  await mkdir(directory, { recursive: true })
+  return directory
 }
 
 const expectedNames = Object.values(VISION_PLUGIN_TOOL_NAMES) as string[]
@@ -87,6 +96,13 @@ describe("plugin tool registration", () => {
     ).toBeDefined()
     expect(Array.isArray(hooks.tool)).toBe(false)
     expect(typeof hooks.tool).toBe("object")
+  })
+
+  it("does not probe config files or initialize Vision during registration", async () => {
+    const hooks = await loadHooks(await tempProject())
+
+    expect(hooks).toBeDefined()
+    expect(visionInitMock).not.toHaveBeenCalled()
   })
 
   it("does not carry a legacy `tools` key", async () => {
@@ -165,6 +181,56 @@ describe("plugin tool registration", () => {
 
     expect(visionInitMock).toHaveBeenCalledWith(
       expect.objectContaining({ path: "/tmp/project/opencode.jsonc" })
+    )
+  })
+
+  it.each([
+    "opencode.jsonc",
+    "opencode.json",
+    ".opencode/opencode.jsonc",
+    ".opencode/opencode.json",
+  ])("selects the sole existing %s candidate", async (candidate) => {
+    const directory = await tempProject()
+    await mkdir(join(directory, ".opencode"), { recursive: true })
+    await writeFile(join(directory, candidate), "{}\n")
+
+    const hooks = await loadHooks(directory)
+    await (hooks.tool ?? {})[VISION_PLUGIN_TOOL_NAMES.init].execute({})
+
+    expect(visionInitMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: join(directory, candidate) })
+    )
+  })
+
+  it("keeps the documented root opencode.jsonc fallback when no candidate exists", async () => {
+    const directory = await tempProject()
+    const hooks = await loadHooks(directory)
+    await (hooks.tool ?? {})[VISION_PLUGIN_TOOL_NAMES.init].execute({})
+
+    expect(visionInitMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: join(directory, "opencode.jsonc") })
+    )
+  })
+
+  it("rejects ambiguous config candidates without calling vision_init", async () => {
+    const directory = await tempProject()
+    await writeFile(join(directory, "opencode.jsonc"), "{}\n")
+    await writeFile(join(directory, "opencode.json"), "{}\n")
+    const hooks = await loadHooks(directory)
+
+    await expect((hooks.tool ?? {})[VISION_PLUGIN_TOOL_NAMES.init].execute({})).rejects.toThrow(
+      new RegExp("opencode\\.jsonc.*opencode\\.json|opencode\\.json.*opencode\\.jsonc")
+    )
+    expect(visionInitMock).not.toHaveBeenCalled()
+  })
+
+  it("resolves a relative explicit path under the plugin directory", async () => {
+    const directory = await tempProject()
+    const hooks = await loadHooks(directory)
+    await (hooks.tool ?? {})[VISION_PLUGIN_TOOL_NAMES.init].execute({ path: "nested/config.jsonc" })
+
+    expect(visionInitMock).toHaveBeenCalledWith(
+      expect.objectContaining({ path: join(directory, "nested/config.jsonc") })
     )
   })
 
