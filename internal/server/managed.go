@@ -92,29 +92,61 @@ func (s *ManagedServer) Transport() config.TransportType {
 
 // Status returns a snapshot of the server's current state.
 func (s *ManagedServer) Status() ServerStatus {
-	var lastErr string
-	if s.LastError != nil {
-		lastErr = s.LastError.Error()
+	state := s.State
+	pid := s.PID()
+	uptime := s.Uptime()
+	restartCount := s.RestartCount
+	lastErr := s.LastError
+	if s.Process != nil {
+		// Process.Status takes the supervisor lock and is the authoritative
+		// snapshot for supervised servers. Do not combine it with separately
+		// read process fields: that would produce an internally inconsistent
+		// response during a terminal transition.
+		processStatus := s.Process.Status()
+		state = mapProcessState(processStatus.State)
+		pid = processStatus.PID
+		uptime = processStatus.Uptime
+		restartCount = processStatus.RestartCount
+		if processStatus.LastError != nil {
+			lastErr = processStatus.LastError
+		}
 	}
 
-	var restartCount int
-	if s.Process != nil {
-		restartCount = s.Process.RestartCount()
+	lastErrorText := ""
+	if lastErr != nil {
+		lastErrorText = lastErr.Error()
 	}
 
 	required := s.Config != nil && s.Config.Required
 
 	return ServerStatus{
 		Name:         s.Name,
-		State:        s.State,
+		State:        state,
 		Port:         s.Port(),
 		Transport:    s.Transport(),
-		PID:          s.PID(),
-		Uptime:       s.Uptime(),
+		PID:          pid,
+		Uptime:       uptime,
 		RestartCount: restartCount,
-		LastError:    lastErr,
+		LastError:    lastErrorText,
 		Autostart:    s.Config != nil && s.Config.Autostart,
 		Required:     required,
+	}
+}
+
+func mapProcessState(state supervisor.ServiceState) State {
+	switch state {
+	case supervisor.StateStopped:
+		return StateStopped
+	case supervisor.StateStarting:
+		return StateStarting
+	case supervisor.StateRunning:
+		return StateRunning
+	case supervisor.StateCrashed:
+		return StateCrashed
+	case supervisor.StateFailed:
+		return StateFailed
+	default:
+		return StateFailed
 	}
 }
 

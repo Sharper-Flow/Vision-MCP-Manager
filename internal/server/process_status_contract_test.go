@@ -31,4 +31,16 @@ func TestManagedServerStatusFollowsTerminalProcessState(t *testing.T) {
 	if !strings.Contains(status.LastError, "restart limit") {
 		t.Fatalf("last error=%q", status.LastError)
 	}
+
+	reg := NewRegistry(nil, nil)
+	if err := reg.Add("terminal", cfg); err != nil {
+		t.Fatal(err)
+	}
+	registered := reg.Get("terminal")
+	registered.State = StateRunning
+	registered.Process = proc
+	registryStatus := reg.Status()
+	if registryStatus.RunningServers != 0 || registryStatus.FailedServers != 1 {
+		t.Fatalf("aggregate counts stale: %#v", registryStatus)
+	}
 }

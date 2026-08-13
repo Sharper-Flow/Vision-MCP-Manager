@@ -18,6 +18,7 @@ import (
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -317,6 +318,8 @@ type ListServerEntry struct {
 	Name              string                         `json:"name"`
 	CodemodeNamespace string                         `json:"codemode_namespace"`
 	Status            string                         `json:"status"`
+	EffectiveReason   *string                        `json:"effective_reason,omitempty"`
+	ProcessState      string                         `json:"process_state"`
 	Port              *int                           `json:"port"`
 	PID               *int                           `json:"pid"`
 	Uptime            *string                        `json:"uptime"`
@@ -351,10 +354,13 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 
 	for _, srv := range servers {
 		status := srv.Status()
+		lifecycle := s.lifecycleSnapshot(status.Name)
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), status.LastError)
 		info := ListServerEntry{
 			Name:              status.Name,
 			CodemodeNamespace: s.codemodeNamespace(status.Name),
-			Status:            mapStateToStatus(string(status.State)),
+			Status:            effective.Status,
+			ProcessState:      string(status.State),
 		}
 
 		// Set port if available
@@ -387,8 +393,12 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 				info.SessionMetrics = snap
 			}
 		}
-		if s.sessionLifecycleAccessor != nil {
-			info.SessionLifecycle = s.sessionLifecycleAccessor.SessionLifecycleSnapshot(status.Name)
+		if lifecycle != nil {
+			info.SessionLifecycle = lifecycle
+		}
+		if effective.Reason != "" {
+			reason := effective.Reason
+			info.EffectiveReason = &reason
 		}
 
 		response.Servers = append(response.Servers, info)
@@ -408,6 +418,20 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 			{Type: "text", Text: string(jsonBytes)},
 		},
 	}, nil
+}
+
+func (s *Server) lifecycleSnapshot(name string) *SessionLifecycleSnapshot {
+	if s.sessionLifecycleAccessor == nil {
+		return nil
+	}
+	return s.sessionLifecycleAccessor.SessionLifecycleSnapshot(name)
+}
+
+func lifecycleBackendState(snapshot *SessionLifecycleSnapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	return snapshot.BackendState
 }
 
 func (s *Server) codemodeNamespace(name string) string {
@@ -528,22 +552,6 @@ func (s *Server) toolSlotStatus(_ context.Context, _ json.RawMessage) (*ToolCall
 	return jsonToolResult(SlotStatusResponse{Groups: groups})
 }
 
-// mapStateToStatus maps internal state names to spec status values.
-func mapStateToStatus(state string) string {
-	switch state {
-	case "running":
-		return "running"
-	case "starting":
-		return "starting"
-	case "stopped", "stopping":
-		return "stopped"
-	case "failed", "crashed":
-		return "error"
-	default:
-		return "stopped"
-	}
-}
-
 // AddResponse is the response for vision_add.
 type AddResponse struct {
 	Success bool    `json:"success"`
@@ -596,11 +604,12 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 
 			if srv != nil {
 				status := srv.Status()
+				effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), status.LastError)
 				port := status.Port
 				response := AddResponse{
 					Success: true,
 					Name:    params.Name,
-					Status:  mapStateToStatus(string(status.State)),
+					Status:  effective.Status,
 					Port:    &port,
 				}
 				if status.LastError != "" {
@@ -698,11 +707,12 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 	srv := s.registry.Get(params.Name)
 	if srv != nil {
 		status := srv.Status()
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), status.LastError)
 		port := status.Port
 		response := AddResponse{
 			Success: true,
 			Name:    params.Name,
-			Status:  mapStateToStatus(string(status.State)),
+			Status:  effective.Status,
 			Port:    &port,
 		}
 		return jsonToolResult(response)
@@ -818,11 +828,13 @@ func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCal
 
 // RestartResponse is the response for vision_restart.
 type RestartResponse struct {
-	Success bool    `json:"success"`
-	Name    string  `json:"name"`
-	Status  string  `json:"status,omitempty"`
-	Port    *int    `json:"port,omitempty"`
-	Error   *string `json:"error,omitempty"`
+	Success         bool    `json:"success"`
+	Name            string  `json:"name"`
+	Status          string  `json:"status,omitempty"`
+	EffectiveReason *string `json:"effective_reason,omitempty"`
+	ProcessState    string  `json:"process_state,omitempty"`
+	Port            *int    `json:"port,omitempty"`
+	Error           *string `json:"error,omitempty"`
 }
 
 // toolRestart implements vision_restart.
@@ -843,32 +855,43 @@ func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCa
 
 	if s.registry == nil {
 		errMsg := "Registry not initialized"
+		errMsg = scrubSecrets(errMsg)
 		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg})
 	}
 
 	srv := s.registry.Get(params.Name)
 	if srv == nil {
 		errMsg := fmt.Sprintf("Server '%s' is not configured", params.Name)
+		errMsg = scrubSecrets(errMsg)
 		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg})
 	}
 
 	if err := s.registry.Restart(params.Name); err != nil {
 		errMsg := fmt.Sprintf("Failed to restart server: %s", err.Error())
+		errMsg = scrubSecrets(errMsg)
 		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg})
 	}
 
 	srv = s.registry.Get(params.Name)
 	if srv != nil {
 		status := srv.Status()
+		lifecycle := s.lifecycleSnapshot(status.Name)
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), status.LastError)
 		port := status.Port
 		response := RestartResponse{
-			Success: true,
-			Name:    params.Name,
-			Status:  mapStateToStatus(string(status.State)),
-			Port:    &port,
+			Success:      true,
+			Name:         params.Name,
+			Status:       effective.Status,
+			ProcessState: string(status.State),
+			Port:         &port,
+		}
+		if effective.Reason != "" {
+			reason := effective.Reason
+			response.EffectiveReason = &reason
 		}
 		if status.LastError != "" {
-			response.Error = &status.LastError
+			errorText := scrubSecrets(status.LastError)
+			response.Error = &errorText
 		}
 		return jsonToolResult(response)
 	}
@@ -1396,8 +1419,10 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 	}
 
 	// Warn if bearer_token is not configured
-	if s.daemonConfig != nil && s.daemonConfig.Security.BearerToken == "" {
-		response.Warnings = append(response.Warnings, "⚠ No bearer_token configured — see docs/AUTH.md for secure setup")
+	if s.daemonConfig != nil {
+		if warning := visionmcp.BearerAuthWarning(s.daemonConfig.Security.BearerToken, s.listenerExposure); warning != "" {
+			response.Warnings = append(response.Warnings, warning)
+		}
 	}
 
 	return jsonToolResult(response)

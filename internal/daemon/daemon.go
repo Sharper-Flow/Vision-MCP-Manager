@@ -672,7 +672,7 @@ func (d *Daemon) setupSlotGroupProxies() error {
 			CircuitBreakerConfig:  cbCfg,
 		})
 
-		secCfg := mcp.SecurityConfig{}
+		secCfg := mcp.SecurityConfig{ListenerExposure: mcp.ListenerLoopback}
 		if cfg != nil {
 			secCfg.BearerToken = cfg.Security.BearerToken
 			secCfg.AllowedOrigins = cfg.Security.AllowedOrigins
@@ -862,8 +862,9 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	// Build security config from daemon-wide settings (read under lock).
 	d.mu.RLock()
 	secCfg := mcp.SecurityConfig{
-		BearerToken:    d.cfg.Security.BearerToken,
-		AllowedOrigins: d.cfg.Security.AllowedOrigins,
+		BearerToken:      d.cfg.Security.BearerToken,
+		AllowedOrigins:   d.cfg.Security.AllowedOrigins,
+		ListenerExposure: mcp.ListenerLoopback,
 	}
 	d.mu.RUnlock()
 
@@ -927,8 +928,9 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 
 	d.mu.RLock()
 	secCfg := mcp.SecurityConfig{
-		BearerToken:    d.cfg.Security.BearerToken,
-		AllowedOrigins: d.cfg.Security.AllowedOrigins,
+		BearerToken:      d.cfg.Security.BearerToken,
+		AllowedOrigins:   d.cfg.Security.AllowedOrigins,
+		ListenerExposure: mcp.ListenerLoopback,
 	}
 	d.mu.RUnlock()
 	if err := d.portManager.AddStreamable(srv.Name, srv.Config.Port, gateway, gateway, secCfg); err != nil {

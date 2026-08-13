@@ -485,7 +485,8 @@ func (r *Registry) Status() RegistryStatus {
 	}
 
 	for _, srv := range r.servers {
-		switch srv.State {
+		snapshot := srv.Status()
+		switch snapshot.State {
 		case StateRunning, StateStarting:
 			status.RunningServers++
 		case StateStopped, StateStopping:
@@ -494,7 +495,7 @@ func (r *Registry) Status() RegistryStatus {
 			status.FailedServers++
 		}
 
-		status.Servers = append(status.Servers, srv.Status())
+		status.Servers = append(status.Servers, snapshot)
 	}
 
 	// Sort for consistent output

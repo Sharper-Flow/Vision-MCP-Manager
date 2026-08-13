@@ -31,6 +31,8 @@ type SecurityConfig struct {
 
 	// Logger for security events. When nil, security events are not logged.
 	Logger *slog.Logger
+
+	ListenerExposure ListenerExposure
 }
 
 // SecurityMiddleware returns an HTTP middleware that enforces bearer auth

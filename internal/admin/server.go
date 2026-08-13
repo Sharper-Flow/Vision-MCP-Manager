@@ -38,6 +38,7 @@ type Server struct {
 	serverMetricsAccessor    ServerMetricsAccessor    // Optional: provides per-server session metrics
 	sessionLifecycleAccessor SessionLifecycleAccessor // Optional managed-HTTP lifecycle projection
 	Metrics                  *metrics.DaemonMetrics
+	listenerExposure         visionmcp.ListenerExposure
 
 	mu      sync.RWMutex
 	running bool
@@ -92,6 +93,7 @@ func NewServer(cfg Config) *Server {
 		serverMetricsAccessor:    cfg.ServerMetricsAccessor,
 		sessionLifecycleAccessor: cfg.SessionLifecycleAccessor,
 		Metrics:                  cfg.Metrics,
+		listenerExposure:         visionmcp.ListenerLoopback,
 	}
 }
 
@@ -114,7 +116,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return mcpServer
 	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
 
-	secCfg := visionmcp.SecurityConfig{Logger: s.logger.With(slog.String("component", "admin-security"))}
+	secCfg := visionmcp.SecurityConfig{Logger: s.logger.With(slog.String("component", "admin-security")), ListenerExposure: s.listenerExposure}
 	if s.daemonConfig != nil {
 		secCfg.BearerToken = s.daemonConfig.Security.BearerToken
 		secCfg.AllowedOrigins = s.daemonConfig.Security.AllowedOrigins

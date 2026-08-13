@@ -39,7 +39,7 @@ func TestDeriveEffectiveStatusMatrix(t *testing.T) {
 		{name: "unknown is never optimistic", process: server.State("mystery"), backend: "ready", want: "error", wantReason: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := deriveEffectiveStatus(tc.process, tc.backend, "restart token=secret")
+			got := deriveEffectiveStatus(tc.process, tc.backend, "restart authorization=secret")
 			if got.Status != tc.want {
 				t.Fatalf("status=%q, want %q", got.Status, tc.want)
 			}
@@ -50,6 +50,16 @@ func TestDeriveEffectiveStatusMatrix(t *testing.T) {
 				t.Fatalf("effective reason leaked secret: %q", got.Reason)
 			}
 		})
+	}
+}
+
+func TestDeriveEffectiveStatusUsesScrubbedTerminalReason(t *testing.T) {
+	got := deriveEffectiveStatus(server.StateFailed, "ready", "restart limit exceeded authorization=secret")
+	if got.Status != "error" || !strings.Contains(got.Reason, "restart limit exceeded") {
+		t.Fatalf("effective=%#v", got)
+	}
+	if strings.Contains(got.Reason, "secret") {
+		t.Fatalf("terminal reason leaked secret: %q", got.Reason)
 	}
 }
 
@@ -75,6 +85,16 @@ func TestEffectiveStatusParityAcrossListV1AndRestart(t *testing.T) {
 	}
 	if list.Servers[0].EffectiveReason == nil || *list.Servers[0].EffectiveReason == "" {
 		t.Fatal("vision_list missing effective reason")
+	}
+
+	addResult, err := s.toolAdd(context.Background(), mustJSON(t, map[string]any{"name": "managed"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var add AddResponse
+	decodeToolJSON(t, addResult, &add)
+	if add.Status != "error" {
+		t.Fatalf("vision_add status=%q, want error", add.Status)
 	}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/v1/servers", nil)
