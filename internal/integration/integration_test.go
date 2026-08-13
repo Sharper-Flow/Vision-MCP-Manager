@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/daemon"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -497,47 +496,6 @@ servers:
 	}
 
 	t.Log("backward-compat health test passed!")
-}
-
-// --- Config file helpers ---
-
-// writeTestConfig creates a temporary config file for testing.
-func writeTestConfig(t *testing.T, servers map[string]*config.ServerConfig) string {
-	t.Helper()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "servers.yaml")
-
-	// Write as YAML (simplified)
-	data := "servers:\n"
-	for name, srv := range servers {
-		data += fmt.Sprintf(`  %s:
-    command: %s
-    args: [%s]
-    port: %d
-    autostart: %v
-`, name, srv.Command, formatArgs(srv.Args), srv.Port, srv.Autostart)
-	}
-
-	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
-		t.Fatalf("failed to write config: %v", err)
-	}
-
-	return path
-}
-
-func formatArgs(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	result := ""
-	for i, arg := range args {
-		if i > 0 {
-			result += ", "
-		}
-		result += fmt.Sprintf("%q", arg)
-	}
-	return result
 }
 
 // TestDaemon_NoGenerationGrowth verifies that after starting the daemon with stdio
