@@ -11,6 +11,7 @@ import (
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/tailscale/hujson"
 )
@@ -740,8 +741,8 @@ func assertNoUnintendedOpenCodeConfig(t *testing.T, dir, explicitPath string) {
 	}
 }
 
-func TestToolStatus_WarnsWhenBearerTokenEmpty(t *testing.T) {
-	srv := &Server{daemonConfig: &config.Config{Security: config.SecurityConfig{}}}
+func TestToolStatus_NoWarningWhenLoopbackBearerTokenEmpty(t *testing.T) {
+	srv := &Server{daemonConfig: &config.Config{Security: config.SecurityConfig{}}, listenerExposure: visionmcp.ListenerLoopback}
 	result, err := srv.toolStatus(context.Background(), mustJSON(t, map[string]any{}))
 	if err != nil {
 		t.Fatalf("toolStatus() error = %v", err)
@@ -749,11 +750,21 @@ func TestToolStatus_WarnsWhenBearerTokenEmpty(t *testing.T) {
 
 	var response StatusResponse
 	decodeToolJSON(t, result, &response)
-	if len(response.Warnings) != 1 {
-		t.Fatalf("len(warnings) = %d, want 1", len(response.Warnings))
+	if len(response.Warnings) != 0 {
+		t.Fatalf("warnings = %#v, want none for structural loopback", response.Warnings)
 	}
-	if !strings.Contains(response.Warnings[0], "bearer_token") || !strings.Contains(response.Warnings[0], "docs/AUTH.md") {
-		t.Fatalf("warning = %q, want bearer_token and docs/AUTH.md", response.Warnings[0])
+}
+
+func TestToolStatus_WarnsWhenNetworkBearerTokenEmpty(t *testing.T) {
+	srv := &Server{daemonConfig: &config.Config{Security: config.SecurityConfig{}}, listenerExposure: visionmcp.ListenerNetwork}
+	result, err := srv.toolStatus(context.Background(), mustJSON(t, map[string]any{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response StatusResponse
+	decodeToolJSON(t, result, &response)
+	if len(response.Warnings) != 1 || !strings.Contains(response.Warnings[0], "bearer_token") {
+		t.Fatalf("warnings = %#v", response.Warnings)
 	}
 }
 
