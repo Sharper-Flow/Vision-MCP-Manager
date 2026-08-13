@@ -283,7 +283,6 @@ func isValidationError(err error) bool {
 }
 
 // callTool dispatches to the appropriate tool handler.
-// Note: Tool name validation is done in handleToolsCall before this is called.
 func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage) (*ToolCallResult, error) {
 	switch name {
 	case "vision_list":
@@ -307,7 +306,6 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 	case "vision_metrics":
 		return s.toolMetrics(ctx, args)
 	default:
-		// Should never reach here due to isValidTool check
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
 }
@@ -1185,15 +1183,6 @@ func hujsonValue(entry map[string]any) (hujson.Value, error) {
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return hujson.Value{}, err
-	}
-	// Keep generated server entries readable while leaving the surrounding AST
-	// untouched. The map is only used for this fixed client-entry shape.
-	if typ, typeOK := entry["type"].(string); typeOK {
-		if url, urlOK := entry["url"].(string); urlOK {
-			if enabled, enabledOK := entry["enabled"].(bool); enabledOK {
-				data = []byte(fmt.Sprintf(`{"type": %q, "url": %q, "enabled": %t}`, typ, url, enabled))
-			}
-		}
 	}
 	return hujson.Parse(data)
 }

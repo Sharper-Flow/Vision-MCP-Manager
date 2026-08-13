@@ -40,7 +40,7 @@ dist/
 *.local.yaml
 
 # Vision runtime configuration (user-specific, contains secrets)
-# These are created by `vision init` or manually by users
+# These are created by runtime tooling or manually by users
 # Templates in configs/ and testdata/ ARE tracked
 servers.yaml
 opencode.json

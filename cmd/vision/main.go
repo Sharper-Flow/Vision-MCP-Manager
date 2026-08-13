@@ -52,7 +52,7 @@ It provides:
   - Stdio-to-HTTP bridging with session management
   - Erlang-style process supervision with automatic restarts
   - Per-port isolation for security (no path-based routing)
-  - Client config generation for Claude Code, OpenCode, etc.`,
+  - OpenCode config generation through the Admin MCP`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			if verbose {
 				slog.SetLogLoggerLevel(slog.LevelDebug)

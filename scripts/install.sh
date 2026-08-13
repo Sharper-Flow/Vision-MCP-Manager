@@ -74,7 +74,6 @@ Options:
   --system          Install system-wide (requires sudo)
   --user            Install for current user only (default)
   --no-service      Skip systemd service installation
-  --migrate         Migrate from Jarvis/MCPM after install
   --opencode        Configure OpenCode to use Vision MCP servers
   --version VER     Install specific version (default: latest)
   --help            Show this help message
@@ -82,7 +81,6 @@ Options:
 Examples:
   $0                    # Install for current user
   $0 --system           # Install system-wide
-  $0 --migrate          # Install and migrate from Jarvis/MCPM
   $0 --opencode         # Install and configure OpenCode integration
 EOF
 }
@@ -276,35 +274,6 @@ PY
     log_info "To start:  sudo systemctl start vision@${USER}"
 }
 
-migrate_from_mcpm() {
-    log_info "Checking for Jarvis/MCPM configuration..."
-    
-    local mcpm_servers="${HOME}/.mcpm/servers.json"
-    
-    if [[ ! -f "$mcpm_servers" ]]; then
-        log_warn "No MCPM servers.json found at $mcpm_servers"
-        log_info "Skipping migration"
-        return
-    fi
-    
-    log_info "Found MCPM config. Running migration..."
-    
-    if command -v vision &>/dev/null; then
-        vision migrate --dry-run
-        
-        read -p "Proceed with migration? [y/N] " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            vision migrate
-            log_success "Migration complete"
-        else
-            log_info "Migration skipped"
-        fi
-    else
-        log_warn "Vision binary not in PATH. Run migration manually after install."
-    fi
-}
-
 configure_opencode() {
     log_info "Configuring OpenCode integration..."
     
@@ -368,7 +337,6 @@ JSON
 main() {
     local system_install=false
     local skip_service=false
-    local do_migrate=false
     local from_source=false
     local configure_oc=false
     
@@ -377,7 +345,6 @@ main() {
             --system) system_install=true; shift ;;
             --user) system_install=false; shift ;;
             --no-service) skip_service=true; shift ;;
-            --migrate) do_migrate=true; shift ;;
             --opencode) configure_oc=true; shift ;;
             --version) VERSION="$2"; shift 2 ;;
             --from-source) from_source=true; shift ;;
@@ -431,11 +398,6 @@ main() {
         log_warn "${INSTALL_DIR} is not in your PATH"
         log_info "Add this to your shell profile:"
         echo "    export PATH=\"\${PATH}:${INSTALL_DIR}\""
-    fi
-    
-    # Migration
-    if $do_migrate; then
-        migrate_from_mcpm
     fi
     
     # OpenCode configuration

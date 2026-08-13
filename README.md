@@ -98,7 +98,9 @@ The installer downloads the latest binary, places it in `/usr/local/bin`, and cr
 When it installs the systemd unit, it also captures your current `PATH` so shell-managed MCP binaries (for example `pyenv`, `nvm`, or `uvx` tools) remain spawnable under systemd.
 
 **Options:**
-- `--systemd` — Install and enable the systemd user service
+- `--system` — Install system-wide (requires sudo)
+- `--no-service` — Skip systemd service installation
+- `--opencode` — Configure OpenCode when no global config exists
 
 ### From Source
 
@@ -326,13 +328,9 @@ vision daemon reload       # Hot-reload config (SIGHUP)
 
 ### Servers
 
-```bash
-vision server list                    # Show all servers
-vision server add <name> --command <cmd> [--args <args>]
-vision server remove <name>
-vision server start <name>
-vision server stop <name>
-```
+Server management is provided by the Admin MCP tools on port 6275. Use
+`vision_list`, `vision_add`, `vision_remove`, and `vision_restart` through the
+OpenCode plugin or a direct MCP client.
 
 ### Configuration
 

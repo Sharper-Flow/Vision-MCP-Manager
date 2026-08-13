@@ -42,6 +42,20 @@ jobs:
       - name: Run tests
         run: go test -race -p 2 -timeout 5m -coverprofile=coverage.out ./...
 
+      - name: Test installer config handling
+        run: bash scripts/install_test.sh
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: opencode-plugin/package-lock.json
+
+      - name: Check OpenCode plugin
+        working-directory: opencode-plugin
+        run: npm ci && npm run check
+
       - name: Upload coverage
         uses: codecov/codecov-action@v5
         with:

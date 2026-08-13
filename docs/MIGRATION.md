@@ -37,10 +37,10 @@ If using automatic migration:
 
 ```bash
 # Preview what would be migrated
-vision migrate --dry-run
+./scripts/migrate-from-mcpm.sh --dry-run
 
 # Perform migration
-vision migrate
+./scripts/migrate-from-mcpm.sh
 ```
 
 This will:
@@ -139,8 +139,7 @@ preserved. Direct Admin MCP callers must provide an absolute `path`.
 # Check daemon status
 vision daemon status
 
-# List servers
-vision server list
+# Check server state with the Admin MCP tool `vision_list`
 
 # Check health
 vision health
@@ -193,9 +192,10 @@ No need to manage separate supervisor configuration.
 
 Check server logs:
 ```bash
-vision server info <name>
 journalctl -u vision -f
 ```
+
+Use the Admin MCP tool `vision_list` to inspect individual server state.
 
 ### Port already in use
 
@@ -210,7 +210,7 @@ lsof -i :6276
 ### Client can't connect
 
 1. Verify daemon is running: `vision daemon status`
-2. Check server is started: `vision server list`
+2. Check server state with the Admin MCP tool `vision_list`
 3. Test endpoint directly: `curl http://localhost:6276/health`
 
 ### Missing environment variables
