@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/tailscale/hujson"
 )
 
 // --- MCP Tool Definitions ---
@@ -960,6 +962,9 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	if params.Path == "" {
 		return nil, NewValidationError("path is required")
 	}
+	if !filepath.IsAbs(params.Path) {
+		return nil, NewValidationError("path must be absolute")
+	}
 
 	if s.registry == nil {
 		return nil, fmt.Errorf("registry not initialized")
@@ -1023,7 +1028,7 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		serverNames = append(serverNames, srv.Name)
 	}
 
-	existingConfig, existed, err := loadExistingClientConfig(params.Path)
+	existingValue, existingBytes, existed, err := loadExistingClientConfig(params.Path)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to read existing config: %s", err.Error())
 		response := InitResponse{
@@ -1040,23 +1045,24 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 		status := srv.Status()
 		generatedEntries[srv.Name] = buildClientConfigEntry(status.Port)
 	}
+	var existingConfig map[string]any
+	if existed {
+		existingConfig, err = semanticClientConfig(existingValue)
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to inspect existing config: %s", err.Error())
+			return jsonToolResult(InitResponse{Success: false, Path: params.Path, Servers: serverNames, Error: &errMsg})
+		}
+	}
 	reconciledServers := findReconciledServers(existingConfig, generatedEntries)
 
-	config := existingConfig
-	if config == nil {
-		config = make(map[string]any)
-	}
-	mergeClientConfig(config, generatedEntries)
-
-	configJSON, err := json.MarshalIndent(config, "", "  ")
+	configJSON, err := buildClientConfigBytes(existingValue, existed, generatedEntries)
 	if err != nil {
 		errMsg := fmt.Sprintf("Failed to generate config: %s", err.Error())
-		response := InitResponse{
-			Success: false,
-			Path:    params.Path,
-			Error:   &errMsg,
-		}
-		return jsonToolResult(response)
+		return jsonToolResult(InitResponse{Success: false, Path: params.Path, Servers: serverNames, Error: &errMsg})
+	}
+	if _, err := hujson.Parse(configJSON); err != nil {
+		errMsg := fmt.Sprintf("Generated config failed validation: %s", err.Error())
+		return jsonToolResult(InitResponse{Success: false, Path: params.Path, Servers: serverNames, Error: &errMsg})
 	}
 
 	response := InitResponse{
@@ -1069,12 +1075,7 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	// Check if file exists and create backup
 	if existed {
 		backupPath := params.Path + ".backup"
-		if existingBytes, err := os.ReadFile(params.Path); err != nil {
-			errMsg := fmt.Sprintf("Failed to read existing config for backup: %s", err.Error())
-			response.Success = false
-			response.Error = &errMsg
-			return jsonToolResult(response)
-		} else if err := os.WriteFile(backupPath, existingBytes, 0600); err != nil {
+		if err := os.WriteFile(backupPath, existingBytes, 0600); err != nil {
 			errMsg := fmt.Sprintf("Failed to create backup: %s", err.Error())
 			response.Success = false
 			response.Error = &errMsg
@@ -1111,23 +1112,22 @@ func (s *Server) toolInit(ctx context.Context, args json.RawMessage) (*ToolCallR
 	return jsonToolResult(response)
 }
 
-func loadExistingClientConfig(path string) (map[string]any, bool, error) {
+func loadExistingClientConfig(path string) (hujson.Value, []byte, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, false, nil
+			return hujson.Value{}, nil, false, nil
 		}
-		return nil, false, err
+		return hujson.Value{}, nil, false, err
 	}
-
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, true, err
+	value, err := hujson.Parse(data)
+	if err != nil {
+		return hujson.Value{}, data, true, err
 	}
-	if cfg == nil {
-		cfg = make(map[string]any)
+	if _, ok := value.Value.(*hujson.Object); !ok {
+		return hujson.Value{}, data, true, fmt.Errorf("root value must be an object")
 	}
-	return cfg, true, nil
+	return value, data, true, nil
 }
 
 func buildClientConfigEntry(port int) map[string]any {
@@ -1137,6 +1137,178 @@ func buildClientConfigEntry(port int) map[string]any {
 		"url":     url,
 		"enabled": true,
 	}
+}
+
+func buildClientConfigBytes(existing hujson.Value, existed bool, generated map[string]map[string]any) ([]byte, error) {
+	if !existed {
+		config := make(map[string]any)
+		mergeClientConfig(config, generated)
+		return json.MarshalIndent(config, "", "  ")
+	}
+
+	updated := existing.Clone()
+	restoreTrailingCommaState(existing, &updated)
+	root, ok := updated.Value.(*hujson.Object)
+	if !ok {
+		return nil, fmt.Errorf("root value must be an object")
+	}
+	mcpValue := findObjectMember(root, "mcp")
+	if mcpValue == nil {
+		mcpObject := &hujson.Object{}
+		if err := mergeHuJSONMembers(mcpObject, generated); err != nil {
+			return nil, err
+		}
+		insertObjectMember(root, "mcp", hujson.Value{Value: mcpObject})
+	} else {
+		mcpObject, ok := mcpValue.Value.Value.(*hujson.Object)
+		if !ok {
+			return nil, fmt.Errorf("mcp value must be an object")
+		}
+		for _, name := range sortedGeneratedNames(generated) {
+			entry := generated[name]
+			member := findObjectMember(mcpObject, name)
+			entryValue, err := hujsonValue(entry)
+			if err != nil {
+				return nil, err
+			}
+			if member == nil {
+				insertObjectMember(mcpObject, name, entryValue)
+			} else {
+				member.Value.Value = entryValue.Value
+			}
+		}
+	}
+	return updated.Pack(), nil
+}
+
+func hujsonValue(entry map[string]any) (hujson.Value, error) {
+	data, err := json.MarshalIndent(entry, "", "  ")
+	if err != nil {
+		return hujson.Value{}, err
+	}
+	// Keep generated server entries readable while leaving the surrounding AST
+	// untouched. The map is only used for this fixed client-entry shape.
+	if typ, typeOK := entry["type"].(string); typeOK {
+		if url, urlOK := entry["url"].(string); urlOK {
+			if enabled, enabledOK := entry["enabled"].(bool); enabledOK {
+				data = []byte(fmt.Sprintf(`{"type": %q, "url": %q, "enabled": %t}`, typ, url, enabled))
+			}
+		}
+	}
+	return hujson.Parse(data)
+}
+
+func findObjectMember(object *hujson.Object, name string) *hujson.ObjectMember {
+	for i := range object.Members {
+		if literal, ok := object.Members[i].Name.Value.(hujson.Literal); ok && literal.String() == name {
+			return &object.Members[i]
+		}
+	}
+	return nil
+}
+
+func insertObjectMember(object *hujson.Object, name string, value hujson.Value) {
+	before := memberIndent(object)
+	if len(object.Members) == 0 {
+		// For an empty object, AfterExtra is the exact whitespace/comments
+		// between the opening brace and closing brace. Move it to the first
+		// member so it is emitted once, before the member name.
+		before = object.AfterExtra
+		object.AfterExtra = nil
+	}
+	trailingComma := len(object.Members) > 0 && object.Members[len(object.Members)-1].Value.AfterExtra != nil
+	if len(object.Members) > 0 {
+		// Appending always turns the previous last value into a comma-bearing
+		// member. Preserve the old final comma state on the new last value.
+		if object.Members[len(object.Members)-1].Value.AfterExtra == nil {
+			object.Members[len(object.Members)-1].Value.AfterExtra = hujson.Extra{}
+		}
+	}
+	if trailingComma {
+		value.AfterExtra = hujson.Extra{}
+	}
+	object.Members = append(object.Members, hujson.ObjectMember{
+		Name:  hujson.Value{BeforeExtra: before, Value: hujson.String(name)},
+		Value: value,
+	})
+}
+
+// HuJSON represents a trailing comma as a non-nil AfterExtra on the last
+// member. Clone preserves the bytes but an empty Extra loses that nil/non-nil
+// distinction, so restore the structural invariant before mutating the clone.
+func restoreTrailingCommaState(original hujson.Value, cloned *hujson.Value) {
+	switch originalValue := original.Value.(type) {
+	case *hujson.Object:
+		clonedObject, ok := cloned.Value.(*hujson.Object)
+		if !ok {
+			return
+		}
+		if len(originalValue.Members) > 0 && originalValue.Members[len(originalValue.Members)-1].Value.AfterExtra != nil && clonedObject.Members[len(clonedObject.Members)-1].Value.AfterExtra == nil {
+			clonedObject.Members[len(clonedObject.Members)-1].Value.AfterExtra = hujson.Extra{}
+		}
+		for i := range originalValue.Members {
+			restoreTrailingCommaState(originalValue.Members[i].Value, &clonedObject.Members[i].Value)
+		}
+	case *hujson.Array:
+		clonedArray, ok := cloned.Value.(*hujson.Array)
+		if !ok {
+			return
+		}
+		if len(originalValue.Elements) > 0 && originalValue.Elements[len(originalValue.Elements)-1].AfterExtra != nil && clonedArray.Elements[len(clonedArray.Elements)-1].AfterExtra == nil {
+			clonedArray.Elements[len(clonedArray.Elements)-1].AfterExtra = hujson.Extra{}
+		}
+		for i := range originalValue.Elements {
+			restoreTrailingCommaState(originalValue.Elements[i], &clonedArray.Elements[i])
+		}
+	}
+}
+
+func memberIndent(object *hujson.Object) hujson.Extra {
+	extra := object.AfterExtra
+	if len(object.Members) > 0 {
+		extra = object.Members[len(object.Members)-1].Name.BeforeExtra
+	}
+	if i := bytes.LastIndexByte(extra, '\n'); i >= 0 {
+		return append(hujson.Extra(nil), extra[i:]...)
+	}
+	if len(extra) > 0 {
+		return hujson.Extra(" ")
+	}
+	return nil
+}
+
+func mergeHuJSONMembers(object *hujson.Object, generated map[string]map[string]any) error {
+	for _, name := range sortedGeneratedNames(generated) {
+		entry := generated[name]
+		value, err := hujsonValue(entry)
+		if err != nil {
+			return err
+		}
+		insertObjectMember(object, name, value)
+	}
+	return nil
+}
+
+func sortedGeneratedNames(generated map[string]map[string]any) []string {
+	names := make([]string, 0, len(generated))
+	for name := range generated {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func semanticClientConfig(value hujson.Value) (map[string]any, error) {
+	standard := value.Clone()
+	standard.Standardize()
+	var config map[string]any
+	if err := json.Unmarshal(standard.Pack(), &config); err != nil {
+		return nil, err
+	}
+	if config == nil {
+		config = make(map[string]any)
+	}
+	return config, nil
 }
 
 func mergeClientConfig(config map[string]any, generated map[string]map[string]any) {

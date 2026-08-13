@@ -6,6 +6,7 @@ toolchain go1.24.12
 
 require (
 	github.com/spf13/cobra v1.10.2
+	github.com/tailscale/hujson v0.0.0-20260718110524-10d7940d4c87
 	github.com/thejerf/suture/v4 v4.0.6
 	gopkg.in/yaml.v3 v3.0.1
 )

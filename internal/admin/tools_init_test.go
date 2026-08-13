@@ -12,6 +12,7 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
+	"github.com/tailscale/hujson"
 )
 
 func TestToolInit_RequiresExplicitPath(t *testing.T) {
@@ -286,6 +287,234 @@ func TestToolInit_ReconcilesLosslessJSONCComments(t *testing.T) {
 			t.Errorf("updated config lost marker %q: %s", marker, updated)
 		}
 	}
+	oldValue := `{"type": "remote", "url": "http://localhost:6283/mcp", "enabled": true}`
+	oldValueStart := strings.Index(string(original), oldValue)
+	if oldValueStart < 0 {
+		t.Fatal("test fixture missing selected value")
+	}
+	oldValueEnd := oldValueStart + len(oldValue)
+	if !strings.Contains(string(updated), string(original[:oldValueStart])) {
+		t.Fatal("replacement changed prefix before selected value")
+	}
+	if !strings.Contains(string(updated), string(original[oldValueEnd:])) {
+		t.Fatal("replacement changed suffix after selected value")
+	}
+}
+
+func TestToolInit_InsertsMCPAndPreservesRootTrailingComma(t *testing.T) {
+	srv := &Server{registry: runningRegistry(t, "a/b", "a~b")}
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
+	original := []byte(`{
+  // keep root comment
+	  "theme": "ayu-dark",
+  /* root closing marker: keep-root-close */
+}
+`)
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if !response.Success {
+		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	if !strings.Contains(string(updated), "keep root comment") {
+		t.Fatalf("updated config lost root comment: %s", updated)
+	}
+	if !strings.Contains(string(updated), "keep-root-close") {
+		t.Fatalf("updated config lost root closing marker: %s", updated)
+	}
+	value, err := hujson.Parse(updated)
+	if err != nil {
+		t.Fatalf("Parse updated config: %v", err)
+	}
+	root := value.Value.(*hujson.Object)
+	if root.Members[len(root.Members)-1].Value.AfterExtra == nil {
+		t.Fatalf("root trailing comma was not preserved: after=%q value-after=%#v: %s", root.AfterExtra, root.Members[len(root.Members)-1].Value.AfterExtra, updated)
+	}
+	assertGeneratedEntry(t, updated, "a/b")
+	assertGeneratedEntry(t, updated, "a~b")
+}
+
+func TestToolInit_InsertsMCPIntoEmptyRootWithoutDuplicatingMarker(t *testing.T) {
+	srv := &Server{registry: runningRegistry(t, "a/b", "a~b")}
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
+	if err := os.WriteFile(path, []byte(`{ /* root-empty-marker */ }`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if !response.Success {
+		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	if got := strings.Count(string(updated), "root-empty-marker"); got != 1 {
+		t.Fatalf("root marker count = %d, want 1: %s", got, updated)
+	}
+	if _, err := hujson.Parse(updated); err != nil {
+		t.Fatalf("Parse updated config: %v", err)
+	}
+	assertGeneratedEntry(t, updated, "a/b")
+	assertGeneratedEntry(t, updated, "a~b")
+}
+
+func TestToolInit_InsertsServersIntoEmptyMCPWithoutDuplicatingMarker(t *testing.T) {
+	srv := &Server{registry: runningRegistry(t, "a/b", "a~b")}
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
+	if err := os.WriteFile(path, []byte(`{"mcp": { /* mcp-empty-marker */ }}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if !response.Success {
+		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	if got := strings.Count(string(updated), "mcp-empty-marker"); got != 1 {
+		t.Fatalf("mcp marker count = %d, want 1: %s", got, updated)
+	}
+	if _, err := hujson.Parse(updated); err != nil {
+		t.Fatalf("Parse updated config: %v", err)
+	}
+	assertGeneratedEntry(t, updated, "a/b")
+	assertGeneratedEntry(t, updated, "a~b")
+}
+
+func TestToolInit_InsertsMissingServerAndPreservesMCPTrailingComma(t *testing.T) {
+	srv := &Server{registry: runningRegistry(t, "a/b", "a~b")}
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
+	original := []byte(`{
+  "mcp": {
+    // keep mcp comment
+    "custom": {"type": "remote", "url": "http://localhost:9999/mcp", "enabled": true},
+    /* mcp closing marker: keep-mcp-close */
+  },
+}
+`)
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if !response.Success {
+		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	if !strings.Contains(string(updated), "keep mcp comment") || !strings.Contains(string(updated), "localhost:9999") {
+		t.Fatalf("updated config lost existing markers: %s", updated)
+	}
+	if !strings.Contains(string(updated), "keep-mcp-close") {
+		t.Fatalf("updated config lost mcp closing marker: %s", updated)
+	}
+	value, err := hujson.Parse(updated)
+	if err != nil {
+		t.Fatalf("Parse updated config: %v", err)
+	}
+	root := value.Value.(*hujson.Object)
+	mcp := findObjectMember(root, "mcp")
+	mcpObject := mcp.Value.Value.(*hujson.Object)
+	if mcpObject.Members[len(mcpObject.Members)-1].Value.AfterExtra == nil {
+		t.Fatalf("mcp trailing comma was not preserved: after=%q value-after=%#v: %s", mcpObject.AfterExtra, mcpObject.Members[len(mcpObject.Members)-1].Value.AfterExtra, updated)
+	}
+	assertGeneratedEntry(t, updated, "a/b")
+	assertGeneratedEntry(t, updated, "a~b")
+}
+
+func TestToolInit_InsertsMissingServerWithoutTrailingComma(t *testing.T) {
+	srv := &Server{registry: runningRegistry(t, "a/b", "a~b")}
+	path := filepath.Join(t.TempDir(), "opencode.jsonc")
+	original := []byte(`{
+  "mcp": {
+    "custom": {"type": "remote", "url": "http://localhost:9999/mcp", "enabled": true}
+  }
+}
+`)
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if !response.Success {
+		t.Fatalf("toolInit() success = false, error = %v", response.Error)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	value, err := hujson.Parse(updated)
+	if err != nil {
+		t.Fatalf("Parse updated config: %v", err)
+	}
+	root := value.Value.(*hujson.Object)
+	mcp := findObjectMember(root, "mcp")
+	mcpObject := mcp.Value.Value.(*hujson.Object)
+	if mcpObject.Members[len(mcpObject.Members)-1].Value.AfterExtra != nil {
+		t.Fatalf("unexpected mcp trailing comma: %s", updated)
+	}
+	if strings.Contains(string(updated), `"enabled": true},\n  }`) {
+		t.Fatalf("textual output has trailing comma after inserted server: %s", updated)
+	}
+	assertGeneratedEntry(t, updated, "a/b")
+	assertGeneratedEntry(t, updated, "a~b")
+}
+
+func assertGeneratedEntry(t *testing.T, data []byte, name string) {
+	t.Helper()
+	standard, err := hujson.Standardize(data)
+	if err != nil {
+		t.Fatalf("Standardize generated config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(standard, &config); err != nil {
+		t.Fatalf("Unmarshal generated config: %v", err)
+	}
+	mcp, ok := config["mcp"].(map[string]any)
+	if !ok {
+		t.Fatalf("generated config missing mcp object: %#v", config)
+	}
+	entry, ok := mcp[name].(map[string]any)
+	if !ok {
+		t.Fatalf("generated config missing %q entry: %#v", name, mcp)
+	}
+	if entry["type"] != "remote" || entry["url"] != "http://localhost:6279/mcp" || entry["enabled"] != true {
+		t.Fatalf("generated %q entry = %#v", name, entry)
+	}
 }
 
 func TestToolInit_InvalidJSONCLeavesBytesUnchanged(t *testing.T) {
@@ -328,6 +557,30 @@ func TestToolInit_NonObjectMCPLeavesBytesUnchanged(t *testing.T) {
 		t.Fatal("toolInit() success = true for non-object mcp")
 	}
 	assertOpenCodeConfigUnchanged(t, path, original)
+}
+
+func TestToolInit_NonObjectRootLeavesBytesUnchanged(t *testing.T) {
+	srv := &Server{registry: runningRegistry(t, "kagi")}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "opencode.jsonc")
+	original := []byte(`["not", "an", "object"]`)
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
+	}
+
+	result, err := srv.toolInit(context.Background(), mustJSON(t, map[string]any{"path": path}))
+	if err != nil {
+		t.Fatalf("toolInit() error = %v, want structured failure", err)
+	}
+	var response InitResponse
+	decodeToolJSON(t, result, &response)
+	if response.Success {
+		t.Fatal("toolInit() success = true for non-object root")
+	}
+	assertOpenCodeConfigUnchanged(t, path, original)
+	if _, err := os.Stat(path + ".backup"); !os.IsNotExist(err) {
+		t.Fatalf("unexpected backup %q: stat error = %v", path+".backup", err)
+	}
 }
 
 func TestToolInit_QuotesSlashAndTildeServerNames(t *testing.T) {

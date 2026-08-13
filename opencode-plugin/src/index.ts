@@ -15,7 +15,8 @@
  */
 
 import { tool, type Plugin } from "@opencode-ai/plugin"
-import { resolve } from "node:path"
+import { access, stat } from "node:fs/promises"
+import { isAbsolute, resolve } from "node:path"
 import { z } from "zod"
 import { renderVisionContext } from "./context"
 import { checkHealth } from "./health"
@@ -178,13 +179,12 @@ const VisionPlugin: Plugin = async ({ client, directory }) => {
       }),
       [VISION_PLUGIN_TOOL_NAMES.init]: tool({
         description:
-          "Generate OpenCode MCP configuration (opencode.jsonc) for currently running servers",
+          "Generate OpenCode MCP configuration (opencode.jsonc or another recognized config path) for currently running servers",
         args: VisionInitArgsSchema.shape,
-        execute: async (args) =>
-          await visionInit({
-            ...args,
-            path: args.path ?? resolve(directory, "opencode.jsonc"),
-          }),
+        execute: async (args) => {
+          const path = await resolveInitPath(directory, args.path)
+          return await visionInit({ ...args, path })
+        },
       }),
       [VISION_PLUGIN_TOOL_NAMES.status]: tool({
         description: "Get Vision daemon status including uptime, memory usage, and server counts",
@@ -220,6 +220,41 @@ const VisionPlugin: Plugin = async ({ client, directory }) => {
       }),
     },
   }
+}
+
+const INIT_CONFIG_CANDIDATES = [
+  "opencode.jsonc",
+  "opencode.json",
+  ".opencode/opencode.jsonc",
+  ".opencode/opencode.json",
+] as const
+
+async function existingConfigPath(path: string): Promise<boolean> {
+  try {
+    await access(path)
+    const details = await stat(path)
+    return details.isFile()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false
+    throw error
+  }
+}
+
+async function resolveInitPath(directory: string, explicitPath?: string): Promise<string> {
+  if (explicitPath !== undefined) {
+    return isAbsolute(explicitPath) ? explicitPath : resolve(directory, explicitPath)
+  }
+
+  const matches: string[] = []
+  for (const candidate of INIT_CONFIG_CANDIDATES) {
+    if (await existingConfigPath(resolve(directory, candidate))) {
+      matches.push(candidate)
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error(`Multiple OpenCode config candidates found: ${matches.join(", ")}`)
+  }
+  return resolve(directory, matches[0] ?? INIT_CONFIG_CANDIDATES[0])
 }
 
 export default VisionPlugin
