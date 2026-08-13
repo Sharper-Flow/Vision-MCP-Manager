@@ -34,28 +34,29 @@ func TestRuntimeRootResolutionAndSafety(t *testing.T) {
 			env:     map[string]string{"XDG_RUNTIME_DIR": "/xdg/runtime"},
 			uid:     1000,
 			tempDir: t.TempDir(),
-			want:    "/xdg/runtime/vision",
+			want:    "/xdg/runtime/vision/backends",
 		},
 		{
 			name:    "private fallback uses uid and temp dependency",
 			env:     map[string]string{},
 			uid:     4242,
 			tempDir: "/tmp",
-			want:    "/tmp/vision-4242",
+			want:    "/tmp/vision-4242/backends",
 		},
+		{name: "relative explicit rejected", explicit: "relative/root", uid: 1000, tempDir: "/tmp"},
+		{name: "relative xdg rejected", env: map[string]string{"XDG_RUNTIME_DIR": "relative"}, uid: 1000, tempDir: "/tmp"},
+		{name: "relative temp rejected", env: map[string]string{}, uid: 1000, tempDir: "relative"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			candidate := tc.explicit
-			if candidate == "" {
-				base := tc.env["XDG_RUNTIME_DIR"]
-				if base == "" {
-					base = tc.tempDir
-				}
-				candidate = filepath.Join(base, "vision")
-			}
 			got, err := RuntimeRoot(tc.explicit, tc.env, tc.uid, tc.tempDir)
+			if tc.explicit == "relative/root" || tc.env["XDG_RUNTIME_DIR"] == "relative" || tc.tempDir == "relative" {
+				if err == nil {
+					t.Fatal("RuntimeRoot() accepted relative path")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("RuntimeRoot() error = %v", err)
 			}
@@ -69,6 +70,9 @@ func TestRuntimeRootResolutionAndSafety(t *testing.T) {
 func TestLeaseStoreIsPrivateAtomicAndGenerationSafe(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	store, err := NewStore(root)
 	if err != nil {
 		t.Fatal(err)
@@ -86,19 +90,24 @@ func TestLeaseStoreIsPrivateAtomicAndGenerationSafe(t *testing.T) {
 		Version:        LeaseSchemaVersion,
 		Generation:     7,
 		ServerName:     "browser/playwright",
+		DaemonID:       "daemon-a",
 		OwnerTokenHash: TokenHash(rawOldToken),
-		ConfigHash:     "cfg-v1",
+		ConfigHash:     strings.Repeat("a", 64),
 		LeaderPID:      101,
 		LeaderPGID:     101,
 		LeaderStart:    500,
 		BootID:         "boot-a",
+		Executable:     "/vision/browser",
 		CreatedAt:      time.Unix(10, 0),
 	}
 	if err := store.Record("browser/playwright", old); err != nil {
 		t.Fatal(err)
 	}
 
-	path := filepath.Join(root, "browser-playwright.lease")
+	path, err := store.Path("browser/playwright")
+	if err != nil {
+		t.Fatal(err)
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +132,24 @@ func TestLeaseStoreIsPrivateAtomicAndGenerationSafe(t *testing.T) {
 	}
 	if got.Generation != old.Generation || got.OwnerTokenHash != old.OwnerTokenHash {
 		t.Fatalf("Read() = %#v, want generation/hash from recorded lease", got)
+	}
+	unknownFields := map[string]any{}
+	if err := json.Unmarshal(raw, &unknownFields); err != nil {
+		t.Fatal(err)
+	}
+	unknownFields["owner_token"] = "must-not-appear-in-error"
+	injected, err := json.Marshal(unknownFields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, injected, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Read("browser/playwright"); err == nil || strings.Contains(err.Error(), "must-not-appear-in-error") {
+		t.Fatalf("injected lease result = %v", err)
+	}
+	if err := store.Record("browser/playwright", old); err != nil {
+		t.Fatal(err)
 	}
 
 	newLease := old
@@ -153,12 +180,15 @@ func TestLeaseStoreIsPrivateAtomicAndGenerationSafe(t *testing.T) {
 func TestLeaseStoreRejectsUnsafeNamesAndSymlinkTargets(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	store, err := NewStore(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease := Lease{Version: LeaseSchemaVersion, Generation: 1}
-	for _, name := range []string{"../escape", "/absolute", "bad/name", ""} {
+	lease := Lease{Version: LeaseSchemaVersion, Generation: 1, DaemonID: "daemon-a"}
+	for _, name := range []string{"", "\x00bad"} {
 		if err := store.Record(name, lease); err == nil {
 			t.Errorf("Record(%q) error = nil, want filename rejection", name)
 		}
@@ -167,10 +197,14 @@ func TestLeaseStoreRejectsUnsafeNamesAndSymlinkTargets(t *testing.T) {
 	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(root, "browser-playwright.lease")); err != nil {
+	path, err := store.Path("browser/playwright")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Record("browser/playwright", Lease{Version: LeaseSchemaVersion, Generation: 1}); err == nil {
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Record("browser/playwright", Lease{Version: LeaseSchemaVersion, Generation: 1, DaemonID: "daemon-a"}); err == nil {
 		t.Fatal("Record() through symlink error = nil, want rejection")
 	}
 	contents, err := os.ReadFile(target)
@@ -187,6 +221,44 @@ func TestLeaseStoreRejectsUnsafeNamesAndSymlinkTargets(t *testing.T) {
 	}
 	if _, err := NewStore(unsafeRoot); err == nil {
 		t.Fatal("NewStore(unsafe mode) error = nil, want rejection")
+	}
+	unsafeInfo, err := os.Stat(unsafeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unsafeInfo.Mode().Perm() != 0o755 {
+		t.Fatalf("unsafe root changed to %o", unsafeInfo.Mode().Perm())
+	}
+	left, err := store.Path("a/b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := store.Path("a-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left == right {
+		t.Fatal("server-name encoding collision")
+	}
+	if _, err := store.Path(strings.Repeat("x", 186)); err != nil {
+		t.Fatalf("boundary name rejected: %v", err)
+	}
+	if _, err := store.Path(strings.Repeat("x", 187)); err == nil {
+		t.Fatal("overlong encoded filename accepted")
+	}
+	validLease := lease
+	validLease.ServerName = "hash-test"
+	validLease.OwnerTokenHash = strings.Repeat("a", 64)
+	validLease.ConfigHash = strings.Repeat("b", 64)
+	validLease.Executable = "/bin/true"
+	validLease.CreatedAt = time.Unix(1, 0)
+	for _, bad := range []Lease{
+		func() Lease { v := validLease; v.OwnerTokenHash = strings.Repeat("A", 64); return v }(),
+		func() Lease { v := validLease; v.ConfigHash = "not-a-hash"; return v }(),
+	} {
+		if err := store.Record("hash-test", bad); err == nil {
+			t.Error("Record() accepted malformed hash")
+		}
 	}
 	rootLink := filepath.Join(t.TempDir(), "runtime-link")
 	if err := os.Symlink(t.TempDir(), rootLink); err != nil {
@@ -211,7 +283,8 @@ func TestOwnerTokenAndConfigHashContracts(t *testing.T) {
 	if len(first) < 32 || first == second || strings.ContainsAny(first, "/+ =") {
 		t.Fatalf("GenerateOwnerToken() produced weak/non-URL-safe token %q", first)
 	}
-	if TokenHash(first) != TokenHash(first) || TokenHash(first) == TokenHash(second) {
+	firstHash, secondHash := TokenHash(first), TokenHash(second)
+	if firstHash == "" || firstHash == secondHash {
 		t.Fatal("TokenHash is not deterministic and collision-resistant for generated tokens")
 	}
 
@@ -225,11 +298,9 @@ func TestOwnerTokenAndConfigHashContracts(t *testing.T) {
 	}
 	mapOrder := identity
 	mapOrder.Env = map[string]string{"LANG": "C", "TZ": "UTC"}
-	if ConfigHash(identity) != ConfigHash(identity) {
+	identityHash, mapOrderHash := ConfigHash(identity), ConfigHash(mapOrder)
+	if identityHash == "" || identityHash != mapOrderHash {
 		t.Fatal("ConfigHash is not deterministic")
-	}
-	if ConfigHash(identity) != ConfigHash(mapOrder) {
-		t.Fatal("ConfigHash changed when only environment map contents/order changed")
 	}
 	for _, mutate := range []func(*ServerIdentity){
 		func(v *ServerIdentity) { v.Command = "/usr/bin/other" },

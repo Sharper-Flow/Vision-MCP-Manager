@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseProcStatHandlesParenthesesAndRejectsMalformedInput(t *testing.T) {
@@ -117,6 +118,7 @@ func TestVerifyGroupNeverClaimsUnsafeOrUnknownGroupsOwned(t *testing.T) {
 		Version:        LeaseSchemaVersion,
 		Generation:     4,
 		ServerName:     "playwright",
+		DaemonID:       "daemon-a",
 		OwnerTokenHash: TokenHash(token),
 		ConfigHash:     ConfigHash(ServerIdentity{Name: "playwright", Command: "/vision/browser", Transport: "managed-http"}),
 		LeaderPID:      100,
@@ -124,6 +126,7 @@ func TestVerifyGroupNeverClaimsUnsafeOrUnknownGroupsOwned(t *testing.T) {
 		LeaderStart:    500,
 		BootID:         "boot-a",
 		Executable:     "/vision/browser",
+		CreatedAt:      time.Unix(10, 0),
 	}
 	baseIdentity := ServerIdentity{Name: "playwright", Command: "/vision/browser", Transport: "managed-http"}
 
