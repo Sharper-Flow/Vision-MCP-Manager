@@ -1,3 +1,19 @@
+## 2026-08-13 (v1.4.4)
+
+### Changed
+
+- checkpoint tk-9c51b36ca53a (chore: adv)
+- checkpoint tk-9c51b36ca53a (chore: adv)
+- checkpoint tk-a6a1fb59de26 (chore: adv)
+- checkpoint tk-9d3f1bfe8305 (chore: adv)
+- checkpoint tk-d303756447d2 (chore: adv)
+- checkpoint tk-d0be8ad3a12c (chore: adv)
+- checkpoint tk-9370a7591204 (chore: adv)
+- checkpoint tk-4208ee95e15f (chore: adv)
+- checkpoint tk-3d6266f437f1 (chore: adv)
+- checkpoint tk-4872f9d3f1a7 (chore: adv)
+- checkpoint tk-ba6dd90ca858 (chore: adv)
+
 ## 2026-08-12 (v1.4.3)
 
 ### Changed
