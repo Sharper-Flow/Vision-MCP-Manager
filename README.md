@@ -94,7 +94,7 @@ Your AI agent can now connect to Vision-managed servers at `http://localhost:627
 curl -fsSL https://raw.githubusercontent.com/Sharper-Flow/Vision-MCP-Manager/trunk/scripts/install.sh | bash
 ```
 
-The installer downloads the latest binary, places it in `/usr/local/bin`, and creates the configuration directory.
+The installer downloads the latest binary, places it in `~/.local/bin` by default (or `/usr/local/bin` with `--system`), and creates the configuration directory.
 When it installs the systemd unit, it also captures your current `PATH` so shell-managed MCP binaries (for example `pyenv`, `nvm`, or `uvx` tools) remain spawnable under systemd.
 
 **Options:**

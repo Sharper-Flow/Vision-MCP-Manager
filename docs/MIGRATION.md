@@ -46,7 +46,7 @@ If using automatic migration:
 This will:
 - Read `~/.mcpm/servers.json`
 - Convert to `~/.config/vision/servers.yaml`
-- Create a backup of the original
+- Back up an existing `~/.config/vision/servers.yaml` before replacing it
 
 ### Manual Migration
 
@@ -82,9 +82,8 @@ servers:
 vision daemon start
 
 # Or install as a service
-sudo cp scripts/vision.service /etc/systemd/system/
-sudo systemctl enable vision
-sudo systemctl start vision
+sudo cp scripts/vision.service /etc/systemd/system/vision@.service
+sudo systemctl enable --now vision@"$USER"
 ```
 
 ### Step 4: Update Client Configuration
