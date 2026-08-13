@@ -67,6 +67,23 @@ func TestRuntimeRootResolutionAndSafety(t *testing.T) {
 	}
 }
 
+func TestNewStoreRejectsExistingNonPrivateRootWithoutChangingMode(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(root); err == nil {
+		t.Fatal("accepted group-writable root")
+	}
+	info, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o775 {
+		t.Fatalf("mode changed to %o", got)
+	}
+}
+
 func TestLeaseStoreIsPrivateAtomicAndGenerationSafe(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

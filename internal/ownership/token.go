@@ -17,6 +17,9 @@ func GenerateOwnerToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// GenerateDaemonID creates a non-secret identity for one daemon instance.
+func GenerateDaemonID() (string, error) { return GenerateOwnerToken() }
+
 // TokenHash returns the lowercase hexadecimal SHA-256 digest of token.
 func TokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))

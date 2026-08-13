@@ -49,11 +49,19 @@ type ServerEventHandler func(event ServerEvent)
 // It provides a thread-safe interface for adding, removing, starting,
 // and stopping servers.
 type Registry struct {
-	supervisor   *supervisor.Supervisor
-	servers      map[string]*ManagedServer
-	mu           sync.RWMutex
-	logger       *slog.Logger
-	eventHandler ServerEventHandler
+	supervisor    *supervisor.Supervisor
+	servers       map[string]*ManagedServer
+	mu            sync.RWMutex
+	logger        *slog.Logger
+	eventHandler  ServerEventHandler
+	startupBlocks map[string]error
+	startupGuard  func(string) error
+}
+
+func (r *Registry) SetStartupGuard(guard func(string) error) {
+	r.mu.Lock()
+	r.startupGuard = guard
+	r.mu.Unlock()
 }
 
 // NewRegistry creates a new server registry with the given supervisor.
@@ -62,9 +70,21 @@ func NewRegistry(sup *supervisor.Supervisor, logger *slog.Logger) *Registry {
 		logger = slog.Default()
 	}
 	return &Registry{
-		supervisor: sup,
-		servers:    make(map[string]*ManagedServer),
-		logger:     logger,
+		supervisor:    sup,
+		servers:       make(map[string]*ManagedServer),
+		logger:        logger,
+		startupBlocks: make(map[string]error),
+	}
+}
+
+// BlockStartup records a reconciliation conflict without changing config.
+func (r *Registry) BlockStartup(name string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.startupBlocks[name] = err
+	if srv := r.servers[name]; srv != nil {
+		srv.State = StateFailed
+		srv.LastError = err
 	}
 }
 
@@ -198,6 +218,29 @@ func (r *Registry) Start(name string) error {
 	if srv.State == StateRunning || srv.State == StateStarting {
 		r.mu.Unlock()
 		return nil // Already running, not an error
+	}
+	if block := r.startupBlocks[name]; block != nil {
+		guard := r.startupGuard
+		r.mu.Unlock()
+		if guard == nil {
+			return fmt.Errorf("server %s startup blocked: %w", name, block)
+		}
+		if err := guard(name); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		srv, exists = r.servers[name]
+		if !exists {
+			r.mu.Unlock()
+			return fmt.Errorf("%w: %s", ErrServerNotFound, name)
+		}
+		if srv.State == StateRunning || srv.State == StateStarting {
+			r.mu.Unlock()
+			return nil
+		}
+		if r.startupBlocks[name] != nil {
+			delete(r.startupBlocks, name)
+		}
 	}
 
 	srv.State = StateStarting
@@ -342,7 +385,7 @@ func (r *Registry) StartAll(ctx context.Context) error {
 	var toStart []string
 	required := make(map[string]bool, len(r.servers))
 	for name, srv := range r.servers {
-		if srv.Config.Autostart {
+		if srv.Config.Autostart && r.startupBlocks[name] == nil {
 			toStart = append(toStart, name)
 			required[name] = srv.Config.Required
 		}
@@ -351,6 +394,18 @@ func (r *Registry) StartAll(ctx context.Context) error {
 
 	var errs []error
 	var requiredFailures []string
+	r.mu.RLock()
+	for name, block := range r.startupBlocks {
+		if srv := r.servers[name]; srv != nil && srv.Config.Autostart {
+			errs = append(errs, fmt.Errorf("%s: startup blocked: %w", name, block))
+			if srv.Config.Required {
+				requiredFailures = append(requiredFailures, name)
+			}
+		}
+	}
+	sort.Strings(toStart)
+	sort.Strings(requiredFailures)
+	r.mu.RUnlock()
 	for _, name := range toStart {
 		select {
 		case <-ctx.Done():
@@ -381,7 +436,7 @@ func (r *Registry) StopAll(ctx context.Context) error {
 	r.mu.RLock()
 	var toStop []string
 	for name, srv := range r.servers {
-		if srv.State == StateRunning || srv.State == StateStarting {
+		if srv.Process != nil || srv.State == StateRunning || srv.State == StateStarting {
 			toStop = append(toStop, name)
 		}
 	}

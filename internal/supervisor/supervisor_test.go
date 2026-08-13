@@ -2,13 +2,101 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
 )
+
+type fakeLeaseStore struct {
+	mu            sync.Mutex
+	recordStarted chan struct{}
+	recordRelease chan struct{}
+	recordErr     error
+	lease         ownership.Lease
+	records       int
+	releases      []uint64
+}
+
+func (s *fakeLeaseStore) Record(_ string, lease ownership.Lease) error {
+	s.mu.Lock()
+	s.records++
+	s.lease = lease
+	started, release, err := s.recordStarted, s.recordRelease, s.recordErr
+	s.mu.Unlock()
+	if started != nil {
+		close(started)
+	}
+	if release != nil {
+		<-release
+	}
+	return err
+}
+func (s *fakeLeaseStore) Read(string) (ownership.Lease, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lease, nil
+}
+func (s *fakeLeaseStore) ReleaseGeneration(_ string, generation uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.releases = append(s.releases, generation)
+	return nil
+}
+
+type fakeProcReader struct {
+	members []int
+	mu      sync.Mutex
+}
+
+func (f *fakeProcReader) ReadStat(pid int) (ownership.ProcStat, error) {
+	return ownership.ProcStat{PID: pid, PGRP: pid, StartTime: 11}, nil
+}
+func (f *fakeProcReader) ReadEnviron(int) ([]byte, error) {
+	return []byte(ownership.OwnerTokenEnvKey + "=token"), nil
+}
+func (f *fakeProcReader) ReadExe(int) (string, error) { return "/bin/sh", nil }
+func (f *fakeProcReader) ReadBootID() (string, error) { return "boot", nil }
+func (f *fakeProcReader) ListMembers(int) ([]int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.members...), nil
+}
+func (f *fakeProcReader) setMembers(m []int) {
+	f.mu.Lock()
+	f.members = append([]int(nil), m...)
+	f.mu.Unlock()
+}
+
+type fakeSignaler struct {
+	mu    sync.Mutex
+	pgids []int
+}
+
+func (f *fakeSignaler) Supported() bool { return true }
+func (f *fakeSignaler) GroupSignal(pgid int, _ os.Signal) error {
+	f.mu.Lock()
+	f.pgids = append(f.pgids, pgid)
+	f.mu.Unlock()
+	return nil
+}
+
+func managedFixture(t *testing.T, store ownership.LeaseStore, reader ownership.ProcReader, options ...ProcessOption) *ManagedProcess {
+	t.Helper()
+	cfg := config.SupervisionConfig{}
+	cfg.ApplyDefaults()
+	cfg.ShutdownTimeout = config.Duration(40 * time.Millisecond)
+	serverCfg := &config.ServerConfig{Command: "/bin/sh", Transport: config.TransportManagedHTTP, Args: []string{"-c", "sleep 1"}}
+	return NewManagedProcessWithOwnership("fixture", serverCfg, cfg, slog.Default(), store, "daemon", append(options, WithProcReader(reader))...)
+}
 
 func TestNew(t *testing.T) {
 	cfg := config.SupervisionConfig{}
@@ -360,6 +448,209 @@ func TestManagedProcess_BuildEnv(t *testing.T) {
 	// Should also include system environment
 	if len(env) < 2 {
 		t.Error("buildEnv() should include system environment")
+	}
+}
+
+func TestManagedProcessTokenGeneratorFailureBeforeStart(t *testing.T) {
+	cfg := config.SupervisionConfig{}
+	cfg.ApplyDefaults()
+	marker := filepath.Join(t.TempDir(), "spawned")
+	serverCfg := &config.ServerConfig{Command: "sh", Transport: config.TransportManagedHTTP, Args: []string{"-c", "touch " + marker}}
+	p := NewManagedProcessWithOwnership("token-failure", serverCfg, cfg, slog.Default(), nil, "daemon", WithTokenGenerator(func() (string, error) { return "", errors.New("entropy unavailable") }))
+	if err := p.Serve(context.Background()); err == nil {
+		t.Fatal("Serve succeeded")
+	}
+	if p.State() == StateRunning {
+		t.Fatal("process published running")
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("spawn marker exists or cannot be checked: %v", err)
+	}
+}
+
+func TestManagedProcessRecordBlocksRunningPublication(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	store := &fakeLeaseStore{recordStarted: started, recordRelease: release}
+	p := managedFixture(t, store, &fakeProcReader{})
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { done <- p.Serve(ctx) }()
+	<-started
+	state, generation := p.LifecycleSnapshot()
+	if state != StateStarting || generation != 0 {
+		t.Fatalf("published before record: %s/%d", state, generation)
+	}
+	close(release)
+	deadline := time.After(time.Second)
+	for {
+		state, generation = p.LifecycleSnapshot()
+		if state == StateRunning {
+			if generation != 1 {
+				t.Fatalf("generation=%d", generation)
+			}
+			p.mu.RLock()
+			token := p.ownerToken
+			p.mu.RUnlock()
+			if token != "" {
+				t.Fatal("raw ownership token retained after lease record")
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("process did not run")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	cancel()
+	<-done
+}
+
+func TestManagedProcessRecordFailureKillsGroupAndNeverRuns(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "marker")
+	store := &fakeLeaseStore{recordErr: errors.New("record failed")}
+	cfg := config.SupervisionConfig{}
+	cfg.ApplyDefaults()
+	cfg.ShutdownTimeout = config.Duration(100 * time.Millisecond)
+	serverCfg := &config.ServerConfig{Command: "/bin/sh", Transport: config.TransportManagedHTTP, Args: []string{"-c", "touch " + marker + "; sleep 1"}}
+	p := NewManagedProcessWithOwnership("failure", serverCfg, cfg, slog.Default(), store, "daemon", WithProcReader(&fakeProcReader{}))
+	err := p.Serve(context.Background())
+	if err == nil || strings.Contains(err.Error(), ownership.OwnerTokenEnvKey) {
+		t.Fatalf("bad error: %v", err)
+	}
+	if p.State() != StateCrashed {
+		t.Fatalf("state=%s", p.State())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("marker exists after record failure cleanup")
+	}
+	p.mu.RLock()
+	active := p.leaseActive
+	processState := p.cmd.ProcessState
+	p.mu.RUnlock()
+	if active || processState == nil {
+		t.Fatalf("cleanup state active=%v processState=%v", active, processState)
+	}
+}
+
+func TestManagedProcessLeaseRetainedWhileDescendantLives(t *testing.T) {
+	store := &fakeLeaseStore{}
+	reader := &fakeProcReader{}
+	p := managedFixture(t, store, reader)
+	reader.setMembers([]int{99})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Serve(ctx) }()
+	select {
+	case <-p.lifecycle:
+	case <-time.After(time.Second):
+		t.Fatal("process did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not finish")
+	}
+	store.mu.Lock()
+	releases := len(store.releases)
+	store.mu.Unlock()
+	if releases != 0 {
+		t.Fatal("lease released with descendant")
+	}
+}
+
+func TestManagedProcessLeaseReleasedOnlyWhenGroupEmpty(t *testing.T) {
+	store := &fakeLeaseStore{}
+	reader := &fakeProcReader{}
+	p := managedFixture(t, store, reader)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Serve(ctx) }()
+	select {
+	case <-p.lifecycle:
+	case <-time.After(time.Second):
+		t.Fatal("process did not start")
+	}
+	reader.setMembers(nil)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not finish")
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.releases) != 1 || store.releases[0] != 1 {
+		t.Fatalf("releases=%v", store.releases)
+	}
+}
+
+func TestManagedProcessUnsupportedIdentityFailsClosed(t *testing.T) {
+	cfg := config.SupervisionConfig{}
+	cfg.ApplyDefaults()
+	cfg.ShutdownTimeout = config.Duration(100 * time.Millisecond)
+	p := NewManagedProcessWithOwnership("unsupported", &config.ServerConfig{Command: "/bin/sh", Transport: config.TransportManagedHTTP, Args: []string{"-c", "sleep 1"}}, cfg, slog.Default(), &fakeLeaseStore{}, "daemon", WithProcReader(&unsupportedProcReader{}))
+	if err := p.Serve(context.Background()); err == nil {
+		t.Fatal("unsupported identity accepted")
+	}
+	if p.State() == StateRunning {
+		t.Fatal("unsupported backend published running")
+	}
+}
+
+type unsupportedProcReader struct{}
+
+func (*unsupportedProcReader) ReadStat(int) (ownership.ProcStat, error) {
+	return ownership.ProcStat{}, errors.New("unsupported")
+}
+func (*unsupportedProcReader) ReadEnviron(int) ([]byte, error) { return nil, errors.New("unsupported") }
+func (*unsupportedProcReader) ReadExe(int) (string, error)     { return "", errors.New("unsupported") }
+func (*unsupportedProcReader) ReadBootID() (string, error)     { return "", errors.New("unsupported") }
+func (*unsupportedProcReader) ListMembers(int) ([]int, error)  { return nil, errors.New("unsupported") }
+
+func TestManagedProcessConfigOwnerTokenOverride(t *testing.T) {
+	cfg := config.SupervisionConfig{}
+	cfg.ApplyDefaults()
+	p := NewManagedProcessWithOwnership("token", &config.ServerConfig{Transport: config.TransportManagedHTTP, Env: map[string]string{ownership.OwnerTokenEnvKey: "spoof"}}, cfg, slog.Default(), nil, "daemon", WithTokenGenerator(func() (string, error) { return "generated", nil }))
+	if err := p.prepareOwnerToken(); err != nil {
+		t.Fatal(err)
+	}
+	env := p.buildEnv()
+	count := 0
+	for _, item := range env {
+		if strings.HasPrefix(item, ownership.OwnerTokenEnvKey+"=") {
+			count++
+			if item != ownership.OwnerTokenEnvKey+"=generated" {
+				t.Fatal(item)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("token count=%d", count)
+	}
+}
+
+func TestManagedProcessSignalsRecordedPGID(t *testing.T) {
+	cfg := config.SupervisionConfig{}
+	cfg.ApplyDefaults()
+	signaler := &fakeSignaler{}
+	p := NewManagedProcessWithOwnership("pgid", &config.ServerConfig{Transport: config.TransportManagedHTTP}, cfg, slog.Default(), nil, "daemon", WithSignaler(signaler))
+	p.cmd = &exec.Cmd{Process: &os.Process{Pid: 41}}
+	p.lease = ownership.Lease{LeaderPGID: 99}
+	p.leaseActive = true
+	if err := p.terminate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.forceKill(); err != nil {
+		t.Fatal(err)
+	}
+	signaler.mu.Lock()
+	defer signaler.mu.Unlock()
+	if len(signaler.pgids) != 2 || signaler.pgids[0] != 99 || signaler.pgids[1] != 99 {
+		t.Fatalf("pgids=%v", signaler.pgids)
 	}
 }
 

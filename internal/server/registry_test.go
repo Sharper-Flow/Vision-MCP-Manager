@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -39,6 +40,61 @@ func TestRegistry_Add(t *testing.T) {
 	err := reg.Add("test", cfg)
 	if err == nil {
 		t.Error("Add() should fail for duplicate name")
+	}
+}
+
+func TestRegistryStartupGuardRetriesBlockedStart(t *testing.T) {
+	reg, _ := newTestRegistry()
+	cfg := &config.ServerConfig{Port: 6276, Command: "echo", Transport: config.TransportManagedHTTP}
+	if err := reg.Add("guarded", cfg); err != nil {
+		t.Fatal(err)
+	}
+	reg.BlockStartup("guarded", errors.New("conflict"))
+	calls := 0
+	reg.SetStartupGuard(func(string) error { calls++; return nil })
+	if err := reg.Start("guarded"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("guard calls=%d", calls)
+	}
+}
+
+func TestRegistryStartupGuardFailureRetainsBlock(t *testing.T) {
+	reg, _ := newTestRegistry()
+	cfg := &config.ServerConfig{Port: 6276, Command: "echo", Transport: config.TransportManagedHTTP}
+	if err := reg.Add("blocked", cfg); err != nil {
+		t.Fatal(err)
+	}
+	reg.BlockStartup("blocked", errors.New("conflict"))
+	calls := 0
+	reg.SetStartupGuard(func(string) error { calls++; return errors.New("still blocked") })
+	if err := reg.Start("blocked"); err == nil {
+		t.Fatal("Start succeeded")
+	}
+	if calls != 1 || reg.Get("blocked").State == StateRunning {
+		t.Fatal("block not retained")
+	}
+}
+
+func TestRegistryStartAllReportsBlockedRequiredAndAdvisory(t *testing.T) {
+	reg, _ := newTestRegistry()
+	for _, item := range []struct {
+		name     string
+		required bool
+	}{{"advisory", false}, {"required", true}} {
+		if err := reg.Add(item.name, &config.ServerConfig{Command: "echo", Transport: config.TransportManagedHTTP, Autostart: true, Required: item.required}); err != nil {
+			t.Fatal(err)
+		}
+		reg.BlockStartup(item.name, errors.New("conflict"))
+	}
+	err := reg.StartAll(context.Background())
+	var required *RequiredStartupError
+	if !errors.As(err, &required) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(required.Failures) != 1 || required.Failures[0] != "required" {
+		t.Fatalf("failures=%v", required.Failures)
 	}
 }
 
@@ -503,6 +559,48 @@ func TestRegistry_StartAllStopAll(t *testing.T) {
 	status = reg.Status()
 	if status.RunningServers != 0 {
 		t.Errorf("RunningServers after StopAll = %d, want 0", status.RunningServers)
+	}
+}
+
+func TestRegistry_StopAllStopsFailedOrCrashedProcess(t *testing.T) {
+	for _, state := range []State{StateFailed, StateCrashed} {
+		t.Run(string(state), func(t *testing.T) {
+			reg, sup := newTestRegistry()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go sup.Serve(ctx)
+
+			if err := reg.Add("owned-process", &config.ServerConfig{
+				Port:      6276,
+				Command:   "sleep",
+				Args:      []string{"10"},
+				Transport: config.TransportManagedHTTP,
+				URL:       "http://127.0.0.1:16276/mcp",
+				Autostart: true,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := reg.StartAll(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			reg.mu.Lock()
+			srv := reg.servers["owned-process"]
+			if srv.Process == nil {
+				reg.mu.Unlock()
+				t.Fatal("started server has no owned process")
+			}
+			srv.State = state
+			reg.mu.Unlock()
+
+			if err := reg.StopAll(ctx); err != nil {
+				t.Fatalf("StopAll() error: %v", err)
+			}
+			got := reg.Get("owned-process")
+			if got.Process != nil || got.State != StateStopped {
+				t.Fatalf("after StopAll: process=%v state=%s", got.Process, got.State)
+			}
+		})
 	}
 }
 

@@ -61,6 +61,19 @@ type ProcReader interface {
 	ListMembers(pgid int) ([]int, error)
 }
 
+// GroupInspector is the minimum process-group lifecycle contract used by
+// supervisors when the recorded leader has already exited.
+type GroupInspector interface {
+	ListMembers(pgid int) ([]int, error)
+}
+
+// LeaseStore is the narrow lifecycle contract consumed by supervision.
+type LeaseStore interface {
+	Record(serverName string, lease Lease) error
+	Read(serverName string) (Lease, error)
+	ReleaseGeneration(serverName string, generation uint64) error
+}
+
 // GroupStatus is the result of a fail-closed ownership check.
 type GroupStatus string
 

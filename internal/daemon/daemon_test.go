@@ -12,8 +12,34 @@ import (
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 )
+
+type fakeDaemonReconciler struct {
+	calls   []string
+	results map[string]ownership.Result
+}
+
+func (f *fakeDaemonReconciler) Reconcile(context.Context, map[string]ownership.ServerIdentity) []ownership.Result {
+	return nil
+}
+func (f *fakeDaemonReconciler) ReconcileOne(_ context.Context, name string, _ ownership.ServerIdentity) (ownership.Result, bool) {
+	f.calls = append(f.calls, name)
+	result, ok := f.results[name]
+	return result, ok
+}
+
+func TestDaemonReconcileManagedBackendOnlyAffectsRequestedServer(t *testing.T) {
+	d := &Daemon{cfg: &config.Config{Servers: map[string]*config.ServerConfig{"one": {Transport: config.TransportManagedHTTP}, "two": {Transport: config.TransportManagedHTTP}}}, reconciler: &fakeDaemonReconciler{results: map[string]ownership.Result{"one": {ServerName: "one", Status: "conflict", Reason: "identity_changed"}}}}
+	if err := d.reconcileManagedBackend("one"); err == nil {
+		t.Fatal("conflict accepted")
+	}
+	fake := d.reconciler.(*fakeDaemonReconciler)
+	if len(fake.calls) != 1 || fake.calls[0] != "one" {
+		t.Fatalf("calls=%v", fake.calls)
+	}
+}
 
 // --- PID File Tests ---
 

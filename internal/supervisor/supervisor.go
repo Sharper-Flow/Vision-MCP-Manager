@@ -9,20 +9,39 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
 	"github.com/thejerf/suture/v4"
 )
 
 // Supervisor wraps suture.Supervisor with Vision-specific functionality.
 type Supervisor struct {
 	*suture.Supervisor
-	services map[string]*ManagedProcess
-	mu       sync.RWMutex
-	config   config.SupervisionConfig
-	logger   *slog.Logger
+	services       map[string]*ManagedProcess
+	mu             sync.RWMutex
+	config         config.SupervisionConfig
+	logger         *slog.Logger
+	leaseStore     ownership.LeaseStore
+	daemonID       string
+	processOptions []ProcessOption
+}
+
+// Option configures optional managed-backend ownership wiring.
+type Option func(*Supervisor)
+
+func WithLeaseStore(store ownership.LeaseStore, daemonID string) Option {
+	return func(s *Supervisor) { s.leaseStore, s.daemonID = store, daemonID }
+}
+
+func WithProcessOptions(options ...ProcessOption) Option {
+	return func(s *Supervisor) { s.processOptions = append(s.processOptions, options...) }
 }
 
 // New creates a new Supervisor with the given configuration.
 func New(cfg config.SupervisionConfig, logger *slog.Logger) *Supervisor {
+	return NewWithOptions(cfg, logger)
+}
+
+func NewWithOptions(cfg config.SupervisionConfig, logger *slog.Logger, options ...Option) *Supervisor {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -42,12 +61,16 @@ func New(cfg config.SupervisionConfig, logger *slog.Logger) *Supervisor {
 		FailureBackoff:   30 * time.Second,
 	}
 
-	return &Supervisor{
+	s := &Supervisor{
 		Supervisor: suture.New("vision", spec),
 		services:   make(map[string]*ManagedProcess),
 		config:     cfg,
 		logger:     logger,
 	}
+	for _, option := range options {
+		option(s)
+	}
+	return s
 }
 
 // AddServer registers a server to be supervised.
@@ -60,7 +83,7 @@ func (s *Supervisor) AddServer(name string, serverCfg *config.ServerConfig) (*Ma
 		return nil, fmt.Errorf("server %q already registered", name)
 	}
 
-	proc := NewManagedProcess(name, serverCfg, s.config, s.logger)
+	proc := NewManagedProcessWithOwnership(name, serverCfg, s.config, s.logger, s.leaseStore, s.daemonID, s.processOptions...)
 	s.services[name] = proc
 
 	// Keep the exact registration token so dynamic stop removes the supervised

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
 	"github.com/thejerf/suture/v4"
 )
 
@@ -26,15 +27,24 @@ type ManagedProcess struct {
 	logger    *slog.Logger
 
 	// Runtime state (protected by mu)
-	mu           sync.RWMutex
-	state        ServiceState
-	cmd          *exec.Cmd
-	pid          int
-	startedAt    time.Time
-	restartCount int
-	lastError    error
-	generation   uint64
-	lifecycle    chan struct{}
+	mu                sync.RWMutex
+	state             ServiceState
+	cmd               *exec.Cmd
+	pid               int
+	startedAt         time.Time
+	restartCount      int
+	lastError         error
+	generation        uint64
+	pendingGeneration uint64
+	lifecycle         chan struct{}
+	leaseStore        ownership.LeaseStore
+	daemonID          string
+	lease             ownership.Lease
+	leaseActive       bool
+	ownerToken        string
+	tokenGenerator    func() (string, error)
+	procReader        ownership.ProcReader
+	signaler          ownership.Signaler
 
 	// Suture integration
 	token suture.ServiceToken
@@ -47,15 +57,44 @@ type ManagedProcess struct {
 }
 
 // NewManagedProcess creates a new managed process for the given server config.
+// Managed-http ownership is Linux-only for now: non-Linux proc identity reads
+// fail closed before publication, so the backend is not silently unleased.
 func NewManagedProcess(name string, cfg *config.ServerConfig, supCfg config.SupervisionConfig, logger *slog.Logger) *ManagedProcess {
-	return &ManagedProcess{
-		name:      name,
-		config:    cfg,
-		supConfig: supCfg,
-		logger:    logger.With(slog.String("server", name)),
-		state:     StateStopped,
-		lifecycle: make(chan struct{}, 1),
+	return NewManagedProcessWithOwnership(name, cfg, supCfg, logger, nil, "")
+}
+
+type ProcessOption func(*ManagedProcess)
+
+func WithTokenGenerator(generator func() (string, error)) ProcessOption {
+	return func(p *ManagedProcess) { p.tokenGenerator = generator }
+}
+
+func WithProcReader(reader ownership.ProcReader) ProcessOption {
+	return func(p *ManagedProcess) { p.procReader = reader }
+}
+
+func WithSignaler(signaler ownership.Signaler) ProcessOption {
+	return func(p *ManagedProcess) { p.signaler = signaler }
+}
+
+func NewManagedProcessWithOwnership(name string, cfg *config.ServerConfig, supCfg config.SupervisionConfig, logger *slog.Logger, store ownership.LeaseStore, daemonID string, options ...ProcessOption) *ManagedProcess {
+	p := &ManagedProcess{
+		name:           name,
+		config:         cfg,
+		supConfig:      supCfg,
+		logger:         logger.With(slog.String("server", name)),
+		state:          StateStopped,
+		lifecycle:      make(chan struct{}, 1),
+		leaseStore:     store,
+		daemonID:       daemonID,
+		tokenGenerator: ownership.GenerateOwnerToken,
+		procReader:     ownership.NewLinuxProcReader(""),
+		signaler:       ownership.NewSignaler(),
 	}
+	for _, option := range options {
+		option(p)
+	}
+	return p
 }
 
 // Serve implements suture.Service.
@@ -74,6 +113,14 @@ func (p *ManagedProcess) Serve(ctx context.Context) error {
 		return p.serveProxy(ctx)
 	}
 
+	if transport == config.TransportManagedHTTP {
+		if err := p.prepareOwnerToken(); err != nil {
+			p.mu.Lock()
+			p.state, p.lastError = StateCrashed, err
+			p.mu.Unlock()
+			return err
+		}
+	}
 	// Spawn the subprocess
 	if err := p.spawn(ctx); err != nil {
 		p.mu.Lock()
@@ -83,11 +130,26 @@ func (p *ManagedProcess) Serve(ctx context.Context) error {
 		p.notifyLifecycle()
 		return err
 	}
+	if transport == config.TransportManagedHTTP && p.leaseStore != nil {
+		if err := p.recordLease(); err != nil {
+			_ = p.forceKill()
+			_ = p.cmd.Wait()
+			_ = p.waitGroupEmpty(p.supConfig.ShutdownTimeout.Duration())
+			p.mu.Lock()
+			p.state = StateCrashed
+			p.lastError = err
+			p.mu.Unlock()
+			return err
+		}
+	}
 
 	p.mu.Lock()
 	p.state = StateRunning
 	p.startedAt = time.Now()
-	p.generation++
+	if p.pendingGeneration > 0 {
+		p.generation = p.pendingGeneration
+		p.pendingGeneration = 0
+	}
 	p.mu.Unlock()
 	p.notifyLifecycle()
 
@@ -155,16 +217,80 @@ func (p *ManagedProcess) spawn(_ context.Context) error {
 
 // buildEnv creates the environment for the subprocess.
 // It merges the current environment with server-specific variables.
+func (p *ManagedProcess) prepareOwnerToken() error {
+	generator := p.tokenGenerator
+	if generator == nil {
+		generator = ownership.GenerateOwnerToken
+	}
+	token, err := generator()
+	if err != nil {
+		return errors.New("failed to generate backend ownership token")
+	}
+	p.mu.Lock()
+	p.ownerToken = token
+	p.pendingGeneration = p.generation + 1
+	p.mu.Unlock()
+	return nil
+}
+
 func (p *ManagedProcess) buildEnv() []string {
 	// Start with current environment
 	env := os.Environ()
 
 	// Add server-specific environment variables
 	for key, value := range p.config.Env {
+		if key == ownership.OwnerTokenEnvKey {
+			continue
+		}
 		env = append(env, fmt.Sprintf("%s=%s", key, value))
+	}
+	if p.config.InferTransport() == config.TransportManagedHTTP {
+		p.mu.RLock()
+		token := p.ownerToken
+		p.mu.RUnlock()
+		env = append(env, ownership.OwnerTokenEnvKey+"="+token)
 	}
 
 	return env
+}
+
+func (p *ManagedProcess) recordLease() error {
+	p.mu.RLock()
+	token := p.ownerToken
+	reader := p.procReader
+	cmd := p.cmd
+	p.mu.RUnlock()
+	if token == "" || reader == nil || cmd == nil || cmd.Process == nil {
+		return errors.New("backend process identity unavailable")
+	}
+	stat, err := reader.ReadStat(cmd.Process.Pid)
+	if err != nil {
+		return errors.New("failed to read backend process identity")
+	}
+	boot, err := reader.ReadBootID()
+	if err != nil {
+		return errors.New("failed to read backend boot identity")
+	}
+	exe, err := reader.ReadExe(cmd.Process.Pid)
+	if err != nil {
+		return errors.New("failed to read backend executable identity")
+	}
+	p.mu.RLock()
+	generation := p.pendingGeneration
+	p.mu.RUnlock()
+	identity := ownership.ServerIdentity{Name: p.name, Command: p.config.Command, Args: p.config.Args, URL: p.config.URL, Transport: string(p.config.InferTransport()), Env: p.config.Env}
+	lease := ownership.Lease{Version: ownership.LeaseSchemaVersion, Generation: generation, ServerName: p.name, DaemonID: p.daemonID, OwnerTokenHash: ownership.TokenHash(token), ConfigHash: ownership.ConfigHash(identity), LeaderPID: cmd.Process.Pid, LeaderPGID: stat.PGRP, LeaderStart: stat.StartTime, BootID: boot, Executable: exe, CreatedAt: time.Now()}
+	if err := p.leaseStore.Record(p.name, lease); err != nil {
+		return errors.New("failed to record backend ownership lease")
+	}
+	p.mu.Lock()
+	p.lease = lease
+	p.leaseActive = true
+	p.generation = generation
+	p.pendingGeneration = 0
+	p.ownerToken = ""
+	p.mu.Unlock()
+	return nil
 }
 
 // wait blocks until the process exits or context is cancelled.
@@ -177,6 +303,7 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 
 	select {
 	case err := <-done:
+		cleanupErr := p.releaseLeaseIfEmpty(p.supConfig.ShutdownTimeout.Duration())
 		// Process exited
 		p.mu.Lock()
 		p.restartCount++
@@ -193,6 +320,12 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 		}
 		p.mu.Unlock()
 		p.notifyLifecycle()
+		if cleanupErr != nil && err == nil {
+			return cleanupErr
+		}
+		if cleanupErr != nil && err != nil {
+			return errors.Join(err, cleanupErr)
+		}
 		return err
 
 	case <-ctx.Done():
@@ -216,6 +349,10 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 			_ = p.forceKill()
 			<-done
 		}
+		if cleanupErr := p.releaseLeaseIfEmpty(timeout); cleanupErr != nil {
+			p.logger.Warn("backend ownership cleanup incomplete", slog.String("error", cleanupErr.Error()))
+			return errors.Join(ctx.Err(), cleanupErr)
+		}
 
 		p.mu.Lock()
 		p.state = StateStopped
@@ -225,6 +362,51 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 	}
 }
 
+func (p *ManagedProcess) waitGroupEmpty(timeout time.Duration) error {
+	p.mu.RLock()
+	lease := p.lease
+	inspector := p.procReader
+	active := p.leaseActive
+	p.mu.RUnlock()
+	if !active || inspector == nil {
+		return nil
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		members, err := inspector.ListMembers(lease.LeaderPGID)
+		if err == nil && len(members) == 0 {
+			return nil
+		}
+		select {
+		case <-deadline.C:
+			return errors.New("process group did not become empty")
+		case <-ticker.C:
+		}
+	}
+}
+
+func (p *ManagedProcess) releaseLeaseIfEmpty(timeout time.Duration) error {
+	p.mu.RLock()
+	active, lease, store := p.leaseActive, p.lease, p.leaseStore
+	p.mu.RUnlock()
+	if !active || store == nil {
+		return nil
+	}
+	if err := p.waitGroupEmpty(timeout); err != nil {
+		return err
+	}
+	if err := store.ReleaseGeneration(p.name, lease.Generation); err != nil {
+		return errors.New("failed to release backend ownership lease")
+	}
+	p.mu.Lock()
+	p.leaseActive = false
+	p.mu.Unlock()
+	return nil
+}
+
 // terminate gracefully stops the process tree by sending SIGTERM.
 // The caller is responsible for waiting on the process to exit.
 func (p *ManagedProcess) terminate() error {
@@ -232,10 +414,15 @@ func (p *ManagedProcess) terminate() error {
 		return nil
 	}
 
+	p.mu.RLock()
 	pid := p.cmd.Process.Pid
+	if p.leaseActive {
+		pid = p.lease.LeaderPGID
+	}
+	p.mu.RUnlock()
 
 	// Send SIGTERM to process group (negative PID)
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+	if err := p.signaler.GroupSignal(pid, syscall.SIGTERM); err != nil {
 		// Process might already be dead
 		if !errors.Is(err, syscall.ESRCH) {
 			p.logger.Debug("failed to send SIGTERM to process group",
@@ -253,9 +440,14 @@ func (p *ManagedProcess) forceKill() error {
 		return nil
 	}
 
+	p.mu.RLock()
 	pid := p.cmd.Process.Pid
+	if p.leaseActive {
+		pid = p.lease.LeaderPGID
+	}
+	p.mu.RUnlock()
 
-	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+	if err := p.signaler.GroupSignal(pid, syscall.SIGKILL); err != nil {
 		if !errors.Is(err, syscall.ESRCH) {
 			return fmt.Errorf("failed to send SIGKILL: %w", err)
 		}

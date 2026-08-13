@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -22,6 +23,15 @@ const leaseFileSuffix = ".lease"
 type Store struct {
 	root string
 	mu   sync.Mutex
+}
+
+// LeaseRecord is one directory entry returned by List.  Err is intentionally
+// associated with the name so one malformed lease cannot hide other leases.
+// It never contains the file's raw contents.
+type LeaseRecord struct {
+	ServerName string
+	Lease      Lease
+	Err        error
 }
 
 // NewStore creates or validates root. Existing roots must be owned by the
@@ -49,10 +59,8 @@ func ensurePrivateRoot(root string) error {
 			break
 		}
 	}
-	nearestExisting := -1
-	for i, path := range components {
+	for _, path := range components {
 		if _, err := os.Lstat(path); err == nil {
-			nearestExisting = i
 			break
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("inspect runtime path: %w", err)
@@ -80,7 +88,7 @@ func ensurePrivateRoot(root string) error {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return fmt.Errorf("runtime path is unsafe")
 		}
-		if path == root || (nearestExisting >= 0 && i < nearestExisting) {
+		if path == root {
 			if !ownerMatches(info) || info.Mode().Perm() != 0o700 {
 				return fmt.Errorf("private runtime component is unsafe")
 			}
@@ -130,6 +138,41 @@ func (s *Store) Read(serverName string) (Lease, error) {
 		return Lease{}, err
 	}
 	return s.readPath(path, serverName)
+}
+
+// List returns every lease file in deterministic server-name order. Invalid
+// entries are represented by a per-entry error and do not prevent valid
+// entries from being returned.
+func (s *Store) List() ([]LeaseRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]LeaseRecord, 0)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), leaseFileSuffix) || strings.HasPrefix(entry.Name(), ".lease-") {
+			continue
+		}
+		encoded := strings.TrimSuffix(entry.Name(), leaseFileSuffix)
+		nameBytes, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil {
+			result = append(result, LeaseRecord{ServerName: fmt.Sprintf("invalid-lease-%04d", len(result)+1), Err: fmt.Errorf("invalid lease file")})
+			continue
+		}
+		name := string(nameBytes)
+		record := LeaseRecord{ServerName: name}
+		lease, readErr := s.readPath(filepath.Join(s.root, entry.Name()), name)
+		if readErr != nil {
+			record.Err = readErr
+		} else {
+			record.Lease = lease
+		}
+		result = append(result, record)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ServerName < result[j].ServerName })
+	return result, nil
 }
 
 // ReleaseGeneration removes a lease only when its current generation still

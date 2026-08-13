@@ -9,8 +9,10 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/slots"
@@ -60,6 +63,14 @@ type Daemon struct {
 	managedBackends   map[string]*supervisor.BackendCoordinator
 	managedCancels    map[string]context.CancelFunc
 	managedGatewaysMu sync.RWMutex
+	ownershipStore    *ownership.Store
+	reconciler        ownershipReconciler
+	daemonID          string
+}
+
+type ownershipReconciler interface {
+	Reconcile(context.Context, map[string]ownership.ServerIdentity) []ownership.Result
+	ReconcileOne(context.Context, string, ownership.ServerIdentity) (ownership.Result, bool)
 }
 
 // Config configures the daemon.
@@ -67,6 +78,7 @@ type Config struct {
 	ConfigPath     string // Path to servers.yaml
 	ManagementPort int    // Port for management API (default: 6275)
 	Logger         *slog.Logger
+	OwnershipRoot  string
 }
 
 // New creates a new daemon instance.
@@ -101,8 +113,31 @@ func New(cfg Config) (*Daemon, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	env := make(map[string]string)
+	for _, value := range os.Environ() {
+		if key, val, ok := strings.Cut(value, "="); ok {
+			env[key] = val
+		}
+	}
+	root, err := ownership.RuntimeRoot(cfg.OwnershipRoot, env, os.Getuid(), os.TempDir())
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("resolve ownership root: %w", err)
+	}
+	store, err := ownership.NewStore(root)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("create ownership store: %w", err)
+	}
+	daemonID, err := ownership.GenerateDaemonID()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("generate daemon identity: %w", err)
+	}
+	reader := ownership.NewLinuxProcReader("")
+	reconciler := &ownership.Reconciler{Store: store, ProcReader: reader, Signaler: ownership.NewSignaler(), TermTimeout: visionCfg.Supervision.ShutdownTimeout.Duration(), KillTimeout: visionCfg.Supervision.ShutdownTimeout.Duration()}
 	// Create supervisor
-	sup := supervisor.New(visionCfg.Supervision, cfg.Logger)
+	sup := supervisor.NewWithOptions(visionCfg.Supervision, cfg.Logger, supervisor.WithLeaseStore(store, daemonID))
 
 	// Create registry
 	reg := server.NewRegistry(sup, cfg.Logger)
@@ -139,7 +174,11 @@ func New(cfg Config) (*Daemon, error) {
 		managedGateways:    make(map[string]*mcp.ManagedHTTPGateway),
 		managedBackends:    make(map[string]*supervisor.BackendCoordinator),
 		managedCancels:     make(map[string]context.CancelFunc),
+		ownershipStore:     store,
+		reconciler:         reconciler,
+		daemonID:           daemonID,
 	}
+	reg.SetStartupGuard(d.reconcileManagedBackend)
 
 	// Register event handler for dynamic server lifecycle management
 	reg.SetEventHandler(d.handleServerEvent)
@@ -166,6 +205,23 @@ func (d *Daemon) Start() error {
 	// Load servers from config
 	if err := d.registry.LoadFromConfig(d.cfg); err != nil {
 		return fmt.Errorf("failed to load servers: %w", err)
+	}
+	expected := make(map[string]ownership.ServerIdentity)
+	for name, serverCfg := range d.cfg.Servers {
+		if serverCfg.InferTransport() == config.TransportManagedHTTP {
+			expected[name] = ownership.ServerIdentity{Name: name, Command: serverCfg.Command, Args: serverCfg.Args, URL: serverCfg.URL, Transport: string(serverCfg.InferTransport()), Env: serverCfg.Env}
+		}
+	}
+	for _, result := range d.reconciler.Reconcile(d.ctx, expected) {
+		if _, configured := expected[result.ServerName]; !configured {
+			d.logger.Warn("unmatched ownership lease", slog.String("name", result.ServerName))
+			continue
+		}
+		switch result.Status {
+		case "reclaimed", "removed_dead":
+		default:
+			d.registry.BlockStartup(result.ServerName, errors.New("managed backend ownership conflict"))
+		}
 	}
 
 	// Start supervisor (runs in background)
@@ -198,6 +254,19 @@ func (d *Daemon) Start() error {
 	)
 
 	return nil
+}
+
+func (d *Daemon) reconcileManagedBackend(name string) error {
+	cfg := d.cfg.Servers[name]
+	if cfg == nil || cfg.InferTransport() != config.TransportManagedHTTP {
+		return nil
+	}
+	identity := ownership.ServerIdentity{Name: name, Command: cfg.Command, Args: cfg.Args, URL: cfg.URL, Transport: string(cfg.InferTransport()), Env: cfg.Env}
+	result, found := d.reconciler.ReconcileOne(d.ctx, name, identity)
+	if !found || result.Status == "reclaimed" || result.Status == "removed_dead" {
+		return nil
+	}
+	return errors.New("managed backend ownership conflict")
 }
 
 // Stop gracefully stops the daemon.

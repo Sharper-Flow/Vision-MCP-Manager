@@ -18,19 +18,18 @@ import (
 )
 
 type reconcileGroup struct {
-	status       GroupStatus
-	verifyCount  int
-	onVerify     map[int]GroupStatus
-	onTerm       func()
-	onKill       func()
-	callbackErr  error
-	bootID       string
-	leaderPID    int
-	leaderPGID   int
-	leaderStart  uint64
-	token        string
-	executable   string
-	identityHash string
+	status      GroupStatus
+	verifyCount int
+	onVerify    map[int]GroupStatus
+	onTerm      func()
+	onKill      func()
+	callbackErr error
+	bootID      string
+	leaderPID   int
+	leaderPGID  int
+	leaderStart uint64
+	token       string
+	executable  string
 }
 
 func (g *reconcileGroup) ReadBootID() (string, error) {
@@ -163,7 +162,11 @@ func testLease(name, token string, generation uint64) Lease {
 
 func newReconcileFixture(t *testing.T, names ...string) (*Store, map[string]ServerIdentity, map[string]*reconcileGroup, *fakeSignaler, *fakeReconcileWaiter) {
 	t.Helper()
-	store, err := NewStore(t.TempDir())
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(root)
 	if err != nil {
 		t.Fatal(err)
 	}
