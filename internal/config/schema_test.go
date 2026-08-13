@@ -320,8 +320,8 @@ func TestServerConfig_ApplyDefaults(t *testing.T) {
 	if s.RestartPolicy != RestartOnFailure {
 		t.Errorf("RestartPolicy = %q, want %q", s.RestartPolicy, RestartOnFailure)
 	}
-	if s.MaxRestarts != 5 {
-		t.Errorf("MaxRestarts = %d, want 5", s.MaxRestarts)
+	if s.MaxRestarts == nil || *s.MaxRestarts != 5 {
+		t.Errorf("MaxRestarts = %v, want 5", s.MaxRestarts)
 	}
 	if s.SessionTimeout.Duration() != 5*time.Minute {
 		t.Errorf("SessionTimeout = %v, want 5m", s.SessionTimeout)

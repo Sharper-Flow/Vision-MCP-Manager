@@ -94,7 +94,8 @@ type ServerConfig struct {
 	RestartPolicy RestartPolicy `yaml:"restart_policy,omitempty" env:"RESTART_POLICY" env-default:"on-failure"`
 
 	// MaxRestarts is the maximum restart attempts within a 5-minute window.
-	MaxRestarts int `yaml:"max_restarts,omitempty" env:"MAX_RESTARTS" env-default:"5"`
+	// A pointer preserves omitted versus explicit zero at the YAML boundary.
+	MaxRestarts *int `yaml:"max_restarts,omitempty" env:"MAX_RESTARTS" env-default:"5"`
 
 	// Stateful enables process-per-session mode for isolated state.
 	Stateful bool `yaml:"stateful,omitempty" env:"STATEFUL" env-default:"false"`
@@ -294,6 +295,7 @@ var (
 	ErrConflictingConfig              = errors.New("config: cannot specify both 'command' and 'url'")
 	ErrInvalidTransport               = errors.New("config: invalid transport type")
 	ErrInvalidRestartPolicy           = errors.New("config: invalid restart_policy (must be 'always', 'on-failure', or 'never')")
+	ErrInvalidMaxRestarts             = errors.New("config: max_restarts must be >= 0")
 	ErrInvalidAvailabilityProfile     = errors.New("config: invalid availability_profile")
 	ErrInvalidHTTPURL                 = errors.New("config: http transport url must end with '/mcp'")
 	ErrInvalidHealthCheckInterval     = errors.New("config: health_check_interval must be >= 5s")
@@ -467,6 +469,9 @@ func (s *ServerConfig) Validate(name string) error {
 	}
 
 	// Restart policy validation
+	if s.MaxRestarts != nil && *s.MaxRestarts < 0 {
+		return fmt.Errorf("%w: server %q has max_restarts %d", ErrInvalidMaxRestarts, name, *s.MaxRestarts)
+	}
 	switch s.RestartPolicy {
 	case "", RestartAlways, RestartOnFailure, RestartNever:
 		// valid (empty defaults to on-failure)
@@ -548,8 +553,9 @@ func (s *ServerConfig) ApplyDefaults() {
 	if s.RestartPolicy == "" {
 		s.RestartPolicy = RestartOnFailure
 	}
-	if s.MaxRestarts == 0 {
-		s.MaxRestarts = 5
+	if s.MaxRestarts == nil {
+		maxRestarts := 5
+		s.MaxRestarts = &maxRestarts
 	}
 	if s.SessionTimeout == 0 {
 		s.SessionTimeout = Duration(5 * time.Minute)
@@ -584,6 +590,15 @@ func (s *ServerConfig) ApplyDefaults() {
 	if s.CircuitBreaker.RecoveryTimeout == 0 {
 		s.CircuitBreaker.RecoveryTimeout = Duration(60 * time.Second)
 	}
+}
+
+// MaxRestartCount returns the configured limit, defaulting safely for
+// programmatically constructed configs that have not had defaults applied.
+func (s *ServerConfig) MaxRestartCount() int {
+	if s == nil || s.MaxRestarts == nil {
+		return 5
+	}
+	return *s.MaxRestarts
 }
 
 func (s *ServerConfig) applyAvailabilityProfileDefaults() {

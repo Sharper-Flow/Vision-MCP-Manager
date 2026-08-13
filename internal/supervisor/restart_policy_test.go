@@ -149,6 +149,30 @@ func TestRestartTrackerSlidingWindowAndCappedBackoff(t *testing.T) {
 	}
 }
 
+func TestRestartTrackerWindowCountPrunesButTotalIsCumulative(t *testing.T) {
+	clock := &restartTestClock{now: time.Unix(4000, 0)}
+	tracker := newRestartTracker(10, time.Second, time.Second, clock.Now, clock.Sleep)
+	ctx := context.Background()
+	if err := tracker.BeforeStart(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := tracker.BeforeStart(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock.now = clock.now.Add(5*time.Minute + time.Second)
+	if err := tracker.BeforeStart(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := tracker.Count(); got != 1 {
+		t.Fatalf("current-window count=%d, want 1", got)
+	}
+	if got := tracker.Total(); got != 4 {
+		t.Fatalf("cumulative total=%d, want 4", got)
+	}
+}
+
 func TestRestartTrackerCancellationDoesNotConsumeAttempt(t *testing.T) {
 	clock := &restartTestClock{now: time.Unix(3000, 0)}
 	tracker := newRestartTracker(1, time.Second, time.Second, clock.Now, clock.Sleep)

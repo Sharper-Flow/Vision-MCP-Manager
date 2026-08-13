@@ -308,9 +308,9 @@ func TestManagedProcess_Serve_Echo(t *testing.T) {
 		t.Errorf("State = %q, want %q", proc.State(), StateStopped)
 	}
 
-	// Should have been restarted once (exited)
-	if proc.RestartCount() != 1 {
-		t.Errorf("RestartCount = %d, want 1", proc.RestartCount())
+	// RestartCount tracks automatic restart attempts, not child exits.
+	if proc.RestartCount() != 0 {
+		t.Errorf("RestartCount = %d, want 0", proc.RestartCount())
 	}
 }
 

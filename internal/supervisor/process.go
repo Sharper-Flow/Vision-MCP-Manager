@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
@@ -45,6 +44,7 @@ type ManagedProcess struct {
 	tokenGenerator    func() (string, error)
 	procReader        ownership.ProcReader
 	signaler          ownership.Signaler
+	restartTracker    *restartTracker
 
 	// Suture integration
 	token suture.ServiceToken
@@ -77,6 +77,14 @@ func WithSignaler(signaler ownership.Signaler) ProcessOption {
 	return func(p *ManagedProcess) { p.signaler = signaler }
 }
 
+// WithRestartClock injects the restart clock and sleep implementation. It is
+// useful for deterministic policy tests and preserves cancellation semantics.
+func WithRestartClock(now func() time.Time, sleep func(context.Context, time.Duration) error) ProcessOption {
+	return func(p *ManagedProcess) {
+		p.restartTracker = newRestartTracker(p.config.MaxRestartCount(), p.supConfig.RestartDelay.Duration(), p.supConfig.MaxRestartDelay.Duration(), now, sleep)
+	}
+}
+
 func NewManagedProcessWithOwnership(name string, cfg *config.ServerConfig, supCfg config.SupervisionConfig, logger *slog.Logger, store ownership.LeaseStore, daemonID string, options ...ProcessOption) *ManagedProcess {
 	p := &ManagedProcess{
 		name:           name,
@@ -91,6 +99,7 @@ func NewManagedProcessWithOwnership(name string, cfg *config.ServerConfig, supCf
 		procReader:     ownership.NewLinuxProcReader(""),
 		signaler:       ownership.NewSignaler(),
 	}
+	p.restartTracker = newRestartTracker(cfg.MaxRestartCount(), supCfg.RestartDelay.Duration(), supCfg.MaxRestartDelay.Duration(), nil, nil)
 	for _, option := range options {
 		option(p)
 	}
@@ -100,6 +109,22 @@ func NewManagedProcessWithOwnership(name string, cfg *config.ServerConfig, supCf
 // Serve implements suture.Service.
 // It spawns the subprocess and blocks until it exits or context is cancelled.
 func (p *ManagedProcess) Serve(ctx context.Context) error {
+	if err := p.restartTracker.BeforeStart(ctx); err != nil {
+		p.mu.Lock()
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			p.state = StateStopped
+		} else {
+			p.state = StateFailed
+			p.lastError = err
+		}
+		p.mu.Unlock()
+		p.notifyLifecycle()
+		return err
+	}
+	p.mu.Lock()
+	p.restartCount = p.restartTracker.Total()
+	p.mu.Unlock()
+
 	p.mu.Lock()
 	p.state = StateStarting
 	p.mu.Unlock()
@@ -115,31 +140,19 @@ func (p *ManagedProcess) Serve(ctx context.Context) error {
 
 	if transport == config.TransportManagedHTTP {
 		if err := p.prepareOwnerToken(); err != nil {
-			p.mu.Lock()
-			p.state, p.lastError = StateCrashed, err
-			p.mu.Unlock()
-			return err
+			return p.finishExit(err)
 		}
 	}
 	// Spawn the subprocess
 	if err := p.spawn(ctx); err != nil {
-		p.mu.Lock()
-		p.state = StateCrashed
-		p.lastError = err
-		p.mu.Unlock()
-		p.notifyLifecycle()
-		return err
+		return p.finishExit(err)
 	}
 	if transport == config.TransportManagedHTTP && p.leaseStore != nil {
 		if err := p.recordLease(); err != nil {
 			_ = p.forceKill()
 			_ = p.cmd.Wait()
 			_ = p.waitGroupEmpty(p.supConfig.ShutdownTimeout.Duration())
-			p.mu.Lock()
-			p.state = StateCrashed
-			p.lastError = err
-			p.mu.Unlock()
-			return err
+			return p.finishExit(err)
 		}
 	}
 
@@ -182,9 +195,7 @@ func (p *ManagedProcess) spawn(_ context.Context) error {
 	p.cmd = exec.Command(cmdPath, p.config.Args...)
 
 	// Set up process group for clean termination
-	p.cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true, // Create new process group
-	}
+	configureProcessGroup(p.cmd)
 
 	// Merge environment variables
 	p.cmd.Env = p.buildEnv()
@@ -305,28 +316,13 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 	case err := <-done:
 		cleanupErr := p.releaseLeaseIfEmpty(p.supConfig.ShutdownTimeout.Duration())
 		// Process exited
-		p.mu.Lock()
-		p.restartCount++
-		if err != nil {
-			p.state = StateCrashed
-			p.lastError = err
-			p.logger.Warn("server exited with error",
-				slog.String("error", err.Error()),
-				slog.Int("restarts", p.restartCount),
-			)
-		} else {
-			p.state = StateStopped
-			p.logger.Info("server exited normally")
-		}
-		p.mu.Unlock()
-		p.notifyLifecycle()
 		if cleanupErr != nil && err == nil {
-			return cleanupErr
+			err = cleanupErr
 		}
 		if cleanupErr != nil && err != nil {
-			return errors.Join(err, cleanupErr)
+			err = errors.Join(err, cleanupErr)
 		}
-		return err
+		return p.finishExit(err)
 
 	case <-ctx.Done():
 		// Graceful shutdown requested
@@ -360,6 +356,36 @@ func (p *ManagedProcess) wait(ctx context.Context) error {
 		p.notifyLifecycle()
 		return ctx.Err()
 	}
+}
+
+// finishExit records the child outcome and returns either the original exit
+// error (allowing suture to invoke Serve again) or a terminal error when the
+// configured policy declines a restart.
+func (p *ManagedProcess) finishExit(exit error) error {
+	retry, state := restartDisposition(p.config.RestartPolicy, exit)
+	p.mu.Lock()
+	p.state = state
+	if exit != nil && exit != errCleanRestart {
+		p.lastError = exit
+	}
+	p.mu.Unlock()
+	p.notifyLifecycle()
+	if retry {
+		if exit == nil {
+			return errCleanRestart
+		}
+		return exit
+	}
+	// A programmatically constructed config with an omitted policy retains the
+	// historical direct-Serve behavior for a clean exit. Loaded configs always
+	// receive RestartOnFailure during ApplyDefaults.
+	if exit == nil && p.config.RestartPolicy == "" {
+		return nil
+	}
+	if exit == nil {
+		return suture.ErrDoNotRestart
+	}
+	return fmt.Errorf("%w: %v", suture.ErrDoNotRestart, exit)
 }
 
 func (p *ManagedProcess) waitGroupEmpty(timeout time.Duration) error {
@@ -421,10 +447,12 @@ func (p *ManagedProcess) terminate() error {
 	}
 	p.mu.RUnlock()
 
-	// Send SIGTERM to process group (negative PID)
-	if err := p.signaler.GroupSignal(pid, syscall.SIGTERM); err != nil {
+	// Linux uses the ownership signaler. Other platforms use their platform
+	// helper so cancellation still terminates the direct child when ownership
+	// reconciliation is intentionally unsupported.
+	if err := p.gracefulSignal(pid); err != nil {
 		// Process might already be dead
-		if !errors.Is(err, syscall.ESRCH) {
+		if !isProcessNotFound(err) {
 			p.logger.Debug("failed to send SIGTERM to process group",
 				slog.String("error", err.Error()),
 			)
@@ -447,13 +475,27 @@ func (p *ManagedProcess) forceKill() error {
 	}
 	p.mu.RUnlock()
 
-	if err := p.signaler.GroupSignal(pid, syscall.SIGKILL); err != nil {
-		if !errors.Is(err, syscall.ESRCH) {
+	if err := p.killSignal(pid); err != nil {
+		if !isProcessNotFound(err) {
 			return fmt.Errorf("failed to send SIGKILL: %w", err)
 		}
 	}
 
 	return nil
+}
+
+func (p *ManagedProcess) gracefulSignal(pid int) error {
+	if p.signaler != nil && p.signaler.Supported() {
+		return signalManagedProcessGroup(p.signaler, pid, false)
+	}
+	return terminateProcessGroup(p.cmd)
+}
+
+func (p *ManagedProcess) killSignal(pid int) error {
+	if p.signaler != nil && p.signaler.Supported() {
+		return signalManagedProcessGroup(p.signaler, pid, true)
+	}
+	return forceKillProcessGroup(p.cmd)
 }
 
 // collectStderr reads stderr and logs it to prevent stream corruption.

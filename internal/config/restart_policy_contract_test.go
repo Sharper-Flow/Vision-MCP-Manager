@@ -1,10 +1,22 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestServerConfigRejectsNegativeMaxRestarts(t *testing.T) {
+	negative := -1
+	server := ServerConfig{Port: 6276, Command: "echo", MaxRestarts: &negative}
+	if err := server.Validate("negative"); !errors.Is(err, ErrInvalidMaxRestarts) {
+		t.Fatalf("Validate() error=%v, want ErrInvalidMaxRestarts", err)
+	}
+	if _, err := ParseYAML("servers:\n  test:\n    port: 6276\n    command: echo\n    max_restarts: -1\n"); !errors.Is(err, ErrInvalidMaxRestarts) {
+		t.Fatalf("ParseYAML() error=%v, want ErrInvalidMaxRestarts", err)
+	}
+}
 
 func TestLoadMaxRestartsDistinguishesOmittedFromExplicitZero(t *testing.T) {
 	for _, tc := range []struct {
