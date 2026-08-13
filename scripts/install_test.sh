@@ -2,14 +2,13 @@
 set -uo pipefail
 
 # Exercise configure_opencode without running the installer's main function.
-# The production script currently invokes main unconditionally, so source only
-# the function definitions before that invocation. This keeps the test from
-# downloading binaries, installing services, or touching the real HOME.
+# The production script has a sourceability guard, so source it directly. This
+# keeps the test from downloading binaries, installing services, or touching
+# the real HOME.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALLER="${SCRIPT_DIR}/install.sh"
 TEST_ROOT="$(mktemp -d)"
-EXTRACTED="${TEST_ROOT}/install-functions.sh"
 CONTROLLED_PATH="${TEST_ROOT}/bin"
 FAILURES=0
 
@@ -28,25 +27,10 @@ if [[ ! -f "$INSTALLER" ]]; then
     exit 1
 fi
 
-# Stop before the current unguarded main invocation. Keep the extraction
-# assertion explicit so a future installer change cannot silently execute the
-# installer from this test.
-awk '
-    /^[[:space:]]*main[[:space:]]+"\$@"[[:space:]]*$/ { exit }
-    { print }
-' "$INSTALLER" > "$EXTRACTED"
-
-if ! grep -q '^configure_opencode()[[:space:]]*{' "$EXTRACTED"; then
-    fail "configure_opencode was not extracted"
-fi
-if grep -q '^[[:space:]]*main[[:space:]]*"\$@"' "$EXTRACTED"; then
-    fail "extracted source still contains the installer entrypoint"
-fi
-
-# Deliberately exclude the host PATH (and jq). This makes the no-jq branch
-# deterministic while retaining only commands configure_opencode needs.
+# Deliberately exclude the host PATH (and jq). This keeps the test independent
+# of merge tooling while retaining only commands configure_opencode needs.
 mkdir -p "$CONTROLLED_PATH"
-for command_name in cat mkdir mktemp mv; do
+for command_name in cat chmod mkdir mktemp mv rm stat; do
     ln -s "$(command -v "$command_name")" "${CONTROLLED_PATH}/${command_name}"
 done
 
@@ -68,7 +52,7 @@ invoke_configure() {
             source "$1"
             [[ "$HOME" == "$2" ]]
             configure_opencode
-        ' test-shell "$EXTRACTED" "$case_home" 2>&1
+        ' test-shell "$INSTALLER" "$case_home" 2>&1
     ); then
         CASE_STATUS=0
     else
@@ -79,16 +63,13 @@ invoke_configure() {
 assert_guidance() {
     local output="$1"
     local label="$2"
-    local token
-    for token in existing manual vision_init restart; do
-        if [[ "$token" == vision_init ]]; then
-            if ! [[ "$output" =~ vision[_[:space:]]init ]]; then
-                fail "$label guidance omits vision_init"
-            fi
-        elif ! [[ "${output,,}" == *"$token"* ]]; then
-            fail "$label guidance omits $token"
-        fi
-    done
+    local expected_path="$3"
+    [[ "${output,,}" == *existing* ]] || fail "$label guidance omits existing"
+    [[ "${output,,}" == *manual* ]] || fail "$label guidance omits manual"
+    [[ "${output,,}" == *"admin mcp tool"* ]] || fail "$label guidance omits Admin MCP/tool context"
+    [[ "$output" == *"vision_init"* ]] || fail "$label guidance omits vision_init"
+    [[ "$output" == *"path: $expected_path"* ]] || fail "$label guidance omits exact config path"
+    [[ "${output,,}" == *restart* ]] || fail "$label guidance omits restart"
 }
 
 assert_vision_declaration() {
@@ -100,6 +81,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     document = json.load(stream)
 vision = document["mcp"]["vision"]
+assert document["$schema"] == "https://opencode.ai/config.json"
 assert vision == {
     "type": "remote",
     "url": "http://localhost:6275/mcp",
@@ -125,7 +107,12 @@ run_none_case() {
     fi
     [[ -f "$jsonc_file" ]] || fail "none case did not create opencode.jsonc"
     [[ ! -e "$json_file" ]] || fail "none case created legacy opencode.json"
-    [[ -f "$jsonc_file" ]] && assert_vision_declaration "$jsonc_file"
+    if [[ -f "$jsonc_file" ]]; then
+        assert_vision_declaration "$jsonc_file"
+        local mode
+        mode=$(stat -c '%a' "$jsonc_file")
+        [[ "$mode" == 600 ]] || fail "none case created opencode.jsonc with mode $mode instead of 600"
+    fi
 }
 
 run_existing_case() {
@@ -147,7 +134,7 @@ run_existing_case() {
     if ! cmp -s <(printf '%s' "$sentinel") "$config_file"; then
         fail "$name sentinel bytes changed"
     fi
-    assert_guidance "$CASE_OUTPUT" "$name"
+    assert_guidance "$CASE_OUTPUT" "$name" "$config_file"
 }
 
 run_both_case() {
@@ -163,9 +150,8 @@ run_both_case() {
     printf '%b' "$json_sentinel" > "$json_file"
 
     invoke_configure "$case_home"
-    if [[ "$CASE_STATUS" -eq 0 && ! "${CASE_OUTPUT,,}" =~ ambiguous ]]; then
-        fail "both case neither returned nonzero nor reported ambiguity"
-    fi
+    [[ "$CASE_STATUS" -ne 0 ]] || fail "both case returned success instead of nonzero"
+    [[ "${CASE_OUTPUT,,}" =~ ambiguous ]] || fail "both case did not report ambiguity"
     if ! cmp -s <(printf '%b' "$jsonc_sentinel") "$jsonc_file"; then
         fail "both case changed JSONC sentinel bytes"
     fi

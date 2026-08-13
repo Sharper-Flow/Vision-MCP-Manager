@@ -308,40 +308,44 @@ migrate_from_mcpm() {
 configure_opencode() {
     log_info "Configuring OpenCode integration..."
     
-    local opencode_config="${HOME}/.config/opencode/opencode.json"
     local opencode_dir="${HOME}/.config/opencode"
+    local opencode_jsonc="${opencode_dir}/opencode.jsonc"
+    local opencode_json="${opencode_dir}/opencode.json"
     
     # Create directory if needed
     mkdir -p "$opencode_dir"
     
-    # Check if config exists
-    if [[ -f "$opencode_config" ]]; then
-        # Config exists - check if jq is available for merging
-        if command -v jq &>/dev/null; then
-            log_info "Merging Vision MCP servers into existing OpenCode config..."
-            
-            # Create temp file with Vision MCP config
-            local vision_mcp='{
-                "vision": {"type": "remote", "url": "http://localhost:6275/mcp", "enabled": true}
-            }'
-            
-            # Merge into existing config
-            local tmp_config=$(mktemp)
-            jq --argjson vision "$vision_mcp" '.mcp = (.mcp // {}) + $vision' "$opencode_config" > "$tmp_config"
-            mv "$tmp_config" "$opencode_config"
-            
-            log_success "Added Vision admin server to OpenCode config"
-            log_info "Note: Add individual servers (context7, kagimcp, etc.) based on your servers.yaml"
-        else
-            log_warn "jq not found - cannot merge config automatically"
-            log_info "Add the following to your OpenCode config manually:"
-            echo '    "vision": {"type": "remote", "url": "http://localhost:6275/mcp", "enabled": true}'
-        fi
-    else
-        # Create new config with Vision
-        log_info "Creating new OpenCode config with Vision..."
-        cat > "$opencode_config" <<'JSON'
+    if [[ -e "$opencode_jsonc" && -e "$opencode_json" ]]; then
+        log_error "Ambiguous OpenCode configuration: both existing config files are present: $opencode_jsonc and $opencode_json"
+        return 1
+    fi
+
+    local existing_config=""
+    if [[ -e "$opencode_jsonc" ]]; then
+        existing_config="$opencode_jsonc"
+    elif [[ -e "$opencode_json" ]]; then
+        existing_config="$opencode_json"
+    fi
+
+    if [[ -n "$existing_config" ]]; then
+        log_warn "Existing config found at $existing_config; leaving it unchanged."
+        log_info "Add the Vision MCP declaration manually to the existing config."
+        log_info "Call the Vision Admin MCP tool vision_init with path: $existing_config, then restart OpenCode."
+        return 0
+    fi
+
+    log_info "Creating new OpenCode config with Vision..."
+    (
+        local tmp_config
+        tmp_config=$(mktemp "${opencode_dir}/.opencode.jsonc.XXXXXX")
+        cleanup_tmp_config() {
+            rm -f -- "$tmp_config"
+        }
+        trap cleanup_tmp_config EXIT HUP INT TERM
+        chmod 600 "$tmp_config"
+        cat > "$tmp_config" <<'JSON'
 {
+  "$schema": "https://opencode.ai/config.json",
   "mcp": {
     "vision": {
       "type": "remote",
@@ -351,8 +355,11 @@ configure_opencode() {
   }
 }
 JSON
-        log_success "Created OpenCode config with Vision admin server"
-    fi
+        mv -f -- "$tmp_config" "$opencode_jsonc"
+        trap - EXIT HUP INT TERM
+    )
+    log_success "Created OpenCode config with Vision admin server at $opencode_jsonc"
+    log_info "Restart OpenCode to load the new configuration."
     
     log_info "Vision admin tools available: vision_list, vision_add, vision_remove, vision_status"
     log_info "Use vision_list to see available MCP servers and their ports"
@@ -446,4 +453,6 @@ main() {
     echo ""
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
