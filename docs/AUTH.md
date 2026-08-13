@@ -77,13 +77,17 @@ If you expose Vision to a network (not recommended without additional hardening)
 
 ### Status warning: "No bearer_token configured"
 
-Run `vision daemon status` — if you see:
+Vision does not warn when its listeners use the built-in `127.0.0.1` binding.
+An empty token is supported for this single-machine mode.
+
+A listener classified as network-exposed without a token reports:
 
 ```
-⚠ No bearer_token configured — see docs/AUTH.md for secure setup
+⚠ No bearer_token configured on a network-exposed listener — see docs/AUTH.md for secure setup
 ```
 
-This is informational for single-machine deployments. To suppress it, set any `bearer_token` value in your `servers.yaml`.
+Set `bearer_token` before exposing Vision through a network listener or reverse
+proxy. The warning never includes the configured token.
 
 ### Token not expanding from environment
 

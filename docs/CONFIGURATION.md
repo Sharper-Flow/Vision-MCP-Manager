@@ -50,7 +50,8 @@ servers:
     # Restart policy: always, on-failure, never
     restart_policy: on-failure
     
-    # Maximum restart attempts (default: 5)
+    # Maximum automatic restarts in a five-minute window (default: 5).
+    # Set 0 to disable automatic restarts while keeping the chosen policy.
     max_restarts: 5
     
     # Idle session timeout (default: 5m).
@@ -106,6 +107,30 @@ supervision:
   # Maximum restart delay (default: 60s)
   max_restart_delay: 60s
 ```
+
+### Managed process restart policy
+
+Vision applies restart settings to each managed process. The first launch does
+not consume the restart budget.
+
+| `restart_policy` | Clean exit | Failed exit |
+|---|---|---|
+| `never` | Stop | Fail without restarting |
+| `on-failure` | Stop | Restart while budget remains |
+| `always` | Restart while budget remains | Restart while budget remains |
+
+Each automatic restart waits `restart_delay * 2^(attempt-1)`, capped by
+`max_restart_delay`. `max_restarts` limits automatic restarts in a rolling
+five-minute window. When the budget is exhausted, status becomes `error`, the
+raw process state becomes `failed`, and the reason names restart exhaustion.
+`vision_restart` creates a fresh managed process and resets this budget.
+
+For `managed-http`, Vision also stores a private ownership lease for each
+process generation. After an abrupt daemon exit, the next Linux daemon reclaims
+the old process group only when every live member matches that lease. Unknown,
+mixed, or unverifiable groups are never killed; startup fails with a conflict.
+Automatic managed-process recovery is not available on non-Linux systems and
+fails closed before publishing the backend as running.
 
 ### Multi-agent / ADV workloads
 
@@ -226,7 +251,16 @@ vision daemon reload
 vision daemon status
 ```
 
-The admin `vision_list` result and `GET /v1/servers/playwright` include `session_lifecycle`: backend state, capacity, up to 100 active rows, up to 1,000 closed rows, omitted counts, safe ID, age, application idle, in-flight, SSE count, and lifecycle reason. Raw MCP session IDs are never exposed.
+The admin `vision_list` result and `GET /v1/servers/playwright` include
+`session_lifecycle`: backend state, capacity, up to 100 active rows, up to 1,000
+closed rows, omitted counts, safe ID, age, application idle, in-flight, SSE
+count, and lifecycle reason. Raw MCP session IDs are never exposed.
+
+`vision_list.status` is the effective managed status. The V1 endpoint preserves
+its existing raw `state` field and adds `process_state`, `effective_status`, and
+an optional `effective_reason`. A recycling or restarting backend reports
+effective `error`, never `running`; a ready backend with a running process
+reports `running`.
 
 #### Native HTTP server (proxy mode)
 
