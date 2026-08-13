@@ -53,7 +53,7 @@ func (s *Server) getTools() []Tool {
 	return []Tool{
 		{
 			Name:        "vision_list",
-			Description: "List all registered MCP servers with their current status (running/stopped/failed)",
+			Description: "List all registered MCP servers with their current effective status (running/starting/stopped/error)",
 			InputSchema: InputSchema{
 				Type:       "object",
 				Properties: map[string]Property{},

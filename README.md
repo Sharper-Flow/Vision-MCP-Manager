@@ -246,7 +246,7 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 
 | Tool | What It Does |
 |------|--------------|
-| `vision_list` | Show all servers with status (running/stopped/error) |
+| `vision_list` | Show all servers with effective status (`running`, `starting`, `stopped`, or `error`) |
 | `vision_add` | Provision and start a new server from the catalog |
 | `vision_remove` | Stop and remove a server |
 | `vision_search` | Find servers by name or capability |

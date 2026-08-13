@@ -86,6 +86,9 @@ A listener classified as network-exposed without a token reports:
 ⚠ No bearer_token configured on a network-exposed listener — see docs/AUTH.md for secure setup
 ```
 
+The warning appears in the Admin MCP `vision_status.warnings` response, not in
+`vision daemon status`.
+
 Set `bearer_token` before exposing Vision through a network listener or reverse
 proxy. The warning never includes the configured token.
 

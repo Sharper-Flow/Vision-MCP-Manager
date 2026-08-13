@@ -151,7 +151,7 @@ const VisionPlugin: Plugin = async ({ client, directory }) => {
     tool: {
       [VISION_PLUGIN_TOOL_NAMES.list]: tool({
         description:
-          "List all registered MCP servers with their current status (running/stopped/failed)",
+          "List all registered MCP servers with their current effective status (running/starting/stopped/error)",
         args: {},
         execute: async () => await visionList(),
       }),

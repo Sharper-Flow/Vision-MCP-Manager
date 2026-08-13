@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -14,7 +15,28 @@ import (
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
+	"github.com/thejerf/suture/v4"
 )
+
+func TestEventHookConcurrentTerminate(t *testing.T) {
+	hook := eventHook(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	const calls = 64
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(calls)
+	for range calls {
+		go func() {
+			defer wg.Done()
+			<-start
+			hook(suture.EventServiceTerminate{
+				ServiceName: "concurrent",
+				Err:         errors.New("exit status 1"),
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+}
 
 type fakeLeaseStore struct {
 	mu            sync.Mutex

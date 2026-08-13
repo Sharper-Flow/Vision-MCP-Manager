@@ -173,6 +173,7 @@ func (s *Supervisor) Servers() []string {
 // eventHook creates a suture EventHook that logs lifecycle events.
 func eventHook(logger *slog.Logger) suture.EventHook {
 	var prevTerminate suture.EventServiceTerminate
+	var prevTerminateMu sync.Mutex
 
 	return func(ei suture.Event) {
 		m := ei.Map()
@@ -193,9 +194,13 @@ func eventHook(logger *slog.Logger) suture.EventHook {
 		case suture.EventServiceTerminate:
 			// Suppress duplicate consecutive failures
 			errStr := fmt.Sprintf("%v", e.Err)
+			prevTerminateMu.Lock()
 			prevErrStr := fmt.Sprintf("%v", prevTerminate.Err)
-			if e.ServiceName == prevTerminate.ServiceName && e.Err != nil && prevTerminate.Err != nil &&
-				errStr == prevErrStr {
+			repeated := e.ServiceName == prevTerminate.ServiceName && e.Err != nil && prevTerminate.Err != nil &&
+				errStr == prevErrStr
+			prevTerminate = e
+			prevTerminateMu.Unlock()
+			if repeated {
 				l.Debug("service failed repeatedly",
 					slog.String("error", errStr),
 				)
@@ -208,8 +213,6 @@ func eventHook(logger *slog.Logger) suture.EventHook {
 					l.Info("service terminated normally")
 				}
 			}
-			prevTerminate = e
-
 		case suture.EventBackoff:
 			l.Debug("exiting backoff state")
 

@@ -15,7 +15,7 @@ By giving an agent access to Vision's Admin port, you empower it to maintain its
 
 | Tool | Purpose |
 | :--- | :--- |
-| `vision_list` | Shows all configured servers and their current health. |
+| `vision_list` | Shows all configured servers and their effective status: `running`, `starting`, `stopped`, or `error`. See [Configuration Reference](CONFIGURATION.md) for lifecycle configuration. |
 | `vision_status` | Returns daemon uptime and memory usage. |
 | `vision_search` | Finds new MCP servers in the local catalog. |
 | `vision_add` | Provisions a new server from the catalog. |
