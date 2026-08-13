@@ -3,6 +3,7 @@
 package supervisor
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -101,17 +102,50 @@ func (s *Supervisor) AddServer(name string, serverCfg *config.ServerConfig) (*Ma
 
 // RemoveServer unregisters and stops a server.
 func (s *Supervisor) RemoveServer(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.RemoveServerAndWait(context.Background(), name)
+}
 
+// RemoveServerAndWait unregisters a service and waits for its Serve method to
+// finish. This keeps registry shutdown truthful: callers must not clear a
+// process reference or its ownership lease before process-group cleanup ends.
+func (s *Supervisor) RemoveServerAndWait(ctx context.Context, name string) error {
+	s.mu.Lock()
 	proc, exists := s.services[name]
 	if !exists {
+		s.mu.Unlock()
 		return fmt.Errorf("server %q not found", name)
 	}
+	timeout := s.config.ShutdownTimeout.Duration()
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			s.mu.Unlock()
+			return ctx.Err()
+		}
+		if timeout <= 0 || remaining < timeout {
+			timeout = remaining
+		}
+	}
+	s.mu.Unlock()
 
-	// Remove from suture (this will stop it)
-	_ = s.Remove(proc.token)
-	delete(s.services, name)
+	// A live Serve invocation needs RemoveAndWait: Suture Remove alone is
+	// asynchronous, so the registry could otherwise report cleanup before the
+	// process group and lease are gone. Terminal services have already returned
+	// from Serve and completed their exit cleanup, so ordinary removal avoids
+	// asking an unstarted supervisor to wait.
+	if state := proc.State(); state == StateRunning || state == StateStarting {
+		if err := s.RemoveAndWait(proc.token, timeout); err != nil {
+			return fmt.Errorf("stop server %q: %w", name, err)
+		}
+	} else {
+		_ = s.Remove(proc.token)
+	}
+
+	s.mu.Lock()
+	if s.services[name] == proc {
+		delete(s.services, name)
+	}
+	s.mu.Unlock()
 
 	s.logger.Info("removed server", slog.String("name", name))
 	return nil

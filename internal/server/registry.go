@@ -302,6 +302,10 @@ func (r *Registry) Start(name string) error {
 
 // Stop halts a running server.
 func (r *Registry) Stop(name string) error {
+	return r.stop(context.Background(), name)
+}
+
+func (r *Registry) stop(ctx context.Context, name string) error {
 	r.mu.Lock()
 	srv, exists := r.servers[name]
 	if !exists {
@@ -320,12 +324,12 @@ func (r *Registry) Stop(name string) error {
 	// For stdio servers (where Process is nil), skip supervisor removal.
 	// For non-stdio servers, remove from supervisor (which stops the process).
 	if srv.Process != nil {
-		if err := r.supervisor.RemoveServer(name); err != nil {
-			// Log but don't fail - server might already be gone
-			r.logger.Debug("remove from supervisor failed",
-				slog.String("name", name),
-				slog.String("error", err.Error()),
-			)
+		if err := r.supervisor.RemoveServerAndWait(ctx, name); err != nil {
+			r.mu.Lock()
+			srv.State = StateFailed
+			srv.LastError = err
+			r.mu.Unlock()
+			return fmt.Errorf("stop server %s: %w", name, err)
 		}
 	}
 
@@ -450,7 +454,7 @@ func (r *Registry) StopAll(ctx context.Context) error {
 		default:
 		}
 
-		if err := r.Stop(name); err != nil {
+		if err := r.stop(ctx, name); err != nil {
 			errs = append(errs, err)
 		}
 	}
