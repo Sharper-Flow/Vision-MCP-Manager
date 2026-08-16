@@ -157,6 +157,35 @@ func TestServerMetrics_BasicOperations(t *testing.T) {
 	}
 }
 
+func TestNormalizeReapReason(t *testing.T) {
+	tests := map[string]string{
+		"never_streamed":      "never_streamed",
+		"client_disconnected": "client_disconnected",
+		"genuinely unknown":   "unknown",
+	}
+	for input, want := range tests {
+		if got := NormalizeReapReason(input); got != want {
+			t.Errorf("NormalizeReapReason(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestServerMetrics_BackendHeaderTimeoutIsIndependentFromReaps(t *testing.T) {
+	m := NewServerMetrics()
+
+	m.IncBackendHeaderTimeout()
+	m.IncBackendHeaderTimeout()
+	m.IncReaped("client_disconnected")
+
+	s := m.Snapshot()
+	if s.BackendHeaderTimeout != 2 {
+		t.Errorf("BackendHeaderTimeout = %d, want 2", s.BackendHeaderTimeout)
+	}
+	if _, ok := s.ReapedByReason["backend_header_timeout"]; ok {
+		t.Error("backend header timeout should not appear in ReapedByReason")
+	}
+}
+
 func TestServerMetrics_NormalizesReapReasons(t *testing.T) {
 	m := NewServerMetrics()
 

@@ -71,13 +71,15 @@ func (m *DaemonMetrics) Snapshot() Snapshot {
 
 // ServerMetricsSnapshot holds a point-in-time copy of per-server metrics.
 type ServerMetricsSnapshot struct {
-	ActiveSessions  int64            `json:"active_sessions"`
-	ReapedByReason  map[string]int64 `json:"reaped_by_reason"`
-	AdmissionDenied int64            `json:"admission_denied"`
+	ActiveSessions       int64            `json:"active_sessions"`
+	ReapedByReason       map[string]int64 `json:"reaped_by_reason"`
+	AdmissionDenied      int64            `json:"admission_denied"`
+	BackendHeaderTimeout int64            `json:"backend_header_timeout"`
 }
 
 const (
 	ReapReasonClientDisconnected = "client_disconnected"
+	ReapReasonNeverStreamed      = "never_streamed"
 	ReapReasonIdleTimeout        = "idle_timeout"
 	ReapReasonUpstreamDelete     = "upstream_delete"
 	ReapReasonSessionRemoved     = "session_removed"
@@ -89,10 +91,11 @@ const (
 )
 
 // ServerMetrics provides thread-safe per-server counters using sync/atomic.
-// Tracks active sessions, reap counts by reason, and admission denials.
+// Tracks active sessions, reap counts by reason, admission denials, and backend header timeouts.
 type ServerMetrics struct {
-	activeSessions  atomic.Int64
-	admissionDenied atomic.Int64
+	activeSessions       atomic.Int64
+	admissionDenied      atomic.Int64
+	backendHeaderTimeout atomic.Int64
 
 	mu             sync.Mutex
 	reapedByReason map[string]int64
@@ -129,6 +132,11 @@ func (m *ServerMetrics) IncAdmissionDenied() {
 	m.admissionDenied.Add(1)
 }
 
+// IncBackendHeaderTimeout atomically increments the backend header timeout counter.
+func (m *ServerMetrics) IncBackendHeaderTimeout() {
+	m.backendHeaderTimeout.Add(1)
+}
+
 // IncReaped increments the reap counter for the given reason.
 // Reasons are normalized to bounded canonical keys before counting.
 func (m *ServerMetrics) IncReaped(reason string) {
@@ -144,6 +152,8 @@ func NormalizeReapReason(reason string) string {
 	switch reason {
 	case ReapReasonClientDisconnected:
 		return ReapReasonClientDisconnected
+	case ReapReasonNeverStreamed:
+		return ReapReasonNeverStreamed
 	case ReapReasonIdleTimeout, "idle timeout":
 		return ReapReasonIdleTimeout
 	case ReapReasonUpstreamDelete, "upstream delete":
@@ -173,8 +183,9 @@ func (m *ServerMetrics) Snapshot() ServerMetricsSnapshot {
 	m.mu.Unlock()
 
 	return ServerMetricsSnapshot{
-		ActiveSessions:  m.activeSessions.Load(),
-		ReapedByReason:  reaped,
-		AdmissionDenied: m.admissionDenied.Load(),
+		ActiveSessions:       m.activeSessions.Load(),
+		ReapedByReason:       reaped,
+		AdmissionDenied:      m.admissionDenied.Load(),
+		BackendHeaderTimeout: m.backendHeaderTimeout.Load(),
 	}
 }
