@@ -576,6 +576,43 @@ func TestLeaseManagerExpireEligibleFreshNeverStreamedLeaseSurvives(t *testing.T)
 	}
 }
 
+func TestLeaseManagerExpireEligibleSmallGracePreservesHandshakeWindow(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1500, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(1, 0, time.Millisecond, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "handshake"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A realistic initialize-to-GET interval must not trigger never-streamed
+	// expiry even when disconnect grace is configured very small.
+	clock.Advance(time.Second)
+	if got := mgr.ExpireEligible(); len(got) != 0 {
+		t.Fatalf("ExpireEligible() = %v during handshake window, want no expiry", got)
+	}
+}
+
+func TestLeaseManagerExpireEligibleSmallGraceStillExpiresPastHandshakeFloor(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1600, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(1, 0, time.Millisecond, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "expired"); err != nil {
+		t.Fatal(err)
+	}
+
+	clock.Advance(neverStreamedHandshakeFloor + time.Nanosecond)
+	got := mgr.ExpireEligible()
+	if len(got) != 1 || got[0] != (ExpiredLease{SessionID: "expired", Reason: "never_streamed"}) {
+		t.Fatalf("ExpireEligible() = %v past handshake floor, want never_streamed expiry", got)
+	}
+}
+
 // With both idleTimeout and grace disabled there is no derived bound, so
 // rule 2 must not fire at all.
 func TestLeaseManagerExpireEligibleNeverStreamedDisabledWhenNoBound(t *testing.T) {

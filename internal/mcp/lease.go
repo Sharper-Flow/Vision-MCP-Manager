@@ -36,6 +36,10 @@ const (
 	LeaseStateCleanupUncertain LeaseState = "cleanup_uncertain"
 	LeaseStateClosed           LeaseState = "closed"
 	maxClosedLeaseHistory                 = 1000
+	// neverStreamedHandshakeFloor keeps a lease alive through a normal
+	// initialize-to-GET handshake. Thirty seconds comfortably exceeds
+	// realistic handshake latency, even when disconnect grace is unusually small.
+	neverStreamedHandshakeFloor = 30 * time.Second
 )
 
 // Reservation is an opaque capacity claim created before a downstream server
@@ -103,16 +107,23 @@ func NewLeaseManagerWithDisconnectGrace(maxSessions int, idleTimeout, disconnect
 	if clock == nil {
 		clock = realLeaseClock{}
 	}
-	// A lease that never opened a stream is reclaimed faster than the full idle
-	// timeout, but the bound must never resolve to 0: that would make the rule-2
-	// comparison trivially true and reap every never-streamed lease on sight.
-	// A non-positive bound disables the rule entirely.
+	// A lease that never opened a stream is reclaimed using the shorter of the
+	// configured idle/grace-derived bounds, but the bound must never resolve to
+	// 0: that would make the rule-2 comparison trivially true and reap every
+	// never-streamed lease on sight. A non-positive bound disables the rule
+	// entirely.
 	neverStreamedBound := idleTimeout
 	if disconnectGrace > 0 {
 		graceBound := 5 * disconnectGrace
 		if neverStreamedBound <= 0 || graceBound < neverStreamedBound {
 			neverStreamedBound = graceBound
 		}
+	}
+	if neverStreamedBound > 0 && neverStreamedBound < neverStreamedHandshakeFloor {
+		// Do not cap this floor back to idleTimeout: the ordinary idle rule
+		// independently reaps idle leases, while this longer bound protects a
+		// never-streamed lease from being reclaimed during its handshake.
+		neverStreamedBound = neverStreamedHandshakeFloor
 	}
 	return &LeaseManager{
 		maxSessions:        maxSessions,

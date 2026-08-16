@@ -119,7 +119,7 @@ The expiry sweep checks eligible leases in strict first-match order:
 2. `never_streamed` — the lease never opened a stream and exceeded its derived bound.
 3. `idle_timeout` — application inactivity exceeded `session_timeout`.
 
-For managed-http lease sweeps, all three rules require `inFlight == 0`, including protocol-maintenance POSTs that do not count as application activity. The derived never-streamed bound is `5 * grace`, capped by a positive idle timeout; a non-positive bound disables that rule. With disconnect grace disabled, the disconnect-deadline rule is disabled while a positive `session_timeout` still supplies the idle/never-streamed fallback. The first matching rule supplies the lifecycle and reap reason.
+For managed-http lease sweeps, all three rules require `inFlight == 0`, including protocol-maintenance POSTs that do not count as application activity. The never-streamed bound starts as `5 * grace` capped by a positive idle timeout, and is then raised to a 30s handshake floor if it would otherwise fall below it; a non-positive bound disables that rule. The floor is deliberately not capped back to `session_timeout`: the expiry sweep also runs synchronously on admission under capacity pressure, so a bound shorter than a normal `initialize`→GET handshake could reap a lease mid-connect. A short `session_timeout` is still honoured by the independent idle rule. With disconnect grace disabled, the disconnect-deadline rule is disabled while a positive `session_timeout` still supplies the idle/never-streamed fallback. The first matching rule supplies the lifecycle and reap reason.
 
 Managed-http timing derives from these server settings:
 
