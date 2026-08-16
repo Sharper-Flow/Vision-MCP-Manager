@@ -299,14 +299,17 @@ func TestLeaseManagerRequestGuardBlocksExpiryAndCompletesOnce(t *testing.T) {
 	if err := mgr.Commit(r, "session-a"); err != nil {
 		t.Fatal(err)
 	}
+	mgr.mu.Lock()
+	mgr.leases["session-a"].everStreamed = true
+	mgr.mu.Unlock()
 
 	clock.Advance(31 * time.Minute)
 	done, err := mgr.BeginRequest("session-a", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if expired := mgr.ExpireIdle(); len(expired) != 0 {
-		t.Fatalf("ExpireIdle() = %v while request in flight", expired)
+	if expired := mgr.ExpireEligible(); len(expired) != 0 {
+		t.Fatalf("ExpireEligible() = %v while request in flight", expired)
 	}
 
 	done()
@@ -315,8 +318,8 @@ func TestLeaseManagerRequestGuardBlocksExpiryAndCompletesOnce(t *testing.T) {
 		t.Fatalf("InFlight() = %d, want 0", got)
 	}
 	clock.Advance(31 * time.Minute)
-	if expired := mgr.ExpireIdle(); len(expired) != 1 || expired[0] != "session-a" {
-		t.Fatalf("ExpireIdle() = %v, want [session-a]", expired)
+	if expired := mgr.ExpireEligible(); len(expired) != 1 || expired[0] != (ExpiredLease{SessionID: "session-a", Reason: "idle_timeout"}) {
+		t.Fatalf("ExpireEligible() = %v, want [{session-a idle_timeout}]", expired)
 	}
 	if _, err := mgr.BeginRequest("session-a", true); !errors.Is(err, ErrLeaseNotActive) {
 		t.Fatalf("BeginRequest() after expiry error = %v, want ErrLeaseNotActive", err)
@@ -341,8 +344,308 @@ func TestLeaseManagerMaintenanceTrafficDoesNotRefreshActivity(t *testing.T) {
 	mgr.EndSSE("session-a")
 	clock.Advance(11 * time.Minute)
 
-	if expired := mgr.ExpireIdle(); len(expired) != 1 {
-		t.Fatalf("ExpireIdle() = %v, want one expired lease", expired)
+	if expired := mgr.ExpireEligible(); len(expired) != 1 || expired[0].Reason != "idle_timeout" {
+		t.Fatalf("ExpireEligible() = %v, want one idle_timeout lease", expired)
+	}
+}
+
+func TestLeaseManagerExpireEligibleRulesAndPrecedence(t *testing.T) {
+	tests := []struct {
+		name       string
+		idle       time.Duration
+		grace      time.Duration
+		configure  func(*leaseRecord, time.Time)
+		wantReason string
+	}{
+		{
+			name:  "client disconnected",
+			idle:  time.Hour,
+			grace: time.Minute,
+			configure: func(lease *leaseRecord, now time.Time) {
+				lease.everStreamed = true
+				lease.lastActivity = now
+				lease.disconnectDeadline = now
+			},
+			wantReason: "client_disconnected",
+		},
+		{
+			name:  "never streamed",
+			idle:  time.Hour,
+			grace: time.Minute,
+			configure: func(lease *leaseRecord, now time.Time) {
+				lease.lastActivity = now.Add(-5 * time.Minute)
+			},
+			wantReason: "never_streamed",
+		},
+		{
+			name:  "idle timeout",
+			idle:  5 * time.Minute,
+			grace: 0,
+			configure: func(lease *leaseRecord, now time.Time) {
+				lease.everStreamed = true
+				lease.lastActivity = now.Add(-5 * time.Minute)
+			},
+			wantReason: "idle_timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clock := &fakeLeaseClock{now: time.Unix(700, 0)}
+			mgr := NewLeaseManagerWithDisconnectGrace(1, tt.idle, tt.grace, clock)
+			reservation, err := mgr.Reserve()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.Commit(reservation, "session-a"); err != nil {
+				t.Fatal(err)
+			}
+			mgr.mu.Lock()
+			tt.configure(mgr.leases["session-a"], clock.Now())
+			mgr.mu.Unlock()
+
+			got := mgr.ExpireEligible()
+			want := []ExpiredLease{{SessionID: "session-a", Reason: tt.wantReason}}
+			if len(got) != len(want) || got[0] != want[0] {
+				t.Fatalf("ExpireEligible() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestLeaseManagerExpireEligiblePrecedence(t *testing.T) {
+	tests := []struct {
+		name       string
+		idle       time.Duration
+		grace      time.Duration
+		configure  func(*leaseRecord, time.Time)
+		wantReason string
+	}{
+		{
+			name:  "disconnect precedes idle",
+			idle:  time.Minute,
+			grace: time.Minute,
+			configure: func(lease *leaseRecord, now time.Time) {
+				lease.everStreamed = true
+				lease.lastActivity = now.Add(-time.Minute)
+				lease.disconnectDeadline = now.Add(-time.Second)
+			},
+			wantReason: "client_disconnected",
+		},
+		{
+			name:  "never streamed precedes idle",
+			idle:  10 * time.Minute,
+			grace: time.Minute,
+			configure: func(lease *leaseRecord, now time.Time) {
+				lease.lastActivity = now.Add(-10 * time.Minute)
+			},
+			wantReason: "never_streamed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clock := &fakeLeaseClock{now: time.Unix(800, 0)}
+			mgr := NewLeaseManagerWithDisconnectGrace(1, tt.idle, tt.grace, clock)
+			reservation, err := mgr.Reserve()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := mgr.Commit(reservation, "session-a"); err != nil {
+				t.Fatal(err)
+			}
+			mgr.mu.Lock()
+			tt.configure(mgr.leases["session-a"], clock.Now())
+			mgr.mu.Unlock()
+
+			got := mgr.ExpireEligible()
+			if len(got) != 1 || got[0].Reason != tt.wantReason {
+				t.Fatalf("ExpireEligible() = %v, want reason %q", got, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestLeaseManagerExpireEligibleNeverSweepsInflight(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(900, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(3, time.Minute, time.Minute, clock)
+	for _, id := range []string{"disconnect", "never", "idle"} {
+		reservation, err := mgr.Reserve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Commit(reservation, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr.mu.Lock()
+	mgr.leases["disconnect"].disconnectDeadline = clock.Now().Add(-time.Second)
+	mgr.leases["disconnect"].everStreamed = true
+	mgr.leases["never"].lastActivity = clock.Now().Add(-5 * time.Minute)
+	mgr.leases["idle"].everStreamed = true
+	mgr.leases["idle"].lastActivity = clock.Now().Add(-time.Minute)
+	for _, lease := range mgr.leases {
+		lease.inFlight = 1
+	}
+	mgr.mu.Unlock()
+
+	if got := mgr.ExpireEligible(); len(got) != 0 {
+		t.Fatalf("ExpireEligible() = %v with all rules elapsed in-flight", got)
+	}
+}
+
+func TestLeaseManagerExpireEligibleNeverStreamedRequiresNoStream(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1000, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(1, 10*time.Minute, time.Minute, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "session-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	mgr.EndSSE("session-a")
+	mgr.mu.Lock()
+	mgr.leases["session-a"].disconnectDeadline = time.Time{}
+	mgr.mu.Unlock()
+	clock.Advance(6 * time.Minute)
+
+	if got := mgr.ExpireEligible(); len(got) != 0 {
+		t.Fatalf("ExpireEligible() = %v after streaming, want no never_streamed expiry", got)
+	}
+}
+
+func TestLeaseManagerExpireEligibleIdleDisabledKeepsOtherRules(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1100, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(3, 0, time.Minute, clock)
+	for _, id := range []string{"disconnect", "never", "streamed"} {
+		reservation, err := mgr.Reserve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Commit(reservation, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr.mu.Lock()
+	mgr.leases["disconnect"].disconnectDeadline = clock.Now().Add(-time.Second)
+	mgr.leases["disconnect"].everStreamed = true
+	// grace 1m -> never-streamed bound is 5m even though idleTimeout is disabled.
+	mgr.leases["never"].lastActivity = clock.Now().Add(-6 * time.Minute)
+	mgr.leases["streamed"].everStreamed = true
+	mgr.leases["streamed"].lastActivity = clock.Now().Add(-time.Hour)
+	mgr.mu.Unlock()
+
+	got := mgr.ExpireEligible()
+	if len(got) != 2 || got[0] != (ExpiredLease{SessionID: "disconnect", Reason: "client_disconnected"}) || got[1] != (ExpiredLease{SessionID: "never", Reason: "never_streamed"}) {
+		t.Fatalf("ExpireEligible() = %v, want disconnect and never_streamed only", got)
+	}
+}
+
+// A never-streamed lease must not be reaped the instant it is created. When
+// idleTimeout is 0 the never-streamed bound must still derive from the grace
+// period, not collapse to 0 and make every rule-2 comparison trivially true.
+func TestLeaseManagerExpireEligibleFreshNeverStreamedLeaseSurvives(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1300, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(3, 0, time.Minute, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "fresh"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := mgr.ExpireEligible(); len(got) != 0 {
+		t.Fatalf("ExpireEligible() = %v, want no expiry for a lease created this instant", got)
+	}
+
+	// 5 * grace = 5m is the derived bound; just under it must still survive.
+	clock.Advance(4*time.Minute + 59*time.Second)
+	if got := mgr.ExpireEligible(); len(got) != 0 {
+		t.Fatalf("ExpireEligible() = %v, want no expiry before the never-streamed bound", got)
+	}
+
+	clock.Advance(2 * time.Second)
+	got := mgr.ExpireEligible()
+	if len(got) != 1 || got[0] != (ExpiredLease{SessionID: "fresh", Reason: "never_streamed"}) {
+		t.Fatalf("ExpireEligible() = %v, want never_streamed after the bound", got)
+	}
+}
+
+// With both idleTimeout and grace disabled there is no derived bound, so
+// rule 2 must not fire at all.
+func TestLeaseManagerExpireEligibleNeverStreamedDisabledWhenNoBound(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1400, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(3, 0, 0, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "fresh"); err != nil {
+		t.Fatal(err)
+	}
+
+	clock.Advance(24 * time.Hour)
+	if got := mgr.ExpireEligible(); len(got) != 0 {
+		t.Fatalf("ExpireEligible() = %v, want no expiry when every bound is disabled", got)
+	}
+}
+
+func TestLeaseManagerExpireEligibleSortsSessionIDs(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1200, 0)}
+	mgr := NewLeaseManager(3, time.Minute, clock)
+	for _, id := range []string{"z-session", "a-session", "m-session"} {
+		reservation, err := mgr.Reserve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Commit(reservation, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr.mu.Lock()
+	for _, lease := range mgr.leases {
+		lease.everStreamed = true
+		lease.lastActivity = clock.Now().Add(-time.Minute)
+	}
+	mgr.mu.Unlock()
+
+	got := mgr.ExpireEligible()
+	want := []ExpiredLease{
+		{SessionID: "a-session", Reason: "idle_timeout"},
+		{SessionID: "m-session", Reason: "idle_timeout"},
+		{SessionID: "z-session", Reason: "idle_timeout"},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ExpireEligible() = %v, want sorted %v", got, want)
+	}
+}
+
+func TestLeaseManagerExpireEligibleSkipsNonActiveLeases(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1300, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(2, time.Minute, time.Minute, clock)
+	for _, id := range []string{"expiring", "uncertain"} {
+		reservation, err := mgr.Reserve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mgr.Commit(reservation, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr.mu.Lock()
+	mgr.leases["expiring"].state = LeaseStateExpiring
+	mgr.leases["expiring"].disconnectDeadline = clock.Now().Add(-time.Second)
+	mgr.leases["uncertain"].state = LeaseStateCleanupUncertain
+	mgr.leases["uncertain"].lastActivity = clock.Now().Add(-time.Hour)
+	mgr.mu.Unlock()
+
+	if got := mgr.ExpireEligible(); len(got) != 0 {
+		t.Fatalf("ExpireEligible() = %v for non-active leases", got)
 	}
 }
 

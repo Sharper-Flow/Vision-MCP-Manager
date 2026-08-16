@@ -259,7 +259,8 @@ func (g *ManagedHTTPGateway) reserveWithPrune(ctx context.Context) (Reservation,
 // lease. Capacity is released only when the backend proves disposal with a
 // successful response or 404.
 func (g *ManagedHTTPGateway) pruneIdle(ctx context.Context) {
-	for _, sessionID := range g.leases.ExpireIdle() {
+	for _, expired := range g.leases.ExpireEligible() {
+		sessionID := expired.SessionID
 		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, g.target.String(), nil)
 		if err != nil {
 			g.leases.MarkCleanupUncertain(sessionID, "cleanup_request_invalid")
