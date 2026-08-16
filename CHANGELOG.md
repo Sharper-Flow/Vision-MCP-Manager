@@ -1,3 +1,21 @@
+## 2026-08-16 (v1.4.5)
+
+### Changed
+
+- skip daemon-proxy tool registration under Code Mode (perf: plugin)
+- checkpoint tk-5f06f82b608c (chore: adv)
+- checkpoint tk-5f06f82b608c (chore: adv)
+- checkpoint tk-34b2bcbc4b27 (chore: adv)
+- checkpoint tk-2a45464a55f9 (chore: adv)
+- checkpoint tk-d73547811504 (chore: adv)
+- checkpoint tk-0425a92edac1 (chore: adv)
+- checkpoint tk-b45ceb5c58fe (chore: adv)
+- checkpoint tk-455dcddef235 (chore: adv)
+- checkpoint tk-990a8e239baa (chore: adv)
+- checkpoint tk-48a68f298699 (chore: adv)
+- checkpoint tk-e04e573216f9 (chore: adv)
+- checkpoint tk-87078d474f62 (chore: adv)
+
 ## 2026-08-13 (v1.4.4)
 
 ### Changed
