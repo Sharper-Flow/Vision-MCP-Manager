@@ -88,6 +88,18 @@ const VisionPlugin: Plugin = async ({ client, directory }) => {
   state.daemonHealthy = initialHealth.healthy
   state.lastHealthCheck = Date.now()
 
+  // Read once, here, at factory time — this decides which tools get registered
+  // below, and registration is a one-shot event. OpenCode runs this factory
+  // exactly once per server instance and caches the returned hooks; the tool
+  // registry likewise consumes `tool` once into cached state. There is no
+  // dynamic register/unregister surface, so there is nothing to re-evaluate
+  // later. OpenCode gates Code Mode on this same variable at startup, so the
+  // plugin and the registry always agree.
+  //
+  // The check is deliberately fail-open: anything other than the literal
+  // "true" registers the full set, i.e. the pre-existing behavior.
+  const codeMode = process.env.OPENCODE_EXPERIMENTAL_CODE_MODE === "true"
+
   return {
     // ===========================================================================
     // Event Hooks
@@ -149,63 +161,89 @@ const VisionPlugin: Plugin = async ({ client, directory }) => {
     // shape. Handlers return strings, which satisfy ToolResult directly.
 
     tool: {
-      [VISION_PLUGIN_TOOL_NAMES.list]: tool({
-        description:
-          "List all registered MCP servers with their current effective status (running/starting/stopped/error)",
-        args: {},
-        execute: async () => await visionList(),
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.add]: tool({
-        description: "Add and optionally start an MCP server from the Vision registry",
-        args: VisionAddArgsSchema.shape,
-        execute: async (args) => await visionAdd(args),
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.remove]: tool({
-        description: "Stop and remove an MCP server from the active configuration",
-        args: VisionRemoveArgsSchema.shape,
-        execute: async (args) => await visionRemove(args),
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.restart]: tool({
-        description:
-          "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
-        args: VisionRestartArgsSchema.shape,
-        execute: async (args) => await visionRestart(args),
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.search]: tool({
-        description:
-          "Search the Vision registry for MCP servers by name, capability tags, or description",
-        args: VisionSearchArgsSchema.shape,
-        execute: async (args) => await visionSearch(args),
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.init]: tool({
-        description:
-          "Generate OpenCode MCP configuration (opencode.jsonc or another recognized config path) for currently running servers",
-        args: VisionInitArgsSchema.shape,
-        execute: async (args) => {
-          const path = await resolveInitPath(directory, args.path)
-          return await visionInit({ ...args, path })
-        },
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.status]: tool({
-        description: "Get Vision daemon status including uptime, memory usage, and server counts",
-        args: {},
-        execute: async () => await visionStatus(),
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.guidance]: tool({
-        description: "Get ranked tool-selection guidance for a task or specific server",
-        args: VisionGuidanceArgsSchema.shape,
-        execute: async (args) => await visionGuidance(args),
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.slotStatus]: tool({
-        description: "Get slot-group routing status and per-slot session details",
-        args: {},
-        execute: async () => await visionSlotStatus(),
-      }),
-      [VISION_PLUGIN_TOOL_NAMES.metrics]: tool({
-        description: "Get Vision daemon metrics for sessions, tool calls, errors, and subprocesses",
-        args: {},
-        execute: async () => await visionMetrics(),
-      }),
+      // Daemon-proxy tools — registered ONLY when Code Mode is off.
+      //
+      // Under Code Mode these ten are already reachable as `tools.vision.*`
+      // from the `vision` MCP server declared in the OpenCode `mcp` block, and
+      // Code Mode collapses MCP tool schemas into one `execute` tool plus a
+      // bounded catalog. Plugin-registered schemas get no such collapse, so
+      // registering them here would carry ten full schemas in every prompt for
+      // capability the session can already reach.
+      //
+      // This creates a pairing invariant: the `vision` mcp block entry is now
+      // load-bearing for Code Mode sessions and must not be removed as
+      // "redundant". See decisions/0014 in the toolbox repo.
+      ...(codeMode
+        ? {}
+        : {
+            [VISION_PLUGIN_TOOL_NAMES.list]: tool({
+              description:
+                "List all registered MCP servers with their current effective status (running/starting/stopped/error)",
+              args: {},
+              execute: async () => await visionList(),
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.add]: tool({
+              description: "Add and optionally start an MCP server from the Vision registry",
+              args: VisionAddArgsSchema.shape,
+              execute: async (args) => await visionAdd(args),
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.remove]: tool({
+              description: "Stop and remove an MCP server from the active configuration",
+              args: VisionRemoveArgsSchema.shape,
+              execute: async (args) => await visionRemove(args),
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.restart]: tool({
+              description:
+                "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
+              args: VisionRestartArgsSchema.shape,
+              execute: async (args) => await visionRestart(args),
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.search]: tool({
+              description:
+                "Search the Vision registry for MCP servers by name, capability tags, or description",
+              args: VisionSearchArgsSchema.shape,
+              execute: async (args) => await visionSearch(args),
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.init]: tool({
+              description:
+                "Generate OpenCode MCP configuration (opencode.jsonc or another recognized config path) for currently running servers",
+              args: VisionInitArgsSchema.shape,
+              execute: async (args) => {
+                const path = await resolveInitPath(directory, args.path)
+                return await visionInit({ ...args, path })
+              },
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.status]: tool({
+              description:
+                "Get Vision daemon status including uptime, memory usage, and server counts",
+              args: {},
+              execute: async () => await visionStatus(),
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.guidance]: tool({
+              description: "Get ranked tool-selection guidance for a task or specific server",
+              args: VisionGuidanceArgsSchema.shape,
+              execute: async (args) => await visionGuidance(args),
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.slotStatus]: tool({
+              description: "Get slot-group routing status and per-slot session details",
+              args: {},
+              execute: async () => await visionSlotStatus(),
+            }),
+            [VISION_PLUGIN_TOOL_NAMES.metrics]: tool({
+              description:
+                "Get Vision daemon metrics for sessions, tool calls, errors, and subprocesses",
+              args: {},
+              execute: async () => await visionMetrics(),
+            }),
+          }),
+
+      // Plugin-local tools — registered in BOTH Code Mode states.
+      //
+      // The Code Mode catalog is built from MCP tools only, so these two have
+      // no `tools.*` equivalent. Suppressing them would make them unreachable
+      // in every session rather than merely deduplicated. They are also the
+      // in-band recovery path when the `vision` MCP server is declared but
+      // disconnected.
       [VISION_PLUGIN_TOOL_NAMES.mcpConnect]: tool({
         description:
           "Use this when you have determined you need an MCP server already declared in the OpenCode config `mcp` block but currently disabled or failed. This is a session-lifetime runtime connection: it edits no config file, does not persist, and ends when the opencode process ends. The registry change takes effect immediately, so tools resolved at call time are usable right away; the list of tools advertised for the current turn was fixed when the turn began, so a newly connected server may not appear there until your next turn. It cannot add or connect a server that is not declared in the `mcp` block.",

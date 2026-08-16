@@ -343,7 +343,7 @@ func isKilledExit(err error) bool {
 	if !errors.As(err, &exitErr) || exitErr.ProcessState == nil {
 		return false
 	}
-	status, ok := exitErr.ProcessState.Sys().(syscall.WaitStatus)
+	status, ok := exitErr.Sys().(syscall.WaitStatus)
 	return ok && status.Signaled()
 }
 

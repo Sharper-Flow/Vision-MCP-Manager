@@ -578,8 +578,11 @@ func TestReconcileHasNoPortInputAndIgnoresUnleasedProcess(t *testing.T) {
 	}
 	groups["unleased"] = group
 	// Compile-time API assertion: a port cannot be supplied to Reconcile.
-	var reconcile func(context.Context, map[string]ServerIdentity) []Result = (&Reconciler{}).Reconcile
-	_ = reconcile
+	// Written as a conversion rather than a typed declaration because the type
+	// is the whole point of the line, and staticcheck's QF1011 would otherwise
+	// insist on inferring it away — which would silently delete the assertion.
+	// A conversion checks the signature just as strictly and has nothing to infer.
+	_ = (func(context.Context, map[string]ServerIdentity) []Result)((&Reconciler{}).Reconcile)
 	reconciler := newReconcilerForTest(store, group, signaler, waiter)
 	results := reconciler.Reconcile(context.Background(), expected)
 	if len(results) != 0 {

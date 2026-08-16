@@ -16,7 +16,7 @@
  * impossible to ship green.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
@@ -37,7 +37,11 @@ vi.mock("./tools", async (importOriginal) => ({
 }))
 
 import VisionPlugin from "./index"
-import { VISION_PLUGIN_TOOL_NAMES } from "./tool-names"
+import {
+  OPENCODE_MCP_TOOL_NAMES,
+  VISION_DAEMON_TOOL_NAMES,
+  VISION_PLUGIN_TOOL_NAMES,
+} from "./tool-names"
 
 /**
  * Minimal PluginInput stand-in. The mcp methods are stubs that throw: nothing
@@ -67,7 +71,13 @@ function fakePluginInput(directory = "/tmp/project") {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function loadHooks(directory = "/tmp/project"): Promise<any> {
+async function loadHooks(directory = "/tmp/project", codeMode = false): Promise<any> {
+  // Registration reads Code Mode at FACTORY time, so the env must be set before
+  // the factory runs — not after. Defaulting to OFF keeps every daemon-tool test
+  // below deterministic regardless of how the suite was launched: dev sessions on
+  // this host run with OPENCODE_EXPERIMENTAL_CODE_MODE=true, which would
+  // otherwise unregister vision_init and friends out from under those tests.
+  vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return await (VisionPlugin as any)(fakePluginInput(directory))
 }
@@ -79,11 +89,28 @@ async function tempProject(): Promise<string> {
 }
 
 const expectedNames = Object.values(VISION_PLUGIN_TOOL_NAMES) as string[]
+const daemonNames = Object.values(VISION_DAEMON_TOOL_NAMES) as string[]
+const pluginLocalNames = Object.values(OPENCODE_MCP_TOOL_NAMES) as string[]
+
+/**
+ * Under Code Mode the ten daemon-proxy tools are already reachable as
+ * `tools.vision.*` from the `vision` MCP server, so registering them here
+ * duplicates them — and plugin schemas, unlike MCP schemas, are NOT collapsed
+ * by Code Mode. The two `opencode_mcp_*` tools have no Code Mode equivalent
+ * (that catalog is built from MCP tools only) and must survive in both states.
+ */
+function expectedFor(codeMode: boolean): string[] {
+  return codeMode ? pluginLocalNames : expectedNames
+}
 
 describe("plugin tool registration", () => {
   beforeEach(() => {
     checkHealthMock.mockClear()
     visionInitMock.mockClear()
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
   })
 
   it("exposes a `tool` record, not a `tools` array", async () => {
@@ -111,14 +138,44 @@ describe("plugin tool registration", () => {
     expect(hooks.tools).toBeUndefined()
   })
 
-  it("registers exactly the declared tool names", async () => {
-    const hooks = await loadHooks()
+  it.each([
+    { codeMode: false, label: "Code Mode OFF" },
+    { codeMode: true, label: "Code Mode ON" },
+  ])("registers exactly the declared tool names ($label)", async ({ codeMode }) => {
+    const hooks = await loadHooks("/tmp/project", codeMode)
     const registered = Object.keys(hooks.tool ?? {})
+    const expected = expectedFor(codeMode)
 
     // Bidirectional: a name added to the constant but never registered fails,
     // and a tool registered under an undeclared name fails too.
-    expect(new Set(registered)).toEqual(new Set(expectedNames))
-    expect(registered).toHaveLength(expectedNames.length)
+    expect(new Set(registered)).toEqual(new Set(expected))
+    expect(registered).toHaveLength(expected.length)
+  })
+
+  it("omits the daemon-proxy tools under Code Mode", async () => {
+    const hooks = await loadHooks("/tmp/project", true)
+    const registered = Object.keys(hooks.tool ?? {})
+
+    expect(
+      registered.filter((name) => daemonNames.includes(name)),
+      "daemon-proxy tools are reachable as tools.vision.* under Code Mode; " +
+        "registering them here duplicates them at full plugin-schema cost"
+    ).toEqual([])
+  })
+
+  it("keeps the opencode_mcp_* tools registered in BOTH Code Mode states", async () => {
+    for (const codeMode of [false, true]) {
+      const hooks = await loadHooks("/tmp/project", codeMode)
+      const registered = Object.keys(hooks.tool ?? {})
+
+      for (const name of pluginLocalNames) {
+        expect(
+          registered,
+          `${name} must stay registered with Code Mode ${codeMode ? "ON" : "OFF"}: ` +
+            "it has no Code Mode catalog entry, so suppressing it makes it unreachable"
+        ).toContain(name)
+      }
+    }
   })
 
   it.each(expectedNames)("%s satisfies the ToolDefinition shape", async (name) => {

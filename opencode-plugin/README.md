@@ -31,13 +31,22 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 
 ## Available Tools
 
-The plugin exposes two groups of tools. The distinction matters: the first group
-needs the Vision daemon, the second does not.
+The plugin exposes two groups of tools. The distinction matters twice over: the
+first group needs the Vision daemon, the second does not — and the first group is
+registered **only when Code Mode is off**.
 
 ### Daemon-backed (require `vision daemon start`)
 
 These wrap Vision Admin MCP calls on port 6275. They return a structured error if
 the daemon is not running.
+
+**Registered only when Code Mode is off.** When
+`OPENCODE_EXPERIMENTAL_CODE_MODE=true`, the plugin omits all ten. They remain
+reachable as `tools.vision.<name>()` through the `vision` MCP server, and Code
+Mode collapses MCP tool schemas into one `execute` tool plus a bounded catalog.
+Plugin-registered schemas get no such collapse, so registering them under Code
+Mode would carry ten full schemas in every prompt for capability the session can
+already reach. The decision is made once, at plugin-factory time.
 
 | Tool                 | Description                                    |
 | -------------------- | ---------------------------------------------- |
@@ -67,6 +76,11 @@ during reconciliation. Direct Admin MCP callers must provide an absolute
 These drive opencode's **own** MCP registry in-process. No Vision daemon, no TCP,
 no port.
 
+**Registered in both Code Mode states.** Unlike the daemon-backed group, these
+two have no `tools.*` equivalent — the Code Mode catalog is built from MCP tools
+only, so a plugin-registered tool never appears in it. Suppressing them under
+Code Mode would make them unreachable rather than deduplicated.
+
 | Tool                      | Description                                           |
 | ------------------------- | ----------------------------------------------------- |
 | `opencode_mcp_connect`    | Connect an MCP server declared in opencode config     |
@@ -75,8 +89,12 @@ no port.
 Both operate only on servers already declared in the opencode config `mcp` block —
 they cannot add a server that is not declared. Two things to know:
 
-- **Next turn, not this one.** A connected server's tools appear on the following
-  turn. A disconnected server's tools disappear from the following turn.
+- **Takes effect immediately.** The registry change lands within the same turn:
+  a tool resolved at call time is usable right away. Only the turn's _advertised_
+  tool list is fixed at turn start, so a newly connected server may not appear in
+  that listing until the next turn. An earlier version of this document claimed
+  availability began on the following turn; that was measured false and
+  `src/registration.test.ts` now pins the corrected wording.
 - **Session-lifetime, not configuration.** Neither tool writes to any config file.
   The connection ends with the opencode process, and the server's config entry is
   left untouched, so it stays reconnectable.
@@ -84,6 +102,24 @@ they cannot add a server that is not declared. Two things to know:
 This is what makes it practical to leave a context-expensive server
 `enabled: false` by default: an agent that turns out to need it can connect it
 mid-session instead of asking for a config edit and a restart.
+
+### Precondition: the plugin and the `vision` mcp entry are paired
+
+Under Code Mode, daemon capability depends on the `vision` MCP server being both
+**declared** in the opencode config `mcp` block and **connected**. Before
+conditional registration the plugin's direct HTTP to port 6275 survived a failed
+or absent MCP connection; under Code Mode it no longer does, because the daemon
+tools are not registered at all.
+
+Consequences worth stating plainly:
+
+- Do **not** delete the `vision` entry from the `mcp` block as "redundant with
+  the plugin". It is load-bearing for every Code Mode session.
+- If the `vision` server is declared but disconnected, `opencode_mcp_connect` is
+  the in-band recovery path — which is exactly why that tool stays registered in
+  both modes.
+- If the Vision daemon itself is down, both paths fail regardless. The pairing
+  changes nothing for that case.
 
 ## Architecture
 
@@ -96,7 +132,7 @@ Vision Plugin (this package)
       ├── Context Injection (session.created, compacting)
       │
       ├── vision_* tools ──────► Vision Admin MCP (port 6275)
-      │                               │
+      │   [Code Mode OFF only]        │
       │                               ▼
       │                          Vision Daemon
       │                               │
@@ -104,7 +140,11 @@ Vision Plugin (this package)
       │                          MCP Servers
       │
       └── opencode_mcp_* tools ─► opencode's own MCP registry
-                                  (in-process, via the injected plugin client)
+          [both modes]              (in-process, via the injected plugin client)
+
+Under Code Mode the daemon path is reached instead as:
+
+OpenCode Session ──► tools.vision.*() ──► `vision` MCP server ──► Vision Daemon
 ```
 
 The `vision_*` path is a thin client over the Admin MCP. The `opencode_mcp_*`
@@ -114,8 +154,9 @@ bound, which is the default for the TUI.
 
 The plugin:
 
-1. Injects context at session start to solve the "bootstrap problem"
-2. Wraps Admin MCP tool calls for OpenCode tool discovery
+1. Injects context at session start to solve the "bootstrap problem", rendering
+   `tools.vision.*()` or bare tool names depending on Code Mode
+2. Wraps Admin MCP tool calls for OpenCode tool discovery, when Code Mode is off
 3. Handles daemon-not-running errors gracefully
 4. Connects and disconnects opencode MCP servers at runtime, independent of the daemon
 

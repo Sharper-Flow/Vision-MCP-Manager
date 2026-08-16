@@ -266,7 +266,11 @@ func (s *Store) readPath(path, serverName string) (Lease, error) {
 	if err != nil {
 		return Lease{}, err
 	}
-	defer f.Close()
+	// Read-only path: there are no buffered writes to flush, so a Close error
+	// carries no information the read itself has not already reported.
+	// Discarded explicitly rather than implicitly. The write path at
+	// writeAtomic checks its Close, where the error does mean data loss.
+	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
 	if err != nil {
 		return Lease{}, fmt.Errorf("read lease: %w", err)
