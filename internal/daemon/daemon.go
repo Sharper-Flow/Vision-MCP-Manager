@@ -912,10 +912,12 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 	}
 	var gateway *mcp.ManagedHTTPGateway
 	gateway, err = mcp.NewManagedHTTPGateway(mcp.ManagedHTTPGatewayConfig{
-		Target:      target,
-		MaxSessions: srv.Config.MaxSessions,
-		IdleTimeout: srv.Config.SessionTimeout.Duration(),
-		Backend:     coordinator,
+		Target:                target,
+		MaxSessions:           srv.Config.MaxSessions,
+		IdleTimeout:           srv.Config.SessionTimeout.Duration(),
+		DisconnectGracePeriod: srv.Config.ResolvedDisconnectGracePeriod(),
+		HungRequestBound:      10 * srv.Config.RequestTimeout.Duration(),
+		Backend:               coordinator,
 		OnAmbiguousFailure: func(cause error) {
 			go d.recycleManagedHTTPBackend(srv.Name, process, coordinator, cause)
 		},
@@ -936,10 +938,10 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 	if err := d.portManager.AddStreamable(srv.Name, srv.Config.Port, gateway, gateway, secCfg); err != nil {
 		return fmt.Errorf("add managed HTTP listener: %w", err)
 	}
-	reapInterval := srv.Config.SessionTimeout.Duration() / 2
-	if reapInterval <= 0 || reapInterval > 30*time.Second {
-		reapInterval = 30 * time.Second
-	}
+	reapInterval := managedHTTPReapInterval(
+		srv.Config.SessionTimeout.Duration(),
+		srv.Config.ResolvedDisconnectGracePeriod(),
+	)
 	monitorCtx, monitorCancel := context.WithCancel(d.ctx)
 	gateway.StartReaper(monitorCtx, reapInterval)
 	d.managedGatewaysMu.Lock()
@@ -954,6 +956,20 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 	d.wg.Add(1)
 	go d.monitorManagedHTTPBackend(monitorCtx, srv.Name, process, target, gateway, coordinator)
 	return nil
+}
+
+func managedHTTPReapInterval(sessionTimeout, disconnectGracePeriod time.Duration) time.Duration {
+	reapInterval := sessionTimeout / 2
+	if reapInterval <= 0 || reapInterval > 30*time.Second {
+		reapInterval = 30 * time.Second
+	}
+	if disconnectGracePeriod > 0 && disconnectGracePeriod/2 < reapInterval {
+		reapInterval = disconnectGracePeriod / 2
+	}
+	if reapInterval < time.Second {
+		return time.Second
+	}
+	return reapInterval
 }
 
 func (d *Daemon) recycleManagedHTTPBackend(name string, process *supervisor.ManagedProcess, coordinator *supervisor.BackendCoordinator, cause error) {
