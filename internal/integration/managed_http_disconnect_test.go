@@ -105,9 +105,10 @@ func TestManagedHTTPGatewayDelayedHandshakeSurvivesNeverStreamedBound(t *testing
 	}))
 	defer backend.Close()
 
-	// The implementation derives a 500ms never-streamed bound from this
-	// 100ms disconnect grace. A 250ms real handshake delay is deliberately
-	// inside that bound, while still exercising a short expiry configuration.
+	// This configuration would derive a 500ms never-streamed bound from the
+	// 100ms disconnect grace, but the enabled bound is raised to the 30s
+	// handshake floor, so a 250ms real handshake delay is safely inside it.
+	// The short grace still exercises the disconnect path promptly.
 	const grace = 100 * time.Millisecond
 	gateway := newRealClockManagedGateway(t, backend.URL+"/mcp", 1, 500*time.Millisecond, grace)
 	public := httptest.NewServer(gateway)
