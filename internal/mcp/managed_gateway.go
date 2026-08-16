@@ -34,15 +34,16 @@ type ManagedGatewayMetrics interface {
 }
 
 type ManagedHTTPGatewayConfig struct {
-	Target             *url.URL
-	MaxSessions        int
-	IdleTimeout        time.Duration
-	Clock              LeaseClock
-	Transport          http.RoundTripper
-	Backend            ManagedBackendGate
-	OnAmbiguousFailure func(error)
-	Metrics            ManagedGatewayMetrics
-	Logger             *slog.Logger
+	Target                *url.URL
+	MaxSessions           int
+	IdleTimeout           time.Duration
+	DisconnectGracePeriod time.Duration
+	Clock                 LeaseClock
+	Transport             http.RoundTripper
+	Backend               ManagedBackendGate
+	OnAmbiguousFailure    func(error)
+	Metrics               ManagedGatewayMetrics
+	Logger                *slog.Logger
 }
 
 // ManagedHTTPGateway is the lifecycle-aware boundary between Vision's public
@@ -81,7 +82,7 @@ func NewManagedHTTPGateway(cfg ManagedHTTPGatewayConfig) (*ManagedHTTPGateway, e
 		transport:          transport,
 		backend:            cfg.Backend,
 		onAmbiguousFailure: cfg.OnAmbiguousFailure,
-		leases:             NewLeaseManager(cfg.MaxSessions, cfg.IdleTimeout, cfg.Clock),
+		leases:             NewLeaseManagerWithDisconnectGrace(cfg.MaxSessions, cfg.IdleTimeout, cfg.DisconnectGracePeriod, cfg.Clock),
 		logger:             logger,
 		metrics:            cfg.Metrics,
 	}, nil
@@ -281,7 +282,7 @@ func (g *ManagedHTTPGateway) pruneIdle(ctx context.Context) {
 		}
 		_ = resp.Body.Close()
 		if isSuccessfulStatus(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
-			g.finalizeClose(sessionID, "idle_timeout")
+			g.finalizeClose(sessionID, expired.Reason)
 			continue
 		}
 		g.leases.MarkCleanupUncertain(sessionID, "cleanup_rejected")
