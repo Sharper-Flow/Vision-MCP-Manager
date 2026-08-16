@@ -39,6 +39,178 @@ func TestLeaseSnapshotBoundsClosedHistoryAndNeverExposesRawID(t *testing.T) {
 	}
 }
 
+func newLeaseManagerForDisconnectTest(t *testing.T, grace time.Duration) (*LeaseManager, *fakeLeaseClock) {
+	t.Helper()
+	clock := &fakeLeaseClock{now: time.Unix(500, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(1, time.Hour, grace, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "session-a"); err != nil {
+		t.Fatal(err)
+	}
+	return mgr, clock
+}
+
+func TestLeaseManagerBeginSSEMarksEverStreamedAndClearsDeadline(t *testing.T) {
+	mgr, _ := newLeaseManagerForDisconnectTest(t, time.Minute)
+	mgr.mu.Lock()
+	mgr.leases["session-a"].disconnectDeadline = time.Unix(600, 0)
+	mgr.mu.Unlock()
+
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	mgr.mu.Lock()
+	lease := *mgr.leases["session-a"]
+	mgr.mu.Unlock()
+	if !lease.everStreamed {
+		t.Fatal("BeginSSE() did not mark lease as ever streamed")
+	}
+	if !lease.disconnectDeadline.IsZero() {
+		t.Fatalf("BeginSSE() deadline = %v, want zero", lease.disconnectDeadline)
+	}
+}
+
+func TestLeaseManagerEndSSEToZeroArmsDisconnectDeadline(t *testing.T) {
+	grace := 2 * time.Minute
+	mgr, clock := newLeaseManagerForDisconnectTest(t, grace)
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	mgr.EndSSE("session-a")
+
+	want := clock.Now().Add(grace)
+	mgr.mu.Lock()
+	got := mgr.leases["session-a"].disconnectDeadline
+	mgr.mu.Unlock()
+	if !got.Equal(want) {
+		t.Fatalf("EndSSE() deadline = %v, want %v", got, want)
+	}
+}
+
+func TestLeaseManagerEndSSEWithZeroGraceDoesNotArmDisconnectDeadline(t *testing.T) {
+	mgr, _ := newLeaseManagerForDisconnectTest(t, 0)
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	mgr.EndSSE("session-a")
+
+	mgr.mu.Lock()
+	got := mgr.leases["session-a"].disconnectDeadline
+	mgr.mu.Unlock()
+	if !got.IsZero() {
+		t.Fatalf("EndSSE() deadline = %v, want zero", got)
+	}
+}
+
+func TestLeaseManagerApplicationBeginRequestWithZeroDeadlineDoesNotArm(t *testing.T) {
+	mgr, _ := newLeaseManagerForDisconnectTest(t, time.Minute)
+	done, err := mgr.BeginRequest("session-a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mgr.mu.Lock()
+	got := mgr.leases["session-a"].disconnectDeadline
+	mgr.mu.Unlock()
+	if !got.IsZero() {
+		t.Fatalf("BeginRequest() deadline = %v, want zero", got)
+	}
+	done()
+
+	mgr.mu.Lock()
+	got = mgr.leases["session-a"].disconnectDeadline
+	mgr.mu.Unlock()
+	if !got.IsZero() {
+		t.Fatalf("completed BeginRequest() deadline = %v, want zero", got)
+	}
+}
+
+func TestLeaseManagerApplicationBeginRequestRearmsDisconnectDeadline(t *testing.T) {
+	grace := 2 * time.Minute
+	mgr, clock := newLeaseManagerForDisconnectTest(t, grace)
+	oldDeadline := clock.Now().Add(time.Second)
+	mgr.mu.Lock()
+	mgr.leases["session-a"].disconnectDeadline = oldDeadline
+	mgr.mu.Unlock()
+	clock.Advance(2 * time.Second)
+
+	done, err := mgr.BeginRequest("session-a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := clock.Now().Add(grace)
+	mgr.mu.Lock()
+	got := mgr.leases["session-a"].disconnectDeadline
+	mgr.mu.Unlock()
+	if !got.Equal(want) {
+		t.Fatalf("BeginRequest() deadline = %v, want %v", got, want)
+	}
+	done()
+}
+
+func TestLeaseManagerMaintenanceBeginRequestDoesNotRearmDisconnectDeadline(t *testing.T) {
+	grace := 2 * time.Minute
+	mgr, clock := newLeaseManagerForDisconnectTest(t, grace)
+	deadline := clock.Now().Add(time.Minute)
+	mgr.mu.Lock()
+	mgr.leases["session-a"].disconnectDeadline = deadline
+	mgr.mu.Unlock()
+	clock.Advance(2 * time.Second)
+
+	done, err := mgr.BeginRequest("session-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done()
+
+	mgr.mu.Lock()
+	got := mgr.leases["session-a"].disconnectDeadline
+	mgr.mu.Unlock()
+	if !got.Equal(deadline) {
+		t.Fatalf("maintenance BeginRequest() deadline = %v, want %v", got, deadline)
+	}
+}
+
+func TestLeaseManagerBeginSSEClearsArmedDisconnectDeadline(t *testing.T) {
+	mgr, _ := newLeaseManagerForDisconnectTest(t, time.Minute)
+	mgr.mu.Lock()
+	mgr.leases["session-a"].disconnectDeadline = time.Unix(600, 0)
+	mgr.mu.Unlock()
+
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	mgr.mu.Lock()
+	got := mgr.leases["session-a"].disconnectDeadline
+	mgr.mu.Unlock()
+	if !got.IsZero() {
+		t.Fatalf("BeginSSE() deadline = %v, want zero", got)
+	}
+}
+
+func TestLeaseManagerEndSSEFromTwoConnectionsDoesNotArmDeadline(t *testing.T) {
+	mgr, _ := newLeaseManagerForDisconnectTest(t, time.Minute)
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	mgr.EndSSE("session-a")
+
+	mgr.mu.Lock()
+	lease := *mgr.leases["session-a"]
+	mgr.mu.Unlock()
+	if lease.sseCount != 1 {
+		t.Fatalf("sseCount = %d, want 1", lease.sseCount)
+	}
+	if !lease.disconnectDeadline.IsZero() {
+		t.Fatalf("EndSSE() deadline = %v, want zero", lease.disconnectDeadline)
+	}
+}
+
 type fakeLeaseClock struct {
 	mu  sync.Mutex
 	now time.Time
