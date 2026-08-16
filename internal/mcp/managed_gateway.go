@@ -30,6 +30,7 @@ type ManagedGatewayMetrics interface {
 	IncActiveSessions()
 	DecActiveSessions()
 	IncAdmissionDenied()
+	IncBackendHeaderTimeout()
 	IncReaped(reason string)
 }
 
@@ -38,6 +39,7 @@ type ManagedHTTPGatewayConfig struct {
 	MaxSessions           int
 	IdleTimeout           time.Duration
 	DisconnectGracePeriod time.Duration
+	HungRequestBound      time.Duration
 	Clock                 LeaseClock
 	Transport             http.RoundTripper
 	Backend               ManagedBackendGate
@@ -68,13 +70,20 @@ func NewManagedHTTPGateway(cfg ManagedHTTPGatewayConfig) (*ManagedHTTPGateway, e
 	if err := validateManagedGatewayTarget(cfg.Target); err != nil {
 		return nil, err
 	}
-	transport := cfg.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	transport := cfg.Transport
+	if transport == nil {
+		if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			clone := base.Clone()
+			clone.ResponseHeaderTimeout = cfg.HungRequestBound
+			transport = clone
+		} else {
+			logger.Warn("http.DefaultTransport is not *http.Transport; using a dedicated transport")
+			transport = &http.Transport{ResponseHeaderTimeout: cfg.HungRequestBound}
+		}
 	}
 	target := *cfg.Target
 	return &ManagedHTTPGateway{
@@ -313,7 +322,15 @@ func (g *ManagedHTTPGateway) proxy(state *managedProxyRequest) *httputil.Reverse
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			g.observeProxyError(state, err)
-			writeManagedError(w, http.StatusBadGateway, -32003, "managed MCP backend request failed")
+			status := http.StatusBadGateway
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				status = http.StatusGatewayTimeout
+				if g.metrics != nil {
+					g.metrics.IncBackendHeaderTimeout()
+				}
+			}
+			writeManagedError(w, status, -32003, "managed MCP backend request failed")
 		},
 	}
 }
