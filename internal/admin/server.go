@@ -205,8 +205,8 @@ func (s *Server) Port() int {
 // --- HTTP Handlers ---
 
 // handleHealth handles GET /health - detailed health status.
-// Returns {"status": "ok", "running": true, "startedAt": ...} when healthy,
-// or {"status": "degraded", "errors": [...], "running": true, "startedAt": ...} when servers have errors.
+// Returns {"status": "ok", "uptime": ...} when healthy, or
+// {"status": "degraded", "errors": [...], "uptime": ...} when servers have errors.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	running := s.running
@@ -219,6 +219,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"})
 		return
 	}
+	uptime := time.Since(startedAt).Round(time.Second).String()
 
 	// Project every server through the shared effective-status precedence table.
 	var errors []string
@@ -244,16 +245,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if len(errors) > 0 {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":    "degraded",
-			"errors":    errors,
-			"running":   running,
-			"startedAt": startedAt,
+			"status": "degraded",
+			"errors": errors,
+			"uptime": uptime,
 		})
 	} else {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":    "ok",
-			"running":   running,
-			"startedAt": startedAt,
+			"status": "ok",
+			"uptime": uptime,
 		})
 	}
 }

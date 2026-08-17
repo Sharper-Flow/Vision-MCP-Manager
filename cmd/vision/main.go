@@ -218,33 +218,50 @@ func stopDaemon() error {
 func showDaemonStatus() error {
 	pidFile := daemon.NewPIDFile("")
 	running, pid := pidFile.IsRunning()
+	var health map[string]interface{}
+	if running {
+		resp, err := http.Get(daemonAddr + "/health")
+		if err == nil {
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode == http.StatusOK {
+				_ = json.NewDecoder(resp.Body).Decode(&health)
+			}
+		}
+	}
 
 	if jsonOutput {
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-			"running": running,
-			"pid":     pid,
-		})
+		_ = json.NewEncoder(os.Stdout).Encode(daemonStatusPayload(running, pid, health))
 		return nil
 	}
 
 	if running {
 		fmt.Printf("Daemon is running (PID %d)\n", pid)
-
-		// Try to get detailed status from API
-		resp, err := http.Get(daemonAddr + "/health")
-		if err == nil {
-			defer func() { _ = resp.Body.Close() }()
-			var health map[string]interface{}
-			if json.NewDecoder(resp.Body).Decode(&health) == nil {
-				fmt.Printf("  Status: %v\n", health["status"])
-				fmt.Printf("  Uptime: %v\n", health["uptime"])
-			}
+		if health != nil {
+			fmt.Printf("  Status: %v\n", health["status"])
+			fmt.Printf("  Uptime: %v\n", health["uptime"])
 		}
 	} else {
 		fmt.Println("Daemon is not running")
 	}
 
 	return nil
+}
+
+func daemonStatusPayload(running bool, pid int, health map[string]interface{}) map[string]interface{} {
+	payload := map[string]interface{}{
+		"running": running,
+		"pid":     pid,
+	}
+	if health == nil {
+		return payload
+	}
+	if status, ok := health["status"]; ok {
+		payload["status"] = status
+	}
+	if uptime, ok := health["uptime"].(string); ok && uptime != "" {
+		payload["uptime"] = uptime
+	}
+	return payload
 }
 
 func reloadDaemon() error {

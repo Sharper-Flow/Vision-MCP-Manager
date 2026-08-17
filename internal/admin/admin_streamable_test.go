@@ -428,19 +428,12 @@ func TestAdminServer_HealthIncludesDaemonUptime(t *testing.T) {
 	if got["status"] != "ok" {
 		t.Fatalf("status = %v, want ok", got["status"])
 	}
-	if got["running"] != true {
-		t.Fatalf("running = %v, want true", got["running"])
+	uptime, ok := got["uptime"].(string)
+	if !ok || uptime == "" {
+		t.Fatalf("uptime missing or empty: %v", got["uptime"])
 	}
-	startedAt, ok := got["startedAt"].(string)
-	if !ok || startedAt == "" {
-		t.Fatalf("startedAt missing or empty: %v", got["startedAt"])
-	}
-	started, err := time.Parse(time.RFC3339Nano, startedAt)
-	if err != nil {
-		t.Fatalf("startedAt %q not RFC3339: %v", startedAt, err)
-	}
-	if started.IsZero() || started.After(time.Now()) {
-		t.Fatalf("startedAt out of range: %v", started)
+	if _, err := time.ParseDuration(uptime); err != nil {
+		t.Fatalf("uptime %q is not a duration: %v", uptime, err)
 	}
 }
 
@@ -483,18 +476,11 @@ func TestAdminServer_HealthDegradedIncludesDaemonUptime(t *testing.T) {
 	if !ok || len(errs) == 0 {
 		t.Fatalf("errors missing or empty: %v", got["errors"])
 	}
-	if got["running"] != true {
-		t.Fatalf("running = %v, want true", got["running"])
+	uptime, ok := got["uptime"].(string)
+	if !ok || uptime == "" {
+		t.Fatalf("uptime missing or empty: %v", got["uptime"])
 	}
-	startedAt, ok := got["startedAt"].(string)
-	if !ok || startedAt == "" {
-		t.Fatalf("startedAt missing or empty: %v", got["startedAt"])
-	}
-	started, err := time.Parse(time.RFC3339Nano, startedAt)
-	if err != nil {
-		t.Fatalf("startedAt %q not RFC3339: %v", startedAt, err)
-	}
-	if started.IsZero() || started.After(time.Now()) {
-		t.Fatalf("startedAt out of range: %v", started)
+	if _, err := time.ParseDuration(uptime); err != nil {
+		t.Fatalf("uptime %q is not a duration: %v", uptime, err)
 	}
 }

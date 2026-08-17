@@ -140,6 +140,30 @@ func TestEpisodeProfileSnapshot(t *testing.T) {
 	}
 }
 
+func TestEpisodeProfileSnapshot_UsesSnapshotDirEnvironment(t *testing.T) {
+	procfs := t.TempDir()
+	const pid = 12345
+	writeProcfs(t, procfs, pid, 1500000, 1200000, 100000, 200000, 1400000)
+
+	ts, url := startVisionServer(t, pid)
+	_ = ts
+	snapshotDir := filepath.Join(t.TempDir(), "profiles")
+	env := testEnv(t, map[string]string{
+		"VISION_API_URL": url,
+		"PROCFS_ROOT":    procfs,
+		"SNAPSHOT_DIR":   snapshotDir,
+	})
+
+	runScript(t, env, "--name", "Episode")
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		t.Fatalf("read SNAPSHOT_DIR: %v", err)
+	}
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "Episode-") {
+		t.Fatalf("snapshot files = %#v, want one Episode snapshot", entries)
+	}
+}
+
 func TestEpisodeProfileComparison_Growing(t *testing.T) {
 	procfs := t.TempDir()
 	const pid = 12345

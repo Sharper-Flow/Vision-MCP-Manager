@@ -16,7 +16,7 @@ DEFAULT_SNAPSHOT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/vision/profiles"
 
 SERVER_NAME="$DEFAULT_NAME"
 ADDR="$DEFAULT_ADDR"
-SNAPSHOT_DIR="$DEFAULT_SNAPSHOT_DIR"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-$DEFAULT_SNAPSHOT_DIR}"
 OUTPUT=""
 COMPARE=""
 JSON=0
@@ -92,9 +92,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Environment aliases override parsed flags.
+# VISION_API_URL overrides --addr. SNAPSHOT_DIR is initialized from the
+# environment above and can still be overridden by --snapshot-dir.
 ADDR="${VISION_API_URL:-$ADDR}"
-SNAPSHOT_DIR="${SNAPSHOT_DIR:-$DEFAULT_SNAPSHOT_DIR}"
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
