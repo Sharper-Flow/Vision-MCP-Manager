@@ -315,17 +315,18 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 
 // ListServerEntry represents a server in the vision_list response.
 type ListServerEntry struct {
-	Name              string                         `json:"name"`
-	CodemodeNamespace string                         `json:"codemode_namespace"`
-	Status            string                         `json:"status"`
-	EffectiveReason   *string                        `json:"effective_reason,omitempty"`
-	ProcessState      string                         `json:"process_state"`
-	Port              *int                           `json:"port"`
-	PID               *int                           `json:"pid"`
-	Uptime            *string                        `json:"uptime"`
-	Error             *string                        `json:"error"`
-	SessionMetrics    *metrics.ServerMetricsSnapshot `json:"session_metrics,omitempty"`
-	SessionLifecycle  *SessionLifecycleSnapshot      `json:"session_lifecycle,omitempty"`
+	Name              string  `json:"name"`
+	CodemodeNamespace string  `json:"codemode_namespace"`
+	Status            string  `json:"status"`
+	EffectiveReason   *string `json:"effective_reason,omitempty"`
+	ProcessState      string  `json:"process_state"`
+	ReachabilityDetails
+	Port             *int                           `json:"port"`
+	PID              *int                           `json:"pid"`
+	Uptime           *string                        `json:"uptime"`
+	Error            *string                        `json:"error"`
+	SessionMetrics   *metrics.ServerMetricsSnapshot `json:"session_metrics,omitempty"`
+	SessionLifecycle *SessionLifecycleSnapshot      `json:"session_lifecycle,omitempty"`
 }
 
 // SlotGroupEntry describes one slot group in the vision_list response.
@@ -355,12 +356,13 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 	for _, srv := range servers {
 		status := srv.Status()
 		lifecycle := s.lifecycleSnapshot(status.Name)
-		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), status.LastError)
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), s.reachabilityFor(status.Name), status.Uptime, s.reachabilityGrace, status.LastError)
 		info := ListServerEntry{
-			Name:              status.Name,
-			CodemodeNamespace: s.codemodeNamespace(status.Name),
-			Status:            effective.Status,
-			ProcessState:      string(status.State),
+			Name:                status.Name,
+			CodemodeNamespace:   s.codemodeNamespace(status.Name),
+			Status:              effective.Status,
+			ProcessState:        string(status.State),
+			ReachabilityDetails: effective.Reachability,
 		}
 
 		// Set port if available
@@ -554,11 +556,13 @@ func (s *Server) toolSlotStatus(_ context.Context, _ json.RawMessage) (*ToolCall
 
 // AddResponse is the response for vision_add.
 type AddResponse struct {
-	Success bool    `json:"success"`
-	Name    string  `json:"name"`
-	Status  string  `json:"status,omitempty"`
-	Port    *int    `json:"port,omitempty"`
-	Error   *string `json:"error,omitempty"`
+	Success         bool    `json:"success"`
+	Name            string  `json:"name"`
+	Status          string  `json:"status,omitempty"`
+	EffectiveReason *string `json:"effective_reason,omitempty"`
+	Port            *int    `json:"port,omitempty"`
+	Error           *string `json:"error,omitempty"`
+	ReachabilityDetails
 }
 
 // toolAdd implements vision_add.
@@ -604,16 +608,22 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 
 			if srv != nil {
 				status := srv.Status()
-				effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), status.LastError)
+				effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Uptime, s.reachabilityGrace, status.LastError)
 				port := status.Port
 				response := AddResponse{
-					Success: true,
-					Name:    params.Name,
-					Status:  effective.Status,
-					Port:    &port,
+					Success:             true,
+					Name:                params.Name,
+					Status:              effective.Status,
+					Port:                &port,
+					ReachabilityDetails: effective.Reachability,
+				}
+				if effective.Reason != "" {
+					reason := effective.Reason
+					response.EffectiveReason = &reason
 				}
 				if status.LastError != "" {
-					response.Error = &status.LastError
+					errorText := scrubSecrets(status.LastError)
+					response.Error = &errorText
 				}
 				return jsonToolResult(response)
 			}
@@ -707,13 +717,18 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 	srv := s.registry.Get(params.Name)
 	if srv != nil {
 		status := srv.Status()
-		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), status.LastError)
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Uptime, s.reachabilityGrace, status.LastError)
 		port := status.Port
 		response := AddResponse{
-			Success: true,
-			Name:    params.Name,
-			Status:  effective.Status,
-			Port:    &port,
+			Success:             true,
+			Name:                params.Name,
+			Status:              effective.Status,
+			Port:                &port,
+			ReachabilityDetails: effective.Reachability,
+		}
+		if effective.Reason != "" {
+			reason := effective.Reason
+			response.EffectiveReason = &reason
 		}
 		return jsonToolResult(response)
 	}
@@ -835,6 +850,7 @@ type RestartResponse struct {
 	ProcessState    string  `json:"process_state,omitempty"`
 	Port            *int    `json:"port,omitempty"`
 	Error           *string `json:"error,omitempty"`
+	ReachabilityDetails
 }
 
 // toolRestart implements vision_restart.
@@ -876,14 +892,15 @@ func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCa
 	if srv != nil {
 		status := srv.Status()
 		lifecycle := s.lifecycleSnapshot(status.Name)
-		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), status.LastError)
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), s.reachabilityFor(status.Name), status.Uptime, s.reachabilityGrace, status.LastError)
 		port := status.Port
 		response := RestartResponse{
-			Success:      true,
-			Name:         params.Name,
-			Status:       effective.Status,
-			ProcessState: string(status.State),
-			Port:         &port,
+			Success:             true,
+			Name:                params.Name,
+			Status:              effective.Status,
+			ProcessState:        string(status.State),
+			Port:                &port,
+			ReachabilityDetails: effective.Reachability,
 		}
 		if effective.Reason != "" {
 			reason := effective.Reason

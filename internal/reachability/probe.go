@@ -16,7 +16,10 @@ const (
 	ProtocolVersion2025_11_25 = "2025-11-25"
 
 	DefaultProbeInterval = 30 * time.Second
-	probeTimeout         = 5 * time.Second
+	// EndToEndProbeIntervalMultiple keeps the admission-consuming probe rare
+	// relative to the free listener probe.
+	EndToEndProbeIntervalMultiple = 10
+	probeTimeout                  = 5 * time.Second
 )
 
 // Target identifies the local Vision listener to probe. ProtocolVersion is
@@ -26,6 +29,7 @@ type Target struct {
 	Name            string
 	Port            int
 	ProtocolVersion string
+	BearerToken     string
 }
 
 // Probe is the version-independent seam for reachability mechanisms.
@@ -38,16 +42,23 @@ type Probe interface {
 // intentionally explicit: protocol revisions that remove initialize/sessions
 // must not silently inherit a mechanism designed for an older revision.
 type VersionSelector struct {
-	probes map[string]Probe
+	probes         map[string]Probe
+	endToEndProbes map[string]Probe
 }
 
-func NewVersionSelector(listener Probe) *VersionSelector {
-	return &VersionSelector{probes: map[string]Probe{
+func NewVersionSelector(listener Probe, endToEnd ...Probe) *VersionSelector {
+	selector := &VersionSelector{probes: map[string]Probe{
 		ProtocolVersion2024_11_05: listener,
 		ProtocolVersion2025_03_26: listener,
 		ProtocolVersion2025_06_18: listener,
 		ProtocolVersion2025_11_25: listener,
-	}}
+	}, endToEndProbes: make(map[string]Probe)}
+	if len(endToEnd) > 0 && endToEnd[0] != nil {
+		for version := range selector.probes {
+			selector.endToEndProbes[version] = endToEnd[0]
+		}
+	}
+	return selector
 }
 
 // Select returns the mechanism for a negotiated revision. An empty revision
@@ -60,6 +71,20 @@ func (s *VersionSelector) Select(protocolVersion string) (Probe, error) {
 	probe, ok := s.probes[protocolVersion]
 	if !ok {
 		return nil, fmt.Errorf("no reachability probe for MCP protocol revision %q", protocolVersion)
+	}
+	return probe, nil
+}
+
+func (s *VersionSelector) SelectEndToEnd(protocolVersion string) (Probe, error) {
+	if protocolVersion == "" {
+		protocolVersion = ProtocolVersion2025_11_25
+	}
+	probe, ok := s.endToEndProbes[protocolVersion]
+	if !ok {
+		if len(s.endToEndProbes) == 0 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("no end-to-end reachability probe for MCP protocol revision %q", protocolVersion)
 	}
 	return probe, nil
 }
@@ -98,10 +123,18 @@ func (m *Manager) Start(parent context.Context, target Target, interval time.Dur
 	if err != nil {
 		return err
 	}
-	return m.StartWithProbe(parent, target, interval, probe)
+	endToEnd, err := m.selector.SelectEndToEnd(target.ProtocolVersion)
+	if err != nil {
+		return err
+	}
+	return m.startWithProbes(parent, target, interval, probe, endToEnd)
 }
 
 func (m *Manager) StartWithProbe(parent context.Context, target Target, interval time.Duration, probe Probe) error {
+	return m.startWithProbes(parent, target, interval, probe, nil)
+}
+
+func (m *Manager) startWithProbes(parent context.Context, target Target, interval time.Duration, probe, endToEnd Probe) error {
 	if target.Name == "" {
 		return fmt.Errorf("probe target name is empty")
 	}
@@ -125,7 +158,7 @@ func (m *Manager) StartWithProbe(parent context.Context, target Target, interval
 	go func() {
 		defer close(handle.done)
 		defer m.finished(target.Name, handle)
-		runProbeWorker(ctx, m.store, m.logger, target, interval, probe)
+		runProbeWorker(ctx, m.store, m.logger, target, interval, probe, endToEnd)
 	}()
 	return nil
 }
@@ -194,7 +227,7 @@ func (m *Manager) Wait() {
 	}
 }
 
-func runProbeWorker(ctx context.Context, store *Store, logger *slog.Logger, target Target, interval time.Duration, probe Probe) {
+func runProbeWorker(ctx context.Context, store *Store, logger *slog.Logger, target Target, interval time.Duration, probe, endToEnd Probe) {
 	first := time.NewTimer(firstTickDelay(target.Name, interval))
 	defer first.Stop()
 	select {
@@ -204,6 +237,8 @@ func runProbeWorker(ctx context.Context, store *Store, logger *slog.Logger, targ
 	}
 
 	runProbe(ctx, store, logger, target, probe)
+	deepInterval := interval * EndToEndProbeIntervalMultiple
+	nextEndToEnd := time.Now().Add(deepInterval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -212,13 +247,31 @@ func runProbeWorker(ctx context.Context, store *Store, logger *slog.Logger, targ
 			return
 		case <-ticker.C:
 			runProbe(ctx, store, logger, target, probe)
+			if endToEnd != nil && !time.Now().Before(nextEndToEnd) {
+				runEndToEndProbe(ctx, store, logger, target, deepInterval, endToEnd)
+				nextEndToEnd = time.Now().Add(deepInterval)
+			}
 		}
 	}
 }
 
 func runProbe(ctx context.Context, store *Store, logger *slog.Logger, target Target, probe Probe) {
+	runProbeAtDepth(ctx, store, logger, target, probe, DepthListener)
+}
+
+func runEndToEndProbe(ctx context.Context, store *Store, logger *slog.Logger, target Target, freshness time.Duration, probe Probe) {
+	now := time.Now()
+	if value, ok := store.Get(target.Name); ok {
+		if evidence, ok := value.Evidence[DepthSession]; ok && !evidence.LastProbeAttempt.IsZero() && now.Before(evidence.LastProbeAttempt.Add(freshness)) {
+			return
+		}
+	}
+	runProbeAtDepth(ctx, store, logger, target, probe, DepthEndToEnd)
+}
+
+func runProbeAtDepth(ctx context.Context, store *Store, logger *slog.Logger, target Target, probe Probe, depth Depth) {
 	attemptedAt := time.Now()
-	store.StartProbe(target.Name, DepthListener, attemptedAt)
+	store.StartProbe(target.Name, depth, attemptedAt)
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	reachable, err := probe.Probe(probeCtx, target)
 	cancel()
@@ -226,7 +279,7 @@ func runProbe(ctx context.Context, store *Store, logger *slog.Logger, target Tar
 		logger.Warn("server reachability probe failed", slog.String("server", target.Name), slog.String("error", err.Error()))
 	}
 	store.RecordProbe(target.Name, ProbeResult{
-		Depth:       DepthListener,
+		Depth:       depth,
 		AttemptedAt: attemptedAt,
 		Success:     reachable && err == nil,
 		Error:       errorText(err),

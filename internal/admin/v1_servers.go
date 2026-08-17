@@ -79,13 +79,20 @@ func (s *Server) handleV1ServerDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) v1ServerEntry(st server.ServerStatus) map[string]any {
 	lifecycle := s.lifecycleSnapshot(st.Name)
-	effective := deriveEffectiveStatus(st.State, lifecycleBackendState(lifecycle), st.LastError)
+	effective := deriveEffectiveStatus(st.State, lifecycleBackendState(lifecycle), s.reachabilityFor(st.Name), st.Uptime, s.reachabilityGrace, st.LastError)
+	reachability := effective.Reachability
 	entry := map[string]any{
 		"name": st.Name, "port": st.Port, "transport": string(st.Transport),
 		"state": string(st.State), "process_state": string(st.State),
 		"effective_status": effective.Status, "autostart": st.Autostart,
 		"required": st.Required, "pid": st.PID, "uptime_seconds": int64(st.Uptime.Seconds()),
 		"restart_count": st.RestartCount, "last_error": scrubSecrets(st.LastError),
+		"reachability":               string(reachability.Reachability),
+		"probe_depth":                reachability.ProbeDepth,
+		"last_probe_at":              reachability.LastProbeAt,
+		"last_probe_outcome":         reachability.LastProbeOutcome,
+		"last_probe_error":           reachability.LastProbeError,
+		"consecutive_probe_failures": reachability.ConsecutiveProbeFailures,
 	}
 	if effective.Reason != "" {
 		entry["effective_reason"] = effective.Reason

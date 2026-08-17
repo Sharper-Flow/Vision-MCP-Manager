@@ -1,6 +1,5 @@
 // Package metrics provides daemon-wide atomic counters for observability.
-// Distinct from supervisor.Metrics which tracks per-process ring-buffer stats;
-// this package tracks daemon-level aggregate counters.
+// This package tracks daemon-level aggregate counters and per-server metrics.
 package metrics
 
 import (

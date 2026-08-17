@@ -160,8 +160,7 @@ go test -race ./... -count=1
 
 Key concurrency fixes:
 1. **ManagedProcess I/O**: `Stdin()` and `Stdout()` are protected by a separate `ioMu` mutex to prevent races between spawn() and accessors.
-2. **HealthChecker mockBridge**: Test mock uses thread-safe setters for concurrent access during recovery tests.
-3. **Daemon management port**: Now configurable via `ManagementPort` in daemon.Config.
+2. **Daemon management port**: Now configurable via `ManagementPort` in daemon.Config.
 
 ## Proxy Downstream Respawn
 

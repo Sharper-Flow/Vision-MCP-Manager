@@ -185,7 +185,7 @@ func New(cfg Config) (*Daemon, error) {
 		daemonID:                         daemonID,
 		reachabilityStore:                reachability.NewStore(),
 	}
-	d.probeManager = reachability.NewManager(d.reachabilityStore, reachability.NewVersionSelector(mcp.NewListenerProbe()), cfg.Logger)
+	d.probeManager = reachability.NewManager(d.reachabilityStore, reachability.NewVersionSelector(mcp.NewListenerProbe(), mcp.NewEndToEndProbe()), cfg.Logger)
 
 	// Give the port manager the store so a listener that fails to bind records
 	// listener-depth evidence instead of silently reporting running.
@@ -198,6 +198,7 @@ func New(cfg Config) (*Daemon, error) {
 	// Wire per-server metrics accessor into admin server.
 	adminSrv.SetServerMetricsAccessor(d)
 	adminSrv.SetSessionLifecycleAccessor(d)
+	adminSrv.SetReachabilityStore(d.reachabilityStore)
 
 	return d, nil
 }
@@ -739,6 +740,7 @@ func (d *Daemon) startProbeWorker(srv *server.ManagedServer, interval time.Durat
 		Name:            srv.Name,
 		Port:            srv.Config.Port,
 		ProtocolVersion: reachability.ProtocolVersion2025_11_25,
+		BearerToken:     d.cfg.Security.BearerToken,
 	}, interval)
 	if err != nil {
 		d.logger.Warn("failed to start reachability probe worker",

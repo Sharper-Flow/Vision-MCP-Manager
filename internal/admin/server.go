@@ -15,6 +15,7 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -37,6 +38,8 @@ type Server struct {
 	slotSessionAccessor      SlotSessionAccessor      // Optional: provides live session counts
 	serverMetricsAccessor    ServerMetricsAccessor    // Optional: provides per-server session metrics
 	sessionLifecycleAccessor SessionLifecycleAccessor // Optional managed-HTTP lifecycle projection
+	reachabilityStore        *reachability.Store
+	reachabilityGrace        time.Duration
 	Metrics                  *metrics.DaemonMetrics
 	listenerExposure         visionmcp.ListenerExposure
 
@@ -56,6 +59,8 @@ type Config struct {
 	SlotSessionAccessor      SlotSessionAccessor      // Optional: provides live session counts
 	ServerMetricsAccessor    ServerMetricsAccessor    // Optional: provides per-server session metrics
 	SessionLifecycleAccessor SessionLifecycleAccessor // Optional managed-HTTP lifecycle projection
+	ReachabilityStore        *reachability.Store
+	ReachabilityGrace        time.Duration
 	Metrics                  *metrics.DaemonMetrics
 }
 
@@ -66,6 +71,9 @@ func NewServer(cfg Config) *Server {
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
+	}
+	if cfg.ReachabilityGrace <= 0 {
+		cfg.ReachabilityGrace = DefaultReachabilityGrace
 	}
 	// Use default catalog if none provided
 	cat := cfg.Catalog
@@ -92,6 +100,8 @@ func NewServer(cfg Config) *Server {
 		slotSessionAccessor:      cfg.SlotSessionAccessor,
 		serverMetricsAccessor:    cfg.ServerMetricsAccessor,
 		sessionLifecycleAccessor: cfg.SessionLifecycleAccessor,
+		reachabilityStore:        cfg.ReachabilityStore,
+		reachabilityGrace:        cfg.ReachabilityGrace,
 		Metrics:                  cfg.Metrics,
 		listenerExposure:         visionmcp.ListenerLoopback,
 	}
@@ -276,4 +286,10 @@ func (s *Server) SetServerMetricsAccessor(a ServerMetricsAccessor) {
 
 func (s *Server) SetSessionLifecycleAccessor(a SessionLifecycleAccessor) {
 	s.sessionLifecycleAccessor = a
+}
+
+// SetReachabilityStore wires the daemon-owned probe evidence store after the
+// admin server has been constructed.
+func (s *Server) SetReachabilityStore(store *reachability.Store) {
+	s.reachabilityStore = store
 }

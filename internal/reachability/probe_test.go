@@ -133,6 +133,39 @@ func TestVersionSelectorChoosesListenerProbeForSupportedRevisions(t *testing.T) 
 	}
 }
 
+func TestManagerSkipsEndToEndProbeWhenSessionEvidenceIsRecent(t *testing.T) {
+	store := reachability.NewStore()
+	store.RecordProbe("busy", reachability.ProbeResult{Depth: reachability.DepthSession, Success: true})
+	listener := &recordingProbe{result: true}
+	deep := &recordingProbe{result: true}
+	manager := reachability.NewManager(store, reachability.NewVersionSelector(listener, deep))
+	if err := manager.Start(context.Background(), reachability.Target{Name: "busy", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, 5*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	waitFor(t, func() bool { return listener.count() >= 2 })
+	store.RecordProbe("busy", reachability.ProbeResult{Depth: reachability.DepthSession, Success: true})
+	time.Sleep(10 * time.Millisecond)
+	if got := deep.count(); got != 0 {
+		t.Fatalf("end-to-end probes with recent session evidence = %d, want 0", got)
+	}
+}
+
+func TestManagerRunsEndToEndProbeAtLowCadenceWithoutSessionEvidence(t *testing.T) {
+	store := reachability.NewStore()
+	listener := &recordingProbe{result: true}
+	deep := &recordingProbe{result: true}
+	manager := reachability.NewManager(store, reachability.NewVersionSelector(listener, deep))
+	if err := manager.Start(context.Background(), reachability.Target{Name: "idle", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	waitFor(t, func() bool { return deep.count() >= 1 })
+	if listener.count() <= deep.count() {
+		t.Fatalf("listener probes=%d, end-to-end probes=%d; want deep probe at lower cadence", listener.count(), deep.count())
+	}
+}
+
 func TestManagerShutdownOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	store := reachability.NewStore()
