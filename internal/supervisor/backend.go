@@ -7,6 +7,7 @@ import (
 )
 
 var ErrBackendUnavailable = errors.New("managed HTTP backend unavailable")
+var ErrDrainContextHasDeadline = errors.New("drain context must not carry a deadline")
 
 type BackendState string
 
@@ -104,6 +105,10 @@ func (c *BackendCoordinator) InFlight() int {
 // request to finish, then invokes recycle exactly once. Successful recycle
 // transitions to probing; callers must complete readiness before MarkReady.
 func (c *BackendCoordinator) DrainAndRecycle(ctx context.Context, recycle func() error) error {
+	if _, hasDeadline := ctx.Deadline(); hasDeadline {
+		return ErrDrainContextHasDeadline
+	}
+
 	c.recycleMu.Lock()
 	defer c.recycleMu.Unlock()
 
@@ -118,6 +123,9 @@ func (c *BackendCoordinator) DrainAndRecycle(ctx context.Context, recycle func()
 
 	select {
 	case <-ctx.Done():
+		c.mu.Lock()
+		c.state = BackendRestarting
+		c.mu.Unlock()
 		return ctx.Err()
 	case <-wait:
 	}

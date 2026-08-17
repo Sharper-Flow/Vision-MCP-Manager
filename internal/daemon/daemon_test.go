@@ -79,8 +79,8 @@ func TestRecycleManagedHTTPBackendCancelsOnServerTeardown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("recycle did not stop when server teardown canceled monitor context")
 	}
-	if state := coordinator.State(); state != supervisor.BackendDraining {
-		t.Fatalf("State() after canceled drain = %q, want draining", state)
+	if state := coordinator.State(); state != supervisor.BackendRestarting {
+		t.Fatalf("State() after canceled drain = %q, want restarting", state)
 	}
 }
 

@@ -7,6 +7,39 @@ import (
 	"time"
 )
 
+func TestBackendCoordinatorDrainRejectsDeadlineContextWithoutChangingState(t *testing.T) {
+	c := NewBackendCoordinator()
+	c.MarkReady()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if err := c.DrainAndRecycle(ctx, func() error { return nil }); err != ErrDrainContextHasDeadline {
+		t.Fatalf("DrainAndRecycle() error = %v, want ErrDrainContextHasDeadline", err)
+	}
+	if got := c.State(); got != BackendReady {
+		t.Fatalf("State() after rejected drain = %q, want ready", got)
+	}
+}
+
+func TestBackendCoordinatorCancelledDrainTransitionsToRestarting(t *testing.T) {
+	c := NewBackendCoordinator()
+	c.MarkReady()
+	done, err := c.BeginRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.DrainAndRecycle(ctx, func() error { return nil }); err != context.Canceled {
+		t.Fatalf("DrainAndRecycle() error = %v, want context.Canceled", err)
+	}
+	if got := c.State(); got != BackendRestarting {
+		t.Fatalf("State() after cancelled drain = %q, want restarting", got)
+	}
+}
+
 func TestBackendCoordinatorDrainWaitsForInFlight(t *testing.T) {
 	c := NewBackendCoordinator()
 	c.MarkReady()
