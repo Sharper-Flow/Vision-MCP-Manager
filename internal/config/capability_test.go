@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -63,9 +64,8 @@ func TestManagedHTTPDispositions(t *testing.T) {
 // TestSlotGroupSynthesizedManagedHTTPIsStillRefused pins the rule that support
 // is keyed by a server's transport, not by how the server came to exist. Slot
 // group members are synthesized from group defaults, and nothing stops those
-// defaults declaring managed-http, so a synthesized member must be refused on
-// exactly the same terms as a hand-written one. Getting this wrong would leave
-// a synthesis-shaped hole in the fix.
+// defaults declaring managed-http, so expansion must refuse the group before
+// synthesizing members.
 func TestSlotGroupSynthesizedManagedHTTPIsStillRefused(t *testing.T) {
 	cfg := &Config{SlotGroups: map[string]*SlotGroupConfig{
 		"browser-pool": {
@@ -81,21 +81,117 @@ func TestSlotGroupSynthesizedManagedHTTPIsStillRefused(t *testing.T) {
 			},
 		},
 	}}
-	if err := expandSlotGroups(cfg); err != nil {
-		t.Fatalf("expandSlotGroups() error = %v", err)
-	}
-
-	synthesized := cfg.Servers["browser-1"]
-	if synthesized == nil || synthesized.SlotGroup != "browser-pool" || synthesized.SlotIndex != 1 {
-		t.Fatalf("slot group did not synthesize browser-1 correctly: %#v", synthesized)
-	}
-
-	err := synthesized.Validate("browser-pool-1")
+	err := expandSlotGroups(cfg)
 	if err == nil {
-		t.Fatal("synthesized managed-http slot member must be refused, got nil")
+		t.Fatal("expandSlotGroups() must refuse managed-http slot group defaults")
 	}
-	if !errors.Is(err, ErrSettingNotSupportedByTransport) {
-		t.Fatalf("error = %v, want ErrSettingNotSupportedByTransport", err)
+	if !errors.Is(err, ErrConflictingConfig) {
+		t.Fatalf("error = %v, want ErrConflictingConfig", err)
+	}
+	if !strings.Contains(err.Error(), string(TransportManagedHTTP)) {
+		t.Fatalf("error = %v, want transport %q", err, TransportManagedHTTP)
+	}
+}
+
+func TestExpandSlotGroupsDefaultTransportMustBeStdio(t *testing.T) {
+	tests := []struct {
+		name            string
+		defaults        *ServerConfig
+		wantErr         bool
+		wantTransport   TransportType
+		wantMemberError error
+	}{
+		{
+			name: "explicit managed-http",
+			defaults: &ServerConfig{
+				Transport: TransportManagedHTTP,
+				Command:   "npx",
+				URL:       "http://127.0.0.1:16290/mcp",
+			},
+			wantErr:       true,
+			wantTransport: TransportManagedHTTP,
+		},
+		{
+			name: "url only with mcp suffix",
+			defaults: &ServerConfig{
+				URL: "http://127.0.0.1:16290/mcp",
+			},
+			wantErr:       true,
+			wantTransport: TransportHTTP,
+		},
+		{
+			name: "url only without mcp suffix",
+			defaults: &ServerConfig{
+				URL: "http://127.0.0.1:16290/events",
+			},
+			wantErr:       true,
+			wantTransport: TransportSSE,
+		},
+		{
+			name: "command and url infer stdio",
+			defaults: &ServerConfig{
+				Command: "npx",
+				URL:     "http://127.0.0.1:16290/mcp",
+			},
+			wantMemberError: ErrConflictingConfig,
+		},
+		{
+			name: "stdio command only",
+			defaults: &ServerConfig{
+				Command: "npx",
+			},
+		},
+		{
+			name:            "nil defaults",
+			wantMemberError: ErrMissingCommand,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{SlotGroups: map[string]*SlotGroupConfig{
+				"browser-pool": {
+					Template: "browser",
+					BasePort: 6290,
+					Count:    2,
+					Defaults: tt.defaults,
+				},
+			}}
+
+			err := expandSlotGroups(cfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expandSlotGroups() error = nil, want refusal")
+				}
+				if !errors.Is(err, ErrConflictingConfig) {
+					t.Fatalf("error = %v, want ErrConflictingConfig", err)
+				}
+				if !strings.Contains(err.Error(), string(tt.wantTransport)) {
+					t.Fatalf("error = %v, want transport %q", err, tt.wantTransport)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("expandSlotGroups() error = %v", err)
+			}
+
+			synthesized := cfg.Servers["browser-1"]
+			if synthesized == nil {
+				t.Fatal("expandSlotGroups() did not synthesize browser-1")
+			}
+			if tt.defaults != nil && tt.defaults.Command != "" && synthesized.Command != tt.defaults.Command {
+				t.Fatalf("synthesized command = %q, want %q", synthesized.Command, tt.defaults.Command)
+			}
+			if tt.wantMemberError != nil {
+				memberErr := synthesized.Validate("browser-pool-1")
+				if memberErr == nil {
+					t.Fatal("synthesized member validation error = nil")
+				}
+				if !errors.Is(memberErr, tt.wantMemberError) {
+					t.Fatalf("synthesized member error = %v, want %v", memberErr, tt.wantMemberError)
+				}
+			}
+		})
 	}
 }
 
