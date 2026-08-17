@@ -9,6 +9,7 @@ import (
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -296,6 +297,84 @@ func TestSharedManager_HealthProbe(t *testing.T) {
 	if !sm.HasDownstream() {
 		t.Error("downstream should be alive after health probe respawn")
 	}
+}
+
+func TestSharedManager_HealthCheckRecordsReachability(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	cfg := testSharedServerConfig()
+	store := reachability.NewStore()
+	sm := NewSharedSessionManager("test-reachability", cfg, logger, 0, nil)
+	defer sm.CloseAll()
+	sm.SetReachabilityStore(store)
+
+	if _, err := sm.GetOrCreateSession(ctx, "sess-reachability"); err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+	sm.StartHealthProbe(ctx)
+	sm.healthCheck()
+
+	got, ok := store.Get("test-reachability")
+	if !ok {
+		t.Fatal("successful health check did not create reachability evidence")
+	}
+	evidence, ok := got.Evidence[reachability.DepthSession]
+	if !ok {
+		t.Fatal("successful health check did not record session-depth evidence")
+	}
+	if evidence.LastProbeOutcome != reachability.OutcomeSuccess {
+		t.Fatalf("probe outcome = %q, want %q", evidence.LastProbeOutcome, reachability.OutcomeSuccess)
+	}
+
+	ds := sm.Downstream()
+	if ds == nil {
+		t.Fatal("expected downstream session")
+	}
+	if err := ds.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	sm.healthCheck()
+
+	got, ok = store.Get("test-reachability")
+	if !ok {
+		t.Fatal("failed health check removed reachability evidence")
+	}
+	evidence = got.Evidence[reachability.DepthSession]
+	if evidence.LastProbeOutcome != reachability.OutcomeFailure {
+		t.Fatalf("failed probe outcome = %q, want %q", evidence.LastProbeOutcome, reachability.OutcomeFailure)
+	}
+	if evidence.LastProbeError == "" {
+		t.Fatal("failed probe did not record an error")
+	}
+}
+
+func TestSharedManager_HealthCheckNilDownstreamLeavesUnprobed(t *testing.T) {
+	store := reachability.NewStore()
+	sm := NewSharedSessionManager("test-idle-unprobed", testSharedServerConfig(), testLogger(t), 0, nil)
+	defer sm.CloseAll()
+	sm.SetReachabilityStore(store)
+	sm.healthCtx = context.Background()
+
+	sm.healthCheck()
+
+	got, ok := store.Get("test-idle-unprobed")
+	if ok {
+		t.Fatalf("nil-downstream health check recorded evidence: %#v", got)
+	}
+	if got.State != reachability.StateUnprobed {
+		t.Fatalf("unseen server state = %q, want %q", got.State, reachability.StateUnprobed)
+	}
+}
+
+func TestSharedManager_HealthCheckNilStoreIsSafe(t *testing.T) {
+	sm := NewSharedSessionManager("test-nil-store", testSharedServerConfig(), testLogger(t), 0, nil)
+	defer sm.CloseAll()
+	sm.healthCtx = context.Background()
+	sm.SetReachabilityStore(nil)
+	sm.healthCheck()
 }
 
 // TestSharedManager_AdmissionControl verifies that MaxSessions limits the

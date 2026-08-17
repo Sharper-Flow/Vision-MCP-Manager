@@ -9,6 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
+
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 )
 
 // --- Port Manager ---
@@ -16,10 +19,11 @@ import (
 // PortManager manages HTTP listeners for MCP servers.
 // Each server gets its own dedicated port.
 type PortManager struct {
-	listeners map[string]*ServerListener
-	mu        sync.RWMutex
-	wg        sync.WaitGroup // Tracks active listener goroutines for clean shutdown
-	logger    *slog.Logger
+	listeners         map[string]*ServerListener
+	mu                sync.RWMutex
+	wg                sync.WaitGroup // Tracks active listener goroutines for clean shutdown
+	logger            *slog.Logger
+	reachabilityStore *reachability.Store
 }
 
 // SessionCloser is implemented by types that manage per-session resources
@@ -101,6 +105,10 @@ func (pm *PortManager) addStreamableInternal(name string, port int, handler http
 	// liveness signal when listing servers.
 	mcpHandler = ProbeCompatibilityMiddleware(name)(mcpHandler)
 
+	// The internal listener probe must be outermost: it bypasses rate limiting
+	// and bearer authentication and never reaches the MCP handler.
+	mcpHandler = ListenerProbeMiddleware()(mcpHandler)
+
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpHandler)
 
@@ -144,10 +152,34 @@ func (pm *PortManager) addStreamableInternal(name string, port int, handler http
 				slog.String("server", name),
 				slog.String("error", err.Error()),
 			)
+			pm.recordListenerProbeFailure(name, err)
 		}
 	}()
 
 	return nil
+}
+
+// SetReachabilityStore configures the optional store used for listener probe
+// evidence. A nil store disables recording and is safe for existing callers.
+func (pm *PortManager) SetReachabilityStore(store *reachability.Store) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.reachabilityStore = store
+}
+
+func (pm *PortManager) recordListenerProbeFailure(name string, err error) {
+	pm.mu.RLock()
+	store := pm.reachabilityStore
+	pm.mu.RUnlock()
+	if store == nil {
+		return
+	}
+
+	store.RecordProbe(name, reachability.ProbeResult{
+		Depth:       reachability.DepthListener,
+		AttemptedAt: time.Now(),
+		Error:       err.Error(),
+	})
 }
 
 // ProbeCompatibilityMiddleware returns a short-lived legacy SSE handshake for

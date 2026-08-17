@@ -50,6 +50,7 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -202,6 +203,24 @@ type ProxyConfig struct {
 	Metrics metrics.ServerMetricsReporter
 }
 
+type reachabilityAwareHandler struct {
+	handler  http.Handler
+	setStore func(*reachability.Store)
+}
+
+func (h *reachabilityAwareHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.handler.ServeHTTP(w, r)
+}
+
+// SetReachabilityStore configures the optional store for current and future
+// downstream probes. A nil store disables reporting.
+func (h *reachabilityAwareHandler) SetReachabilityStore(store *reachability.Store) {
+	if h == nil || h.setStore == nil {
+		return
+	}
+	h.setStore(store)
+}
+
 // hasExactlyOneManagerSource reports whether exactly one of SessionManager,
 // SharedManager, or Selector is set. NewProxyHandler requires this invariant.
 func (cfg ProxyConfig) hasExactlyOneManagerSource() bool {
@@ -250,6 +269,30 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	idx := &sessionIndex{
 		byUpstream:   make(map[string]*proxySession),
 		byDownstream: make(map[string]*proxySession),
+	}
+	var reachabilityMu sync.RWMutex
+	var reachabilityStore *reachability.Store
+	getReachabilityStore := func() *reachability.Store {
+		reachabilityMu.RLock()
+		defer reachabilityMu.RUnlock()
+		return reachabilityStore
+	}
+	setReachabilityStore := func(store *reachability.Store) {
+		reachabilityMu.Lock()
+		reachabilityStore = store
+		reachabilityMu.Unlock()
+		if cfg.SharedManager != nil {
+			cfg.SharedManager.SetReachabilityStore(store)
+		}
+		idx.mu.RLock()
+		sessions := make([]*proxySession, 0, len(idx.byUpstream))
+		for _, ps := range idx.byUpstream {
+			sessions = append(sessions, ps)
+		}
+		idx.mu.RUnlock()
+		for _, ps := range sessions {
+			ps.SetReachabilityStore(store)
+		}
 	}
 
 	// Disconnect tracker for shared-mode servers: detects client disconnect
@@ -308,7 +351,9 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				cfg.RetryConfig,
 				cfg.CircuitBreakerConfig,
 				cfg.Metrics,
+				getReachabilityStore,
 				func(upstreamSessionID string, ps *proxySession) {
+					ps.SetReachabilityStore(getReachabilityStore())
 					idx.mu.Lock()
 					idx.byUpstream[upstreamSessionID] = ps
 					idx.mu.Unlock()
@@ -356,7 +401,9 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			cfg.RetryConfig,
 			cfg.CircuitBreakerConfig,
 			cfg.Metrics,
+			getReachabilityStore,
 			func(upstreamSessionID string, ps *proxySession) {
+				ps.SetReachabilityStore(getReachabilityStore())
 				if cfg.Selector != nil && pendingKey != "" {
 					cfg.Selector.Rebind(pendingKey, upstreamSessionID)
 				}
@@ -481,10 +528,11 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	})
 
 	// For shared mode with disconnect detection, wrap the outer handler.
+	resultHandler := http.Handler(outerHandler)
 	if tracker != nil {
-		return tracker.Wrap(outerHandler)
+		resultHandler = tracker.Wrap(resultHandler)
 	}
-	return outerHandler
+	return &reachabilityAwareHandler{handler: resultHandler, setStore: setReachabilityStore}
 }
 
 func isInitializeRequest(r *http.Request) bool {
@@ -550,6 +598,7 @@ type proxySession struct {
 	upstreamSessionID string
 	currentTools      map[string]struct{}
 	closeReason       string
+	reachabilityStore *reachability.Store
 	closeMu           sync.Mutex
 	closeOnce         sync.Once
 
@@ -577,6 +626,17 @@ type proxySession struct {
 	metrics metrics.ServerMetricsReporter
 }
 
+// SetReachabilityStore configures the optional store used by this session's
+// existing health probe. A nil store disables reporting.
+func (ps *proxySession) SetReachabilityStore(store *reachability.Store) {
+	if ps == nil {
+		return
+	}
+	ps.mu.Lock()
+	ps.reachabilityStore = store
+	ps.mu.Unlock()
+}
+
 // newPerSessionServer creates a new mcp.Server for a single upstream session.
 // It spawns a downstream subprocess, discovers tools, registers proxy handlers,
 // and sets up notification relay from downstream to upstream.
@@ -593,6 +653,7 @@ func newPerSessionServer(
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
 	srvMetrics metrics.ServerMetricsReporter,
+	reachabilityStore func() *reachability.Store,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
 	onRespawn func(oldSessionID, newSessionID string, ps *proxySession),
@@ -617,6 +678,9 @@ func newPerSessionServer(
 		retryConfig:         retryConfig,
 		circuitBreaker:      newCircuitBreaker(circuitBreakerConfig, nil),
 		metrics:             srvMetrics,
+	}
+	if reachabilityStore != nil {
+		ps.SetReachabilityStore(reachabilityStore())
 	}
 	if ps.requestTimeout <= 0 {
 		ps.requestTimeout = 30 * time.Second
@@ -726,6 +790,7 @@ func newSharedModeServer(
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
 	srvMetrics metrics.ServerMetricsReporter,
+	reachabilityStore func() *reachability.Store,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
 ) (*mcp.Server, error) {
@@ -746,6 +811,9 @@ func newSharedModeServer(
 		retryConfig:        retryConfig,
 		circuitBreaker:     newCircuitBreaker(circuitBreakerConfig, nil),
 		metrics:            srvMetrics,
+	}
+	if reachabilityStore != nil {
+		ps.SetReachabilityStore(reachabilityStore())
 	}
 	if ps.requestTimeout <= 0 {
 		ps.requestTimeout = 30 * time.Second
@@ -1483,9 +1551,25 @@ func (ps *proxySession) startHealthProbe() {
 					return
 				}
 
+				ps.mu.Lock()
+				store := ps.reachabilityStore
+				ps.mu.Unlock()
+				attemptedAt := time.Now()
+				if store != nil {
+					store.StartProbe(ps.serverName, reachability.DepthSession, attemptedAt)
+				}
+
 				probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
 				_, err := ds.ListTools(probeCtx, nil)
 				probeCancel()
+				if store != nil {
+					store.RecordProbe(ps.serverName, reachability.ProbeResult{
+						Depth:       reachability.DepthSession,
+						AttemptedAt: attemptedAt,
+						Success:     err == nil,
+						Error:       errorString(err),
+					})
+				}
 
 				if err != nil {
 					consecutiveFails++
@@ -1517,6 +1601,13 @@ func (ps *proxySession) startHealthProbe() {
 	ps.logger.Debug("health probe started",
 		slog.Duration("interval", ps.healthCheckInterval),
 	)
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // stopHealthProbe cancels the active health probe goroutine, if any.

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -42,6 +43,10 @@ type SharedSessionManager struct {
 	// metrics tracks per-server session lifecycle counters. Optional; nil = no metrics.
 	metrics metrics.ServerMetricsReporter
 
+	// reachabilityStore receives observations from the existing health probe.
+	// Optional; nil disables reachability reporting without changing probing.
+	reachabilityStore *reachability.Store
+
 	healthCtx    context.Context
 	healthCancel context.CancelFunc
 
@@ -65,6 +70,17 @@ func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger
 		idleTimeout:      idleTimeout,
 		metrics:          m,
 	}
+}
+
+// SetReachabilityStore configures the optional store used by health probes.
+// A nil store disables reporting while leaving the probe behavior unchanged.
+func (sm *SharedSessionManager) SetReachabilityStore(store *reachability.Store) {
+	if sm == nil {
+		return
+	}
+	sm.mu.Lock()
+	sm.reachabilityStore = store
+	sm.mu.Unlock()
 }
 
 // GetOrCreateSession returns the shared downstream session, lazily spawning it
@@ -441,16 +457,29 @@ func (sm *SharedSessionManager) healthCheck() {
 	sm.mu.RLock()
 	ds := sm.downstream
 	closed := sm.closed
+	store := sm.reachabilityStore
 	sm.mu.RUnlock()
 
 	if closed || ds == nil {
 		return
 	}
 
+	attemptedAt := time.Now()
+	if store != nil {
+		store.StartProbe(sm.serverName, reachability.DepthSession, attemptedAt)
+	}
+
 	checkCtx, cancel := context.WithTimeout(sm.healthCtx, 5*time.Second)
 	defer cancel()
 
 	if _, err := ds.ListTools(checkCtx, nil); err != nil {
+		if store != nil {
+			store.RecordProbe(sm.serverName, reachability.ProbeResult{
+				Depth:       reachability.DepthSession,
+				AttemptedAt: attemptedAt,
+				Error:       err.Error(),
+			})
+		}
 		sm.logger.Warn("health check failed, triggering respawn",
 			slog.String("event", "shared_session.health_check_failed"),
 			slog.String("error", err.Error()),
@@ -468,6 +497,14 @@ func (sm *SharedSessionManager) healthCheck() {
 		spawnCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_, _ = sm.getOrCreateDownstream(spawnCtx)
+		return
+	}
+	if store != nil {
+		store.RecordProbe(sm.serverName, reachability.ProbeResult{
+			Depth:       reachability.DepthSession,
+			AttemptedAt: attemptedAt,
+			Success:     true,
+		})
 	}
 }
 

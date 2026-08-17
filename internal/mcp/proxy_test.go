@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -1141,6 +1142,98 @@ func TestProxySession_DownstreamNotificationsDoNotTouchSession(t *testing.T) {
 			initialActivity, got.LastActivity,
 		)
 	}
+}
+
+func TestProxySession_HealthProbeReportsSuccess(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	mgr := session.NewManager("test-proxy-reachability-success", testServerConfig(), logger)
+	defer mgr.CloseAll()
+
+	const sessionID = "sess-proxy-reachability-success"
+	ds, err := mgr.SpawnSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("SpawnSession failed: %v", err)
+	}
+	store := reachability.NewStore()
+	ps := &proxySession{
+		serverName:          "test-proxy-reachability-success",
+		sessionID:           sessionID,
+		mgr:                 mgr,
+		logger:              logger,
+		downstream:          ds,
+		healthCheckInterval: 20 * time.Millisecond,
+	}
+	ps.SetReachabilityStore(store)
+	ps.startHealthProbe()
+	defer ps.stopHealthProbe()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, ok := store.Get(ps.serverName); ok {
+			if evidence, exists := got.Evidence[reachability.DepthSession]; exists && evidence.LastProbeOutcome == reachability.OutcomeSuccess {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("health probe did not record a session-depth success")
+}
+
+func TestProxySession_HealthProbeThreeFailuresSurfaceUnreachable(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger := testLogger(t)
+	mgr := session.NewManager("test-proxy-reachability-failure", testServerConfig(), logger)
+	defer mgr.CloseAll()
+
+	const sessionID = "sess-proxy-reachability-failure"
+	ds, err := mgr.SpawnSession(ctx, sessionID)
+	if err != nil {
+		t.Fatalf("SpawnSession failed: %v", err)
+	}
+	store := reachability.NewStore()
+	ps := &proxySession{
+		serverName:          "test-proxy-reachability-failure",
+		sessionID:           sessionID,
+		mgr:                 mgr,
+		logger:              logger,
+		downstream:          ds,
+		healthCheckInterval: 20 * time.Millisecond,
+	}
+	ps.SetReachabilityStore(store)
+	if err := ds.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+	ps.startHealthProbe()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, ok := store.Get(ps.serverName); ok {
+			if evidence, exists := got.Evidence[reachability.DepthSession]; exists && got.State == reachability.StateUnreachable {
+				if evidence.ConsecutiveFailures != reachability.FailureThreshold {
+					t.Fatalf("consecutive failures = %d, want %d", evidence.ConsecutiveFailures, reachability.FailureThreshold)
+				}
+				if evidence.LastProbeError == "" {
+					t.Fatal("failed probe did not record an error")
+				}
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	ps.stopHealthProbe()
+	t.Fatal("three failed health probes did not surface unreachable")
+}
+
+func TestProxySession_HealthProbeNilStoreIsSafe(t *testing.T) {
+	ps := &proxySession{}
+	ps.SetReachabilityStore(nil)
 }
 
 // TestProxyHandler_ConcurrentInitCallDelete hammers the proxy with multiple
