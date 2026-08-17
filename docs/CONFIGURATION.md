@@ -103,13 +103,18 @@ doing nothing.
 | `max_in_flight_requests` | yes | n/a | **rejected** |
 | `idle_reap_timeout` | yes | n/a | **rejected** |
 | `disconnect_grace_period` | yes | n/a | yes |
+| `retry` | yes | n/a | **rejected** |
+| `circuit_breaker` | yes | n/a | **rejected** |
+| `health_check_interval` | yes | n/a | **rejected** |
+| `session_ttl` | yes | n/a | **rejected** |
 
 `n/a` for `http` and `sse` means the setting has no effect there, and is
 accepted rather than rejected. Vision does not proxy externally owned HTTP and
 SSE servers — it only routes to them — so no server-level tuning reaches a
-consumer on those transports. That applies to `request_timeout`, `retry`,
-`circuit_breaker` and `health_check_interval` as well, not just the settings
-above, which is why these are still accepted rather than turned into errors.
+consumer on those transports. That applies to `request_timeout` as well, not
+just the settings above, which is why it is still accepted rather than turned
+into an error. (`request_timeout` is honored on every transport, including
+managed-http, by the shared HTTP client layer.)
 
 **Why the three shared-result settings are rejected on managed-http.** They
 coalesce and cache tool results *across* client sessions. Managed-http gives
@@ -526,6 +531,7 @@ VISION_PLAYWRIGHT_REAL_TEST=1 go test ./internal/integration \
 - Synthesized server names (`<template>-1`, etc.) must not collide with existing `servers:` keys.
 - All generated ports (`base_port` through `base_port + count - 1`) must be unique and within 6276–6325.
 - `group_port` must not overlap with any slot port or other server port.
+- The group's `defaults` must resolve to the `stdio` transport (explicitly set or inferred from `command`). A group whose defaults declare `managed-http`, or infer `http`/`sse` from a URL, is rejected at config load: only stdio proxies register a session manager for the group multiplexer, so a non-stdio group would accept traffic on its slot ports but never bind the group port.
 
 #### Save / round-trip behavior
 
