@@ -175,6 +175,51 @@ func TestRecycleManagedHTTPBackendWarnsOnceForSlowDrain(t *testing.T) {
 	}
 }
 
+func TestRecycleManagedHTTPBackendCompletesAfterSlowDrain(t *testing.T) {
+	coordinator := supervisor.NewBackendCoordinator()
+	coordinator.MarkReady()
+	requestDone, err := coordinator.BeginRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := &drainWarningHandler{records: make(chan slog.Record, 1)}
+	d := &Daemon{
+		logger:                           slog.New(handler),
+		managedHTTPDrainWarningThreshold: time.Millisecond,
+	}
+	completed := make(chan struct{})
+	go func() {
+		d.recycleManagedHTTPBackend(context.Background(), "test", &supervisor.ManagedProcess{}, coordinator, errors.New("ambiguous failure"))
+		close(completed)
+	}()
+	waitForBackendState(t, coordinator, supervisor.BackendDraining)
+
+	select {
+	case record := <-handler.records:
+		if record.Message != "managed HTTP recycle drain is slow" {
+			t.Fatalf("warning message = %q", record.Message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow-drain warning did not fire")
+	}
+	select {
+	case <-completed:
+		t.Fatal("recycle completed while request was still in flight")
+	default:
+	}
+
+	requestDone()
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("recycle did not complete after in-flight request finished")
+	}
+	if got := coordinator.State(); got != supervisor.BackendProbing {
+		t.Fatalf("state after slow drain = %q, want probing", got)
+	}
+}
+
 func TestRecycleManagedHTTPBackendDoesNotWarnForFastDrain(t *testing.T) {
 	handler := &drainWarningHandler{records: make(chan slog.Record, 1)}
 	d := &Daemon{
