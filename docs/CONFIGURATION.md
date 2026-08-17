@@ -98,7 +98,7 @@ supervision:
   # Reachability probe cadence for managed servers (default: 30s;
   # end-to-end probes run at 10x this interval)
   health_check_interval: 30s
-  
+
   # Graceful shutdown timeout (default: 10s)
   shutdown_timeout: 10s
   
@@ -108,6 +108,11 @@ supervision:
   # Maximum restart delay (default: 60s)
   max_restart_delay: 60s
 ```
+
+Reachability probing covers `stdio` and `managed-http` servers, whose listeners
+Vision owns. `http` and `sse` servers are externally hosted through `url`; Vision
+does not front them with a listener, so their status is reported from process
+and backend state rather than reachability evidence.
 
 ### Managed process restart policy
 

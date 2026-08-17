@@ -754,23 +754,33 @@ func (d *Daemon) handleServerEvent(event server.ServerEvent) {
 }
 
 func (d *Daemon) probeInterval() time.Duration {
-	if d != nil && d.cfg != nil {
-		if interval := d.cfg.Supervision.HealthCheckInterval.Duration(); interval > 0 {
-			return interval
+	if d != nil {
+		d.mu.RLock()
+		defer d.mu.RUnlock()
+		if d.cfg != nil {
+			if interval := d.cfg.Supervision.HealthCheckInterval.Duration(); interval > 0 {
+				return interval
+			}
 		}
 	}
 	return reachability.DefaultProbeInterval
 }
 
 func (d *Daemon) startProbeWorker(srv *server.ManagedServer, interval time.Duration) {
-	if d.probeManager == nil || srv == nil || srv.Config == nil || srv.Config.Port <= 0 {
+	if d.probeManager == nil || srv == nil || srv.Config == nil || !srv.Config.InferTransport().IsReachabilityProbeable() || srv.Config.Port <= 0 {
 		return
 	}
+	d.mu.RLock()
+	bearerToken := ""
+	if d.cfg != nil {
+		bearerToken = d.cfg.Security.BearerToken
+	}
+	d.mu.RUnlock()
 	err := d.probeManager.Start(d.ctx, reachability.Target{
 		Name:            srv.Name,
 		Port:            srv.Config.Port,
 		ProtocolVersion: reachability.ProtocolVersion2025_11_25,
-		BearerToken:     d.cfg.Security.BearerToken,
+		BearerToken:     bearerToken,
 	}, interval)
 	if err != nil {
 		d.logger.Warn("failed to start reachability probe worker",

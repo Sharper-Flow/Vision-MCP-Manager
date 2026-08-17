@@ -79,7 +79,7 @@ func (s *Server) handleV1ServerDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) v1ServerEntry(st server.ServerStatus) map[string]any {
 	lifecycle := s.lifecycleSnapshot(st.Name)
-	effective := deriveEffectiveStatus(st.State, lifecycleBackendState(lifecycle), s.reachabilityFor(st.Name), st.Uptime, s.reachabilityGrace, st.LastError)
+	effective := deriveEffectiveStatus(st.State, lifecycleBackendState(lifecycle), s.reachabilityFor(st.Name), st.Transport.IsReachabilityProbeable(), st.Uptime, s.reachabilityGrace, st.LastError)
 	reachability := effective.Reachability
 	entry := map[string]any{
 		"name": st.Name, "port": st.Port, "transport": string(st.Transport),

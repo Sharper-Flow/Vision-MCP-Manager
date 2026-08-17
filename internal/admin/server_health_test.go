@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -93,7 +94,7 @@ func TestHandleHealthEffectiveStatusCasesAndResponseShape(t *testing.T) {
 	}
 }
 
-func TestHandleHealthUnprobedServerWithinGraceStaysHealthy(t *testing.T) {
+func TestHandleHealthUnprobedServerWithinGraceIsNotHealthy(t *testing.T) {
 	reg := newTestRegistry()
 	if err := reg.Add("warming", &config.ServerConfig{Transport: config.TransportStdio}); err != nil {
 		t.Fatal(err)
@@ -104,10 +105,31 @@ func TestHandleHealthUnprobedServerWithinGraceStaysHealthy(t *testing.T) {
 
 	s := &Server{registry: reg, running: true, reachabilityStore: reachability.NewStore(), reachabilityGrace: time.Minute}
 	body := callHealth(t, s)
-	if body["status"] != "ok" {
-		t.Fatalf("status=%v, want ok during grace; body=%v", body["status"], body)
+	if body["status"] != "degraded" {
+		t.Fatalf("status=%v, want degraded during grace; body=%v", body["status"], body)
 	}
-	assertJSONKeys(t, body, []string{"status"})
+	assertJSONKeys(t, body, []string{"status", "errors"})
+}
+
+func TestToolStatusDoesNotClaimHealthyWithoutProbeEvidence(t *testing.T) {
+	reg := newTestRegistry()
+	if err := reg.Add("warming", &config.ServerConfig{Transport: config.TransportStdio}); err != nil {
+		t.Fatal(err)
+	}
+	srv := reg.Get("warming")
+	srv.State = server.StateRunning
+	srv.StartedAt = time.Now()
+
+	s := &Server{registry: reg, reachabilityStore: reachability.NewStore(), reachabilityGrace: time.Minute}
+	result, err := s.toolStatus(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response StatusResponse
+	decodeToolJSON(t, result, &response)
+	if response.Healthy {
+		t.Fatalf("vision_status reported healthy without probe evidence: %#v", response)
+	}
 }
 
 func TestHandleHealthzRemainsLivenessOnly(t *testing.T) {

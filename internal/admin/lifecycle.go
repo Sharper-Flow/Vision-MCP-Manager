@@ -58,8 +58,10 @@ type ReachabilityDetails struct {
 const DefaultReachabilityGrace = 30 * time.Second
 
 // deriveEffectiveStatus is the single precedence table for process and
-// managed-backend status exposed by admin surfaces.
-func deriveEffectiveStatus(process server.State, backend string, value reachability.Reachability, processUptime, startupGrace time.Duration, rawReason string) EffectiveStatus {
+// managed-backend status exposed by admin surfaces. Non-probeable transports
+// deliberately skip reachability enforcement because Vision does not own
+// their externally hosted listener.
+func deriveEffectiveStatus(process server.State, backend string, value reachability.Reachability, probeable bool, processUptime, startupGrace time.Duration, rawReason string) EffectiveStatus {
 	details := projectReachability(value)
 	var status, reason string
 	switch process {
@@ -75,6 +77,10 @@ func deriveEffectiveStatus(process server.State, backend string, value reachabil
 	case server.StateRunning:
 		switch strings.ToLower(backend) {
 		case "", "ready":
+			if !probeable {
+				status = "running"
+				break
+			}
 			reachabilityState := normalizedReachabilityState(value)
 			switch reachabilityState {
 			case reachability.StateReachable:

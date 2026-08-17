@@ -1547,7 +1547,7 @@ func (ps *proxySession) startHealthProbe() {
 		defer ticker.Stop()
 
 		consecutiveFails := 0
-		const failureThreshold = 3
+		failureThreshold := reachability.FailureThreshold
 
 		for {
 			select {

@@ -226,11 +226,6 @@ func (s *Store) ensureRecord(serverName string) *serverRecord {
 }
 
 func stateFor(record *serverRecord) State {
-	for _, count := range record.probing {
-		if count > 0 {
-			return StateProbing
-		}
-	}
 	if len(record.reachability.Evidence) == 0 {
 		return StateUnprobed
 	}
@@ -248,6 +243,11 @@ func stateFor(record *serverRecord) State {
 	for _, depthState := range record.stateByDepth {
 		if depthState == StateUnreachable {
 			return StateUnreachable
+		}
+	}
+	for _, count := range record.probing {
+		if count > 0 {
+			return StateProbing
 		}
 	}
 

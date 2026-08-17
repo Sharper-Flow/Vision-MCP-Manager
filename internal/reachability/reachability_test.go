@@ -156,6 +156,16 @@ func TestStoreShallowFailureIsNotMaskedByStaleDeeperSuccess(t *testing.T) {
 	}
 }
 
+func TestStoreProbeInProgressDoesNotMaskExistingUnreachableEvidence(t *testing.T) {
+	store := NewStore()
+	store.RecordDefinitiveFailure("alpha", DepthListener, time.Unix(300, 0), "listener bind failed")
+
+	got := store.StartProbe("alpha", DepthEndToEnd, time.Unix(301, 0))
+	if got.State != StateUnreachable {
+		t.Fatalf("state = %q, want %q — an in-flight deeper probe must not mask listener failure", got.State, StateUnreachable)
+	}
+}
+
 func TestStoreRemoveClearsState(t *testing.T) {
 	store := NewStore()
 	store.RecordProbe("alpha", ProbeResult{Depth: DepthListener, Success: true})

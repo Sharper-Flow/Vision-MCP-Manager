@@ -124,6 +124,16 @@ func assertTransportUnhealthy(t *testing.T, adminServer *Server, name string, tr
 	t.Helper()
 	entries := callV1Servers(t, adminServer)
 	entry := entries[0]
+	if !transport.IsReachabilityProbeable() {
+		if entry["effective_status"] != "running" {
+			t.Fatalf("externally hosted %s effective_status = %v, want process-state running; entry=%v", transport, entry["effective_status"], entry)
+		}
+		health := callHealth(t, adminServer)
+		if health["status"] != "ok" {
+			t.Fatalf("externally hosted %s /health = %v, want ok from process state", transport, health)
+		}
+		return
+	}
 	if entry["effective_status"] == "running" {
 		t.Fatalf("unreachable %s still reports running: %v", transport, entry)
 	}

@@ -214,3 +214,36 @@ func TestManagerShutdownOnContextCancel(t *testing.T) {
 		t.Fatalf("worker continued after shutdown completed: before=%d after=%d", count, got)
 	}
 }
+
+func TestManagerConcurrentStartsLeaveOneWorker(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	store := reachability.NewStore()
+	probe := &recordingProbe{result: true}
+	manager := reachability.NewManager(store, reachability.NewVersionSelector(probe))
+	defer manager.Close()
+
+	const starts = 32
+	ready := make(chan struct{})
+	var workers sync.WaitGroup
+	for range starts {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-ready
+			if err := manager.StartWithProbe(ctx, reachability.Target{Name: "same-server", Port: 1}, time.Nanosecond, probe); err != nil {
+				t.Errorf("start worker: %v", err)
+			}
+		}()
+	}
+	close(ready)
+	workers.Wait()
+	manager.Close()
+
+	count := probe.count()
+	time.Sleep(5 * time.Millisecond)
+	if got := probe.count(); got != count {
+		t.Fatalf("a superseded worker continued after Close: before=%d after=%d", count, got)
+	}
+}

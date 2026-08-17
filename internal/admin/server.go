@@ -228,11 +228,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 				status.State,
 				lifecycleBackendState(lifecycle),
 				s.reachabilityFor(status.Name),
+				status.Transport.IsReachabilityProbeable(),
 				status.Uptime,
 				s.reachabilityGrace,
 				status.LastError,
 			)
-			if effective.Status == "error" {
+			if effective.Status == "error" || effective.Status == "starting" {
 				errors = append(errors, fmt.Sprintf("%s: %s", status.Name, effective.Reason))
 			}
 		}

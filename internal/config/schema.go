@@ -44,6 +44,13 @@ const (
 	TransportSSE TransportType = "sse"
 )
 
+// IsReachabilityProbeable reports whether Vision owns a listener it can probe.
+// Externally owned http and sse endpoints are reached through Config.URL, so
+// Vision deliberately does not apply listener reachability evidence to them.
+func (t TransportType) IsReachabilityProbeable() bool {
+	return t == TransportStdio || t == TransportManagedHTTP
+}
+
 // RestartPolicy defines when a server should be restarted.
 type RestartPolicy string
 

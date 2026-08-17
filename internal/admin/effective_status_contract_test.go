@@ -23,6 +23,7 @@ func (a lifecycleByServer) SessionLifecycleSnapshot(name string) *SessionLifecyc
 func TestDeriveEffectiveStatusMatrix(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		transport  config.TransportType
 		process    server.State
 		backend    string
 		reach      reachability.Reachability
@@ -36,6 +37,10 @@ func TestDeriveEffectiveStatusMatrix(t *testing.T) {
 		{name: "probing", process: server.StateRunning, backend: "ready", reach: reachability.Reachability{State: reachability.StateProbing}, want: "starting", wantReason: true},
 		{name: "unprobed within grace", process: server.StateRunning, backend: "ready", uptime: 2 * time.Second, grace: 5 * time.Second, want: "starting", wantReason: true},
 		{name: "unprobed beyond grace", process: server.StateRunning, backend: "ready", uptime: 6 * time.Second, grace: 5 * time.Second, want: "error", wantReason: true},
+		{name: "http unprobed beyond grace falls back to process state", transport: config.TransportHTTP, process: server.StateRunning, backend: "ready", uptime: 6 * time.Second, grace: 5 * time.Second, want: "running"},
+		{name: "sse unprobed beyond grace falls back to process state", transport: config.TransportSSE, process: server.StateRunning, backend: "ready", uptime: 6 * time.Second, grace: 5 * time.Second, want: "running"},
+		{name: "stdio unprobed beyond grace remains an error", transport: config.TransportStdio, process: server.StateRunning, backend: "ready", uptime: 6 * time.Second, grace: 5 * time.Second, want: "error", wantReason: true},
+		{name: "managed-http unprobed beyond grace remains an error", transport: config.TransportManagedHTTP, process: server.StateRunning, backend: "ready", uptime: 6 * time.Second, grace: 5 * time.Second, want: "error", wantReason: true},
 		{name: "unreachable threshold", process: server.StateRunning, backend: "ready", reach: unreachableTestValue(), want: "error", wantReason: true},
 		{name: "draining", process: server.StateRunning, backend: "draining", reach: reachableTestValue(), want: "error", wantReason: true},
 		{name: "recycling", process: server.StateRunning, backend: "recycling", reach: reachableTestValue(), want: "error", wantReason: true},
@@ -47,7 +52,11 @@ func TestDeriveEffectiveStatusMatrix(t *testing.T) {
 		{name: "unknown is never optimistic", process: server.State("mystery"), backend: "ready", want: "error", wantReason: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := deriveEffectiveStatus(tc.process, tc.backend, tc.reach, tc.uptime, tc.grace, "restart authorization=secret")
+			transport := tc.transport
+			if transport == "" {
+				transport = config.TransportStdio
+			}
+			got := deriveEffectiveStatus(tc.process, tc.backend, tc.reach, transport.IsReachabilityProbeable(), tc.uptime, tc.grace, "restart authorization=secret")
 			if got.Status != tc.want {
 				t.Fatalf("status=%q, want %q", got.Status, tc.want)
 			}
@@ -65,7 +74,7 @@ func TestDeriveEffectiveStatusMatrix(t *testing.T) {
 }
 
 func TestDeriveEffectiveStatusUsesScrubbedTerminalReason(t *testing.T) {
-	got := deriveEffectiveStatus(server.StateFailed, "ready", reachability.Reachability{State: reachability.StateReachable}, 0, 0, "restart limit exceeded authorization=secret")
+	got := deriveEffectiveStatus(server.StateFailed, "ready", reachability.Reachability{State: reachability.StateReachable}, true, 0, 0, "restart limit exceeded authorization=secret")
 	if got.Status != "error" || !strings.Contains(got.Reason, "restart limit exceeded") {
 		t.Fatalf("effective=%#v", got)
 	}

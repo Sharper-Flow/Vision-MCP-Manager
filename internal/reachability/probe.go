@@ -100,8 +100,9 @@ type Manager struct {
 	selector *VersionSelector
 	logger   *slog.Logger
 
-	mu      sync.Mutex
-	workers map[string]*workerHandle
+	mu          sync.Mutex
+	lifecycleMu sync.Mutex
+	workers     map[string]*workerHandle
 }
 
 func NewManager(store *Store, selector *VersionSelector, logger ...*slog.Logger) *Manager {
@@ -144,10 +145,13 @@ func (m *Manager) startWithProbes(parent context.Context, target Target, interva
 	if interval <= 0 {
 		interval = DefaultProbeInterval
 	}
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
 	// Ordered lifecycle events normally make this unnecessary, but replacing a
 	// stale worker here prevents duplicate loops if a caller starts a server
 	// twice without an intervening stop event.
-	if err := m.Stop(target.Name); err != nil {
+	if err := m.stop(target.Name); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithCancel(parent)
@@ -174,7 +178,9 @@ func (m *Manager) finished(name string, handle *workerHandle) {
 // Remove stops the worker before deleting evidence, ensuring an in-flight
 // result cannot be written after the server has left the registry.
 func (m *Manager) Remove(name string) error {
-	if err := m.Stop(name); err != nil {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if err := m.stop(name); err != nil {
 		return err
 	}
 	m.store.Remove(name)
@@ -182,6 +188,12 @@ func (m *Manager) Remove(name string) error {
 }
 
 func (m *Manager) Stop(name string) error {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	return m.stop(name)
+}
+
+func (m *Manager) stop(name string) error {
 	m.mu.Lock()
 	handle := m.workers[name]
 	if handle != nil {
@@ -198,6 +210,8 @@ func (m *Manager) Stop(name string) error {
 
 // Close cancels and joins every worker. It is safe to call repeatedly.
 func (m *Manager) Close() {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	m.mu.Lock()
 	handles := make([]*workerHandle, 0, len(m.workers))
 	for name, handle := range m.workers {

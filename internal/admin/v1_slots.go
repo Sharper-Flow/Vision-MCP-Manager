@@ -130,6 +130,7 @@ func (s *Server) slotDetail(name string, cfg *config.ServerConfig) SlotDetail {
 		processState,
 		lifecycleBackendState(lifecycle),
 		s.reachabilityFor(name),
+		cfg.InferTransport().IsReachabilityProbeable(),
 		processUptime,
 		s.reachabilityGrace,
 		rawReason,

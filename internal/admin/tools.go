@@ -356,7 +356,7 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 	for _, srv := range servers {
 		status := srv.Status()
 		lifecycle := s.lifecycleSnapshot(status.Name)
-		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), s.reachabilityFor(status.Name), status.Uptime, s.reachabilityGrace, status.LastError)
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
 		info := ListServerEntry{
 			Name:                status.Name,
 			CodemodeNamespace:   s.codemodeNamespace(status.Name),
@@ -574,7 +574,7 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 
 			if srv != nil {
 				status := srv.Status()
-				effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Uptime, s.reachabilityGrace, status.LastError)
+				effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
 				port := status.Port
 				response := AddResponse{
 					Success:             true,
@@ -683,7 +683,7 @@ func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallRe
 	srv := s.registry.Get(params.Name)
 	if srv != nil {
 		status := srv.Status()
-		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Uptime, s.reachabilityGrace, status.LastError)
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
 		port := status.Port
 		response := AddResponse{
 			Success:             true,
@@ -858,7 +858,7 @@ func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCa
 	if srv != nil {
 		status := srv.Status()
 		lifecycle := s.lifecycleSnapshot(status.Name)
-		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), s.reachabilityFor(status.Name), status.Uptime, s.reachabilityGrace, status.LastError)
+		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
 		port := status.Port
 		response := RestartResponse{
 			Success:             true,
@@ -1387,8 +1387,20 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 		registryStatus = s.registry.Status()
 	}
 
-	// Healthy if no failed servers
-	healthy := registryStatus.FailedServers == 0
+	// A live process is not sufficient evidence of health. Keep this aggregate
+	// aligned with the per-server precedence table so unprobed and probing
+	// servers cannot be reported healthy by vision_status.
+	healthy := true
+	if s.registry != nil {
+		for _, srv := range s.registry.List() {
+			status := srv.Status()
+			effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
+			if effective.Status != "running" {
+				healthy = false
+				break
+			}
+		}
+	}
 
 	response := StatusResponse{
 		Healthy: healthy,
