@@ -102,6 +102,65 @@ var transportCapabilities = map[TransportType]map[SettingKey]settingCapability{
 	},
 }
 
+// ungovernedSettings records every ServerConfig yaml field that is deliberately
+// outside the capability table, mapped to the reason it is outside.
+//
+// The rationale is required, not decorative. This change exists because five
+// settings were accepted for a transport that never read them, and nothing said
+// so. An allowlist that took bare field names would let the next such setting be
+// silenced by adding one line, which is the same failure with extra steps. The
+// completeness test rejects an empty rationale, so opting a field out costs a
+// written justification that a reviewer can disagree with.
+var ungovernedSettings = map[SettingKey]string{
+	// Identity and wiring. Every transport reads these, or fails validation
+	// without them.
+	"port":      "every transport binds a listener on it",
+	"transport": "selects which capability row applies; it cannot be governed by the table it selects",
+	"command":   "required by stdio and managed-http, rejected with url by the others at validation",
+	"args":      "passed to the spawned process wherever a command is spawned",
+	"env":       "passed to the spawned process wherever a command is spawned",
+	"url":       "required by http, sse, and managed-http, and validated per transport already",
+	"headers":   "forwarded by every transport that dials an upstream url",
+
+	// Process lifecycle. Owned by the supervisor, which runs above the
+	// transport and treats all transports alike.
+	"autostart":      "supervisor-level, applied before any transport is constructed",
+	"restart_policy": "supervisor-level restart handling, identical across transports",
+	"max_restarts":   "supervisor-level restart budget, identical across transports",
+	"stateful":       "process-per-session toggle; managed-http rejects it explicitly at validation",
+
+	// Session lifecycle read by every transport's session or lease manager.
+	"session_timeout": "honored everywhere; on managed-http it is the setting that supersedes idle_reap_timeout",
+	"max_sessions":    "honored everywhere, including the managed-http lease admission limit",
+
+	// Descriptive metadata, never interpreted.
+	"availability_profile": "selects default values rather than behavior; the defaults it applies are themselves capability-gated",
+	"required":             "informational for daemon startup and external tooling, not transport behavior",
+	"source":               "informational only, preserved on round-trip and never interpreted",
+	"description":          "informational only, preserved on round-trip and never interpreted",
+	"request_timeout":      "applied by the shared HTTP client layer beneath every transport",
+
+	// KNOWN SAME-CLASS DEFECTS -- deferred, not benign.
+	//
+	// Each of these is accepted on managed-http and never read there:
+	// setupManagedHTTPProxy and ManagedHTTPGatewayConfig reference none of
+	// them, and managed-http handles failure by recycling on ambiguity rather
+	// than by retrying or circuit-breaking. They are the same defect this
+	// change fixes for five other settings.
+	//
+	// They are ungoverned only because the approved agreement for
+	// fixSilentlyIgnoredManagedHttp scoped it to those five. Refusing or
+	// implementing these is a follow-up recorded in that change's design D6.
+	// Extending the fix is a capability-table row plus a guard in
+	// applyAvailabilityProfileDefaults -- note that the retry defaults
+	// dereference s.Retry immediately after allocating it, so a guard must wrap
+	// the whole retry block rather than each statement.
+	"health_check_interval": "DEFERRED SAME-CLASS DEFECT: unread on managed-http and injected there by the networked profile; refusing it is out of scope for the change that added this table (see design D6)",
+	"retry":                 "DEFERRED SAME-CLASS DEFECT: unread on managed-http and injected there by the networked profile; refusing it is out of scope for the change that added this table (see design D6)",
+	"circuit_breaker":       "DEFERRED SAME-CLASS DEFECT: unread on managed-http and injected there by the networked profile; refusing it is out of scope for the change that added this table (see design D6)",
+	"session_ttl":           "DEFERRED SAME-CLASS DEFECT: unread on managed-http, though unlike the others it is not profile-injected; refusing it is out of scope for the change that added this table (see design D6)",
+}
+
 func lookupCapability(transport TransportType, setting SettingKey) (Disposition, RefusalReason, bool) {
 	settings, ok := transportCapabilities[transport]
 	if !ok {
