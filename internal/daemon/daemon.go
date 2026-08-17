@@ -910,6 +910,13 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 	if process == nil {
 		return errors.New("managed HTTP server has no supervised process")
 	}
+	monitorCtx, monitorCancel := context.WithCancel(d.ctx)
+	success := false
+	defer func() {
+		if !success {
+			monitorCancel()
+		}
+	}()
 	var gateway *mcp.ManagedHTTPGateway
 	gateway, err = mcp.NewManagedHTTPGateway(mcp.ManagedHTTPGatewayConfig{
 		Target:                target,
@@ -919,7 +926,7 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 		HungRequestBound:      10 * srv.Config.RequestTimeout.Duration(),
 		Backend:               coordinator,
 		OnAmbiguousFailure: func(cause error) {
-			go d.recycleManagedHTTPBackend(srv.Name, process, coordinator, cause)
+			go d.recycleManagedHTTPBackend(monitorCtx, srv.Name, process, coordinator, cause)
 		},
 		Metrics: srvMetrics,
 		Logger:  d.logger.With(slog.String("server", srv.Name)),
@@ -942,12 +949,12 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 		srv.Config.SessionTimeout.Duration(),
 		srv.Config.ResolvedDisconnectGracePeriod(),
 	)
-	monitorCtx, monitorCancel := context.WithCancel(d.ctx)
 	gateway.StartReaper(monitorCtx, reapInterval)
 	d.managedGatewaysMu.Lock()
 	d.managedGateways[srv.Name] = gateway
 	d.managedBackends[srv.Name] = coordinator
 	d.managedCancels[srv.Name] = monitorCancel
+	success = true
 	d.managedGatewaysMu.Unlock()
 	d.serverMetricsMu.Lock()
 	d.serverMetrics[srv.Name] = srvMetrics
@@ -972,9 +979,7 @@ func managedHTTPReapInterval(sessionTimeout, disconnectGracePeriod time.Duration
 	return reapInterval
 }
 
-func (d *Daemon) recycleManagedHTTPBackend(name string, process *supervisor.ManagedProcess, coordinator *supervisor.BackendCoordinator, cause error) {
-	ctx, cancel := context.WithTimeout(d.ctx, 30*time.Second)
-	defer cancel()
+func (d *Daemon) recycleManagedHTTPBackend(ctx context.Context, name string, process *supervisor.ManagedProcess, coordinator *supervisor.BackendCoordinator, cause error) {
 	err := coordinator.DrainAndRecycle(ctx, func() error {
 		if process == nil {
 			return supervisor.ErrBackendUnavailable

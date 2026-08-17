@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/supervisor"
 )
 
 type fakeDaemonReconciler struct {
@@ -38,6 +40,47 @@ func TestDaemonReconcileManagedBackendOnlyAffectsRequestedServer(t *testing.T) {
 	fake := d.reconciler.(*fakeDaemonReconciler)
 	if len(fake.calls) != 1 || fake.calls[0] != "one" {
 		t.Fatalf("calls=%v", fake.calls)
+	}
+}
+
+func TestRecycleManagedHTTPBackendCancelsOnServerTeardown(t *testing.T) {
+	dCtx, dCancel := context.WithCancel(context.Background())
+	defer dCancel()
+	monitorCtx, monitorCancel := context.WithCancel(dCtx)
+	defer monitorCancel()
+
+	coordinator := supervisor.NewBackendCoordinator()
+	coordinator.MarkReady()
+	requestDone, err := coordinator.BeginRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer requestDone()
+
+	d := &Daemon{ctx: dCtx, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	recycleDone := make(chan error, 1)
+	go func() {
+		d.recycleManagedHTTPBackend(monitorCtx, "test", nil, coordinator, errors.New("ambiguous failure"))
+		recycleDone <- nil
+	}()
+
+	deadline := time.After(time.Second)
+	for coordinator.State() != supervisor.BackendDraining {
+		select {
+		case <-deadline:
+			t.Fatal("backend did not enter draining state")
+		default:
+		}
+	}
+	monitorCancel()
+
+	select {
+	case <-recycleDone:
+	case <-time.After(time.Second):
+		t.Fatal("recycle did not stop when server teardown canceled monitor context")
+	}
+	if state := coordinator.State(); state != supervisor.BackendDraining {
+		t.Fatalf("State() after canceled drain = %q, want draining", state)
 	}
 }
 
