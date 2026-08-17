@@ -1,3 +1,12 @@
+## 2026-08-17 (v1.4.7)
+
+### Changed
+
+- checkpoint tk-0885d8af1be1 (chore: adv)
+- checkpoint tk-97951e2b97ef (chore: adv)
+- checkpoint tk-0b869fd741ac (chore: adv)
+- checkpoint tk-8e664bca887c (chore: adv)
+
 ## 2026-08-17 (v1.4.6)
 
 ### Changed
