@@ -202,7 +202,10 @@ Vision MUST preserve existing daemon command and health endpoint behavior while 
 
 **Then:**
 - Daemon start/status/reload/stop remain functional
-- /health and /healthz behavior remains backward-compatible
+- The admin /health response shape remains backward-compatible: the status enum stays ok|degraded|unhealthy and no field is removed
+- /healthz remains a pure daemon liveness probe and is unchanged
+- The condition that triggers degraded is governed by rq-mcpstr05, which derives it from client-observable reachability rather than process liveness alone
+- The per-server /health endpoint is out of scope for this compatibility scenario; its contract is defined by rq-mcpstr05
 
 **Lifecycle and denial events are observable** (`rq-mcpstr04.2`)
 
