@@ -385,8 +385,10 @@ slot_groups:
     # slot ports or other servers.
     group_port: <int>            # required
 
-    # Defaults applied to every synthesized server. Supports all
-    # ServerConfig fields except port (set automatically).
+    # Defaults applied to every synthesized server. They must resolve to
+    # stdio; non-stdio defaults are refused at config load because only stdio
+    # members can back the group multiplexer. Supports all ServerConfig fields
+    # except port (set automatically).
     defaults:                    # optional
       command: npx
       args: ["-y", "@anthropic/mcp-server"]
