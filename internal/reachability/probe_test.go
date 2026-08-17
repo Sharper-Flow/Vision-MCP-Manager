@@ -166,6 +166,30 @@ func TestManagerRunsEndToEndProbeAtLowCadenceWithoutSessionEvidence(t *testing.T
 	}
 }
 
+func TestManagerScalesEndToEndCadenceFromConfiguredInterval(t *testing.T) {
+	store := reachability.NewStore()
+	listener := &recordingProbe{result: true}
+	deep := &recordingProbe{result: true}
+	manager := reachability.NewManager(store, reachability.NewVersionSelector(listener, deep))
+	interval := 20 * time.Millisecond
+	if err := manager.Start(context.Background(), reachability.Target{Name: "configured-cadence", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, interval); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	waitFor(t, func() bool { return deep.count() >= 1 })
+	listener.mu.Lock()
+	firstListener := listener.starts[0]
+	listener.mu.Unlock()
+	deep.mu.Lock()
+	firstDeep := deep.starts[0]
+	deep.mu.Unlock()
+	minimum := interval * reachability.EndToEndProbeIntervalMultiple
+	if elapsed := firstDeep.Sub(firstListener); elapsed < minimum-interval {
+		t.Fatalf("end-to-end probe started after %s, want at least about %s", elapsed, minimum)
+	}
+}
+
 func TestManagerShutdownOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	store := reachability.NewStore()

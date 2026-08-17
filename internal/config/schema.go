@@ -117,7 +117,9 @@ type ServerConfig struct {
 	// When set, the proxy layer sends periodic tools/list calls to detect dead
 	// subprocesses before a tool call hits the failure path. Must be >= 5s if set.
 	// 0 means use default (30s).
-	HealthCheckInterval Duration `yaml:"health_check_interval,omitempty" env:"HEALTH_CHECK_INTERVAL" env-default:"30s"`
+	// It has no environment binding because a single variable cannot address a
+	// field inside the servers map.
+	HealthCheckInterval Duration `yaml:"health_check_interval,omitempty"`
 
 	// RequestTimeout is the default deadline Vision applies to downstream tool calls
 	// when the upstream request does not already specify one. 0 means use default (30s).
@@ -211,7 +213,8 @@ type CircuitBreakerConfig struct {
 
 // SupervisionConfig holds global supervisor settings.
 type SupervisionConfig struct {
-	// HealthCheckInterval is how often to check server health.
+	// HealthCheckInterval is how often to run reachability probes for managed
+	// servers. Must be >= 5s if set; 0 means use the default (30s).
 	HealthCheckInterval Duration `yaml:"health_check_interval" env:"HEALTH_CHECK_INTERVAL" env-default:"30s"`
 
 	// ShutdownTimeout is the grace period for graceful shutdown.
@@ -523,6 +526,10 @@ func validateManagedHTTPURL(raw string) error {
 // Validate checks that the entire Config is valid.
 // An empty config (no servers) is considered valid for first-run scenarios.
 func (c *Config) Validate() error {
+	if err := c.Supervision.Validate(); err != nil {
+		return err
+	}
+
 	// Empty config is valid (first-run scenario)
 	if len(c.Servers) == 0 {
 		return nil
@@ -543,6 +550,14 @@ func (c *Config) Validate() error {
 		usedPorts[server.Port] = name
 	}
 
+	return nil
+}
+
+// Validate checks global supervision settings that have bounded values.
+func (sup *SupervisionConfig) Validate() error {
+	if sup.HealthCheckInterval > 0 && time.Duration(sup.HealthCheckInterval) < 5*time.Second {
+		return fmt.Errorf("%w: supervision has health_check_interval %v", ErrInvalidHealthCheckInterval, time.Duration(sup.HealthCheckInterval))
+	}
 	return nil
 }
 

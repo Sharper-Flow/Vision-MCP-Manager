@@ -95,7 +95,8 @@ security:
 
 # Global supervision settings
 supervision:
-  # Health check interval (default: 30s)
+  # Reachability probe cadence for managed servers (default: 30s;
+  # end-to-end probes run at 10x this interval)
   health_check_interval: 30s
   
   # Graceful shutdown timeout (default: 10s)

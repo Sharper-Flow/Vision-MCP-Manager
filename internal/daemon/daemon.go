@@ -746,11 +746,20 @@ func (d *Daemon) handleServerEvent(event server.ServerEvent) {
 				slog.String("error", err.Error()),
 			)
 		}
-		d.startProbeWorker(event.Server, reachability.DefaultProbeInterval)
+		d.startProbeWorker(event.Server, d.probeInterval())
 	case server.EventServerStopped:
 		d.removeProbeWorker(event.Name)
 		d.teardownProxyForServer(event.Name)
 	}
+}
+
+func (d *Daemon) probeInterval() time.Duration {
+	if d != nil && d.cfg != nil {
+		if interval := d.cfg.Supervision.HealthCheckInterval.Duration(); interval > 0 {
+			return interval
+		}
+	}
+	return reachability.DefaultProbeInterval
 }
 
 func (d *Daemon) startProbeWorker(srv *server.ManagedServer, interval time.Duration) {

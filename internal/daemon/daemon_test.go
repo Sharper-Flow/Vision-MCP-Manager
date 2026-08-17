@@ -240,6 +240,29 @@ func TestRecycleManagedHTTPBackendDoesNotWarnForFastDrain(t *testing.T) {
 	}
 }
 
+func TestDaemonProbeIntervalUsesGlobalSupervisionCadence(t *testing.T) {
+	d := &Daemon{cfg: &config.Config{Supervision: config.SupervisionConfig{
+		HealthCheckInterval: config.Duration(17 * time.Second),
+	}}}
+	if got := d.probeInterval(); got != 17*time.Second {
+		t.Fatalf("probeInterval() = %s, want configured 17s", got)
+	}
+}
+
+func TestDaemonProbeIntervalFallsBackToDefault(t *testing.T) {
+	for name, d := range map[string]*Daemon{
+		"nil config":                {},
+		"zero config":               {cfg: &config.Config{}},
+		"zero supervision interval": {cfg: &config.Config{Supervision: config.SupervisionConfig{}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := d.probeInterval(); got != reachability.DefaultProbeInterval {
+				t.Fatalf("probeInterval() = %s, want %s", got, reachability.DefaultProbeInterval)
+			}
+		})
+	}
+}
+
 // --- PID File Tests ---
 
 func TestPIDFile_AcquireRelease(t *testing.T) {

@@ -199,6 +199,20 @@ servers:
 	}
 }
 
+func TestParseYAML_RejectsInvalidSupervisionHealthCheckInterval(t *testing.T) {
+	_, err := ParseYAML(`
+servers:
+  test:
+    port: 6276
+    command: echo
+supervision:
+  health_check_interval: 1s
+`)
+	if !errors.Is(err, ErrInvalidHealthCheckInterval) {
+		t.Fatalf("ParseYAML() error = %v, want ErrInvalidHealthCheckInterval", err)
+	}
+}
+
 func TestExpandSlotGroups_ExpandsSlotGroups(t *testing.T) {
 	cfg := &Config{
 		Servers: map[string]*ServerConfig{},
