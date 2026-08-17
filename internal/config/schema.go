@@ -626,6 +626,12 @@ func (s *ServerConfig) MaxRestartCount() int {
 func (s *ServerConfig) applyAvailabilityProfileDefaults() {
 	switch s.AvailabilityProfile {
 	case AvailabilityProfileNetworked:
+		transport := s.InferTransport()
+		profileDefaultAllowed := func(setting SettingKey) bool {
+			disposition, _, known := lookupCapability(transport, setting)
+			return !known || disposition != DispositionRefused
+		}
+
 		if s.SessionTimeout == 0 {
 			s.SessionTimeout = Duration(30 * time.Minute)
 		}
@@ -659,13 +665,29 @@ func (s *ServerConfig) applyAvailabilityProfileDefaults() {
 		if s.CircuitBreaker.RecoveryTimeout == 0 {
 			s.CircuitBreaker.RecoveryTimeout = Duration(45 * time.Second)
 		}
-		if s.SharedResultCacheTTL == 0 {
+
+		// Skipping refused settings here establishes the invariant that
+		// ServerConfig.Validate relies on: on a transport that refuses a
+		// governed setting, a non-zero value at validation time can only have
+		// come from the user, never from this profile. That is what allows the
+		// refusal check to read plain post-default values instead of tracking
+		// which keys the user actually wrote.
+		//
+		// retry, circuit_breaker, and health_check_interval are also unread on
+		// managed-http and are deliberately left unguarded: refusing them is
+		// out of this change's approved scope. Extending refusal to them is a
+		// capability-table edit plus a guard here -- and note that the retry
+		// defaults below dereference s.Retry immediately after allocating it,
+		// so any future guard must wrap the whole retry block rather than each
+		// statement, or the nil allocation can be skipped while the following
+		// dereference still runs.
+		if profileDefaultAllowed(SettingSharedResultCacheTTL) && s.SharedResultCacheTTL == 0 {
 			s.SharedResultCacheTTL = Duration(10 * time.Second)
 		}
-		if s.SharedResultCacheSize == 0 {
+		if profileDefaultAllowed(SettingSharedResultCacheSize) && s.SharedResultCacheSize == 0 {
 			s.SharedResultCacheSize = 128
 		}
-		if s.MaxInFlightRequests == 0 {
+		if profileDefaultAllowed(SettingMaxInFlightRequests) && s.MaxInFlightRequests == 0 {
 			s.MaxInFlightRequests = 4
 		}
 	}

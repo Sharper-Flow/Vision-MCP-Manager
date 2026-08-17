@@ -6,6 +6,63 @@ import (
 	"time"
 )
 
+func TestServerConfig_NetworkedManagedHTTPDefaultsSkipRefusedSettings(t *testing.T) {
+	server := &ServerConfig{
+		Port:                6276,
+		Transport:           TransportManagedHTTP,
+		Command:             "playwright",
+		URL:                 "http://127.0.0.1:3000/mcp",
+		AvailabilityProfile: AvailabilityProfileNetworked,
+	}
+
+	// This is specifically designed to fail against a naive implementation
+	// that omits this task and injects refused settings before validation.
+	server.ApplyDefaults()
+
+	if server.SharedResultCacheTTL != 0 {
+		t.Errorf("SharedResultCacheTTL = %v, want zero for managed-http", server.SharedResultCacheTTL)
+	}
+	if server.SharedResultCacheSize != 0 {
+		t.Errorf("SharedResultCacheSize = %d, want zero for managed-http", server.SharedResultCacheSize)
+	}
+	if server.MaxInFlightRequests != 0 {
+		t.Errorf("MaxInFlightRequests = %d, want zero for managed-http", server.MaxInFlightRequests)
+	}
+	if server.SessionTimeout == 0 {
+		t.Error("SessionTimeout should receive the networked profile default")
+	}
+	if server.RequestTimeout == 0 {
+		t.Error("RequestTimeout should receive the networked profile default")
+	}
+}
+
+func TestServerConfig_LiveManagedHTTPShapesValidateAfterDefaults(t *testing.T) {
+	config := &Config{Servers: map[string]*ServerConfig{
+		"playwright": {
+			Port:           6276,
+			Transport:      TransportManagedHTTP,
+			Command:        "playwright",
+			URL:            "http://127.0.0.1:3000/mcp",
+			MaxSessions:    5,
+			SessionTimeout: Duration(10 * time.Minute),
+		},
+		"gravy": {
+			Port:           6277,
+			Transport:      TransportManagedHTTP,
+			Command:        "gravy",
+			URL:            "http://127.0.0.1:3001/mcp",
+			MaxSessions:    5,
+			SessionTimeout: Duration(10 * time.Minute),
+		},
+	}}
+
+	// Match the Load path: defaults are applied before validation.
+	config.ApplyDefaults()
+	if err := config.Validate(); err != nil {
+		t.Fatalf("live managed-http shapes should validate after defaults: %v", err)
+	}
+}
+
 func TestTransportType_InferTransport(t *testing.T) {
 	tests := []struct {
 		name     string
