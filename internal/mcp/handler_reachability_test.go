@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net"
@@ -171,6 +172,122 @@ func TestPortManagerReachabilityStoreIsNilSafe(t *testing.T) {
 	if err := pm.Close(); err != nil {
 		t.Fatalf("close port manager with nil store: %v", err)
 	}
+}
+
+func TestPerServerHealthReportsReachableServerAsHealthy(t *testing.T) {
+	store := reachability.NewStore()
+	store.RecordProbe("reachable", reachability.ProbeResult{
+		Depth:   reachability.DepthListener,
+		Success: true,
+	})
+
+	pm := NewPortManager(nil)
+	pm.SetReachabilityStore(store)
+	defer pm.Close()
+	if err := pm.AddStreamable("reachable", 0, &noopHandler{}, nil); err != nil {
+		t.Fatalf("add streamable: %v", err)
+	}
+
+	status, response := servePerServerHealth(t, pm, "reachable")
+	if status != http.StatusOK {
+		t.Fatalf("healthy endpoint status = %d, want %d", status, http.StatusOK)
+	}
+	if response["server"] != "reachable" {
+		t.Fatalf("server = %v, want reachable", response["server"])
+	}
+	if response["status"] != "ok" {
+		t.Fatalf("status = %v, want ok", response["status"])
+	}
+}
+
+func TestPerServerHealthReportsUnreachableServerWithReason(t *testing.T) {
+	store := reachability.NewStore()
+	for range reachability.FailureThreshold {
+		store.RecordProbe("unreachable", reachability.ProbeResult{
+			Depth: reachability.DepthListener,
+			Error: "connection refused",
+		})
+	}
+
+	pm := NewPortManager(nil)
+	pm.SetReachabilityStore(store)
+	defer pm.Close()
+	if err := pm.AddStreamable("unreachable", 0, &noopHandler{}, nil); err != nil {
+		t.Fatalf("add streamable: %v", err)
+	}
+
+	status, response := servePerServerHealth(t, pm, "unreachable")
+	if status == http.StatusOK {
+		t.Fatalf("unreachable endpoint returned HTTP 200: %#v", response)
+	}
+	if response["server"] != "unreachable" {
+		t.Fatalf("server = %v, want unreachable", response["server"])
+	}
+	if response["status"] == "ok" {
+		t.Fatalf("unreachable endpoint reported ok: %#v", response)
+	}
+	if reason, ok := response["reason"].(string); !ok || reason == "" {
+		t.Fatalf("unreachable endpoint reason = %v, want non-empty string", response["reason"])
+	}
+}
+
+func TestPerServerHealthDoesNotClaimHealthyWithoutProbeEvidence(t *testing.T) {
+	pm := NewPortManager(nil)
+	pm.SetReachabilityStore(reachability.NewStore())
+	defer pm.Close()
+	if err := pm.AddStreamable("unprobed", 0, &noopHandler{}, nil); err != nil {
+		t.Fatalf("add streamable: %v", err)
+	}
+
+	status, response := servePerServerHealth(t, pm, "unprobed")
+	if status == http.StatusOK {
+		t.Fatalf("unprobed endpoint returned HTTP 200: %#v", response)
+	}
+	if response["server"] != "unprobed" {
+		t.Fatalf("server = %v, want unprobed", response["server"])
+	}
+	if response["status"] == "ok" {
+		t.Fatalf("unprobed endpoint reported ok: %#v", response)
+	}
+	if reason, ok := response["reason"].(string); !ok || reason == "" {
+		t.Fatalf("unprobed endpoint reason = %v, want non-empty string", response["reason"])
+	}
+}
+
+func TestPerServerHealthIsNilStoreSafe(t *testing.T) {
+	pm := NewPortManager(nil)
+	defer pm.Close()
+	if err := pm.AddStreamable("nil-store-health", 0, &noopHandler{}, nil); err != nil {
+		t.Fatalf("add streamable: %v", err)
+	}
+
+	status, response := servePerServerHealth(t, pm, "nil-store-health")
+	if status == http.StatusOK {
+		t.Fatalf("nil-store endpoint returned HTTP 200: %#v", response)
+	}
+	if response["server"] != "nil-store-health" {
+		t.Fatalf("server = %v, want nil-store-health", response["server"])
+	}
+	if reason, ok := response["reason"].(string); !ok || reason == "" {
+		t.Fatalf("nil-store endpoint reason = %v, want non-empty string", response["reason"])
+	}
+}
+
+func servePerServerHealth(t *testing.T, pm *PortManager, name string) (int, map[string]interface{}) {
+	t.Helper()
+	listener := pm.Get(name)
+	if listener == nil || listener.Server == nil || listener.Server.Handler == nil {
+		t.Fatalf("missing listener handler for %q", name)
+	}
+
+	recorder := httptest.NewRecorder()
+	listener.Server.Handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	var response map[string]interface{}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode health response: %v; body=%q", err, recorder.Body.String())
+	}
+	return recorder.Code, response
 }
 
 func newListenerProbeRequest() *http.Request {

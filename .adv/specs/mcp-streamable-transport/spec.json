@@ -229,6 +229,89 @@
           ]
         }
       ]
+    },
+    {
+      "id": "rq-mcpstr05",
+      "title": "Report client-observable server reachability accurately",
+      "body": "Vision MUST derive reported server status from client-observable MCP reachability independently of process liveness. Reachability MUST distinguish unprobed, probing, reachable, and unreachable states; absence of successful probe evidence MUST NOT be reported as healthy. Probes MUST record depth-specific evidence and reason, and MUST classify a server as unreachable only after three consecutive failures at the applicable depth.",
+      "priority": "must",
+      "tags": [
+        "mcp",
+        "health",
+        "reachability",
+        "operations"
+      ],
+      "scenarios": [
+        {
+          "id": "rq-mcpstr05.1",
+          "title": "Unreachable MCP endpoints report non-healthy across transports",
+          "given": [
+            "A configured server uses stdio, managed-http, or an HTTP/SSE proxy transport",
+            "The server process may be alive, but its MCP endpoint cannot establish or serve a client session"
+          ],
+          "when": "The server status is evaluated after reachability probing",
+          "then": [
+            "The server is reported as non-healthy for each of the three transports",
+            "The reported reachability state is not reachable",
+            "The status includes a reason identifying the client-observable reachability failure"
+          ]
+        },
+        {
+          "id": "rq-mcpstr05.2",
+          "title": "Missing probe evidence is not inferred as healthy",
+          "given": [
+            "A server has no successful reachability probe evidence"
+          ],
+          "when": "A status surface reports the server state",
+          "then": [
+            "The server is not reported as healthy",
+            "The reachability state remains unprobed or probing until successful evidence exists",
+            "Process liveness alone does not make the server reachable"
+          ]
+        },
+        {
+          "id": "rq-mcpstr05.3",
+          "title": "Ordered lifecycle delivery preserves restart reachability",
+          "given": [
+            "A server restart produces Stop and Start lifecycle events in close succession",
+            "The events are submitted to the lifecycle delivery mechanism"
+          ],
+          "when": "The lifecycle event queue drains",
+          "then": [
+            "Events are delivered in one FIFO order",
+            "The Start handler cannot be followed by a late Stop handler that tears down the newly created listener",
+            "A restart cannot leave the server reported as healthy or reachable when no listener is bound"
+          ]
+        },
+        {
+          "id": "rq-mcpstr05.4",
+          "title": "Failed managed gateway reload reports non-healthy",
+          "given": [
+            "A managed-http server is being reloaded",
+            "Construction of its managed gateway fails"
+          ],
+          "when": "The reload result is reflected in server status",
+          "then": [
+            "The server is reported as non-healthy and not reachable",
+            "The status includes a reason identifying the managed gateway construction failure",
+            "A prior healthy or reachable status is not retained without current successful probe evidence"
+          ]
+        },
+        {
+          "id": "rq-mcpstr05.5",
+          "title": "Reachability probes leave no session or capacity residue",
+          "given": [
+            "A reachability probe runs at listener, session, or idle-server end-to-end depth",
+            "The probe may create a temporary MCP session"
+          ],
+          "when": "The probe succeeds or fails and completes cleanup",
+          "then": [
+            "No temporary MCP session remains tracked after the probe",
+            "The probe does not consume admission capacity after completion",
+            "An end-to-end probe removes its temporary session using the normal session teardown path"
+          ]
+        }
+      ]
     }
   ]
 }

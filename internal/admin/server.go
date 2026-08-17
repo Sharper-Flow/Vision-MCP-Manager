@@ -218,21 +218,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check registry for failed servers
+	// Project every server through the shared effective-status precedence table.
 	var errors []string
 	if s.registry != nil {
-		regStatus := s.registry.Status()
-		if regStatus.FailedServers > 0 {
-			// Get error details from failed servers
-			for _, srv := range s.registry.List() {
-				status := srv.Status()
-				if status.State == "failed" || status.State == "crashed" {
-					if status.LastError != "" {
-						errors = append(errors, fmt.Sprintf("%s: %s", status.Name, status.LastError))
-					} else {
-						errors = append(errors, fmt.Sprintf("%s: failed", status.Name))
-					}
-				}
+		for _, srv := range s.registry.List() {
+			status := srv.Status()
+			lifecycle := s.lifecycleSnapshot(status.Name)
+			effective := deriveEffectiveStatus(
+				status.State,
+				lifecycleBackendState(lifecycle),
+				s.reachabilityFor(status.Name),
+				status.Uptime,
+				s.reachabilityGrace,
+				status.LastError,
+			)
+			if effective.Status == "error" {
+				errors = append(errors, fmt.Sprintf("%s: %s", status.Name, effective.Reason))
 			}
 		}
 	}

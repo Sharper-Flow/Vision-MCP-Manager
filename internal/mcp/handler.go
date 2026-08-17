@@ -114,11 +114,19 @@ func (pm *PortManager) addStreamableInternal(name string, port int, handler http
 
 	// Health endpoint
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		status, reason, healthy := pm.perServerHealth(name)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		if !healthy {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		response := map[string]interface{}{
 			"server": name,
-			"status": "ok",
-		})
+			"status": status,
+		}
+		if reason != "" {
+			response["reason"] = reason
+		}
+		_ = json.NewEncoder(w).Encode(response)
 	})
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -165,6 +173,36 @@ func (pm *PortManager) SetReachabilityStore(store *reachability.Store) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.reachabilityStore = store
+}
+
+// perServerHealth reports listener health from probe-backed reachability.
+// Without a store or completed probe evidence, health is unknown rather than
+// healthy: absence of evidence is not evidence of health.
+func (pm *PortManager) perServerHealth(name string) (status, reason string, healthy bool) {
+	pm.mu.RLock()
+	store := pm.reachabilityStore
+	pm.mu.RUnlock()
+	if store == nil {
+		return "unhealthy", "reachability_unavailable", false
+	}
+
+	value, ok := store.Get(name)
+	if !ok || len(value.Evidence) == 0 {
+		return "unhealthy", "no_probe_evidence", false
+	}
+
+	switch value.State {
+	case reachability.StateReachable:
+		return "ok", "", true
+	case reachability.StateUnreachable:
+		return "unhealthy", "unreachable", false
+	case reachability.StateProbing:
+		return "unhealthy", "probe_in_progress", false
+	case reachability.StateUnprobed:
+		return "unhealthy", "probe_not_conclusive", false
+	default:
+		return "unhealthy", "unknown_reachability_state", false
+	}
 }
 
 func (pm *PortManager) recordListenerProbeFailure(name string, err error) {
