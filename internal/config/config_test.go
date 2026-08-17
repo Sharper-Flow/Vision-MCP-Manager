@@ -523,6 +523,43 @@ func TestSave_RoundTripsSlotGroupsWithoutExpandedServers(t *testing.T) {
 	}
 }
 
+func TestSave_RoundTripsNetworkedManagedHTTPWithoutRefusedProfileDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "managed-http.yaml")
+	const source = `servers:
+  managed:
+    port: 6290
+    transport: managed-http
+    command: npx
+    url: http://127.0.0.1:16290/mcp
+    availability_profile: networked
+`
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if err := Save(cfg, path); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error: %v", err)
+	}
+	for _, key := range []string{"shared_result_cache_ttl:", "shared_result_cache_size:", "max_in_flight_requests:"} {
+		if strings.Contains(string(data), key) {
+			t.Errorf("Save() materialized refused managed-http profile default %q:\n%s", key, data)
+		}
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load() after Save() error: %v", err)
+	}
+}
+
 func TestLoadOrCreate(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "subdir", "config.yaml")

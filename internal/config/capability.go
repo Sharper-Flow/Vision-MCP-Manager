@@ -16,7 +16,9 @@ const (
 	SettingDisconnectGracePeriod SettingKey = "disconnect_grace_period"
 )
 
-// Disposition describes whether a transport reads and applies a setting.
+// Disposition describes whether this capability policy accepts or refuses a
+// setting for a transport. An accepted setting is not necessarily consumed by
+// every transport; see transportCapabilities for the http and sse exception.
 type Disposition int
 
 const (

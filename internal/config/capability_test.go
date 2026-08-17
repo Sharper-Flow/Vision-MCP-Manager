@@ -67,14 +67,27 @@ func TestManagedHTTPDispositions(t *testing.T) {
 // exactly the same terms as a hand-written one. Getting this wrong would leave
 // a synthesis-shaped hole in the fix.
 func TestSlotGroupSynthesizedManagedHTTPIsStillRefused(t *testing.T) {
-	synthesized := &ServerConfig{
-		Port:                6290,
-		Transport:           TransportManagedHTTP,
-		Command:             "npx",
-		URL:                 "http://127.0.0.1:16290/mcp",
-		MaxInFlightRequests: 4,
-		SlotGroup:           "browser-pool",
-		SlotIndex:           1,
+	cfg := &Config{SlotGroups: map[string]*SlotGroupConfig{
+		"browser-pool": {
+			Template:  "browser",
+			BasePort:  6290,
+			Count:     2,
+			GroupPort: 6289,
+			Defaults: &ServerConfig{
+				Transport:           TransportManagedHTTP,
+				Command:             "npx",
+				URL:                 "http://127.0.0.1:16290/mcp",
+				MaxInFlightRequests: 4,
+			},
+		},
+	}}
+	if err := expandSlotGroups(cfg); err != nil {
+		t.Fatalf("expandSlotGroups() error = %v", err)
+	}
+
+	synthesized := cfg.Servers["browser-1"]
+	if synthesized == nil || synthesized.SlotGroup != "browser-pool" || synthesized.SlotIndex != 1 {
+		t.Fatalf("slot group did not synthesize browser-1 correctly: %#v", synthesized)
 	}
 
 	err := synthesized.Validate("browser-pool-1")
@@ -86,9 +99,9 @@ func TestSlotGroupSynthesizedManagedHTTPIsStillRefused(t *testing.T) {
 	}
 }
 
-// TestNonManagedTransportsHonorGovernedSettings guards the blast radius: this
-// change must not alter stdio, http, or sse behavior for any governed setting.
-func TestNonManagedTransportsHonorGovernedSettings(t *testing.T) {
+// TestNonManagedTransportsAcceptGovernedSettings guards the blast radius: this
+// change must not start refusing governed settings on stdio, http, or sse.
+func TestNonManagedTransportsAcceptGovernedSettings(t *testing.T) {
 	for _, transport := range []TransportType{TransportStdio, TransportHTTP, TransportSSE} {
 		for _, setting := range GovernedSettingKeys {
 			disposition, reason, ok := lookupCapability(transport, setting)
@@ -97,10 +110,10 @@ func TestNonManagedTransportsHonorGovernedSettings(t *testing.T) {
 				continue
 			}
 			if disposition != DispositionHonored {
-				t.Errorf("transport %q must honor %q, got disposition %v", transport, setting, disposition)
+				t.Errorf("transport %q must accept %q, got disposition %v", transport, setting, disposition)
 			}
 			if reason != ReasonNone {
-				t.Errorf("transport %q honors %q so reason must be ReasonNone, got %v", transport, setting, reason)
+				t.Errorf("transport %q accepts %q so reason must be ReasonNone, got %v", transport, setting, reason)
 			}
 		}
 	}

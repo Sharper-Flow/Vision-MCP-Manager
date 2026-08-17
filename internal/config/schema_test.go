@@ -191,6 +191,18 @@ func TestServerConfig_NetworkedManagedHTTPDefaultsSkipRefusedSettings(t *testing
 	if server.RequestTimeout == 0 {
 		t.Error("RequestTimeout should receive the networked profile default")
 	}
+	if server.HealthCheckInterval != Duration(time.Minute) {
+		t.Errorf("HealthCheckInterval = %v, want networked default %v", server.HealthCheckInterval, time.Minute)
+	}
+	if server.Retry == nil || server.Retry.MaxAttempts != 2 {
+		t.Errorf("Retry = %#v, want networked retry defaults", server.Retry)
+	}
+	if server.CircuitBreaker == nil || server.CircuitBreaker.FailureThreshold != 3 {
+		t.Errorf("CircuitBreaker = %#v, want networked circuit-breaker defaults", server.CircuitBreaker)
+	}
+	if server.SessionTTL != 0 {
+		t.Errorf("SessionTTL = %v, want unchanged zero value", server.SessionTTL)
+	}
 }
 
 func TestServerConfig_LiveManagedHTTPShapesValidateAfterDefaults(t *testing.T) {
