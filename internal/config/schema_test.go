@@ -2,10 +2,35 @@ package config
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestNoDeadEnvTags(t *testing.T) {
+	for _, configType := range []reflect.Type{
+		typeOf[ServerConfig](),
+		typeOf[RetryConfig](),
+		typeOf[CircuitBreakerConfig](),
+		typeOf[SupervisionConfig](),
+		typeOf[SecurityConfig](),
+	} {
+		for fieldIndex := 0; fieldIndex < configType.NumField(); fieldIndex++ {
+			field := configType.Field(fieldIndex)
+			if _, ok := field.Tag.Lookup("env"); ok {
+				t.Errorf("%s.%s has dead env tag %q", configType.Name(), field.Name, field.Tag)
+			}
+			if _, ok := field.Tag.Lookup("env-default"); ok {
+				t.Errorf("%s.%s has dead env-default tag %q", configType.Name(), field.Name, field.Tag)
+			}
+		}
+	}
+}
+
+func typeOf[T any]() reflect.Type {
+	return reflect.TypeOf((*T)(nil)).Elem()
+}
 
 func TestServerConfig_ManagedHTTPRefusesUnsupportedSettings(t *testing.T) {
 	tests := []struct {

@@ -72,14 +72,14 @@ const (
 // ServerConfig defines a single MCP server's configuration.
 type ServerConfig struct {
 	// Port is the HTTP port Vision exposes this server on (6276-6300).
-	Port int `yaml:"port" env:"PORT"`
+	Port int `yaml:"port"`
 
 	// Transport is "stdio", "managed-http", "http", or "sse". Inferred if not set,
 	// except managed-http which must be explicit because it owns command + URL.
-	Transport TransportType `yaml:"transport,omitempty" env:"TRANSPORT"`
+	Transport TransportType `yaml:"transport,omitempty"`
 
 	// Command is the executable to run (for stdio transport).
-	Command string `yaml:"command,omitempty" env:"COMMAND"`
+	Command string `yaml:"command,omitempty"`
 
 	// Args are command-line arguments passed to Command.
 	Args []string `yaml:"args,omitempty"`
@@ -89,48 +89,46 @@ type ServerConfig struct {
 	Env map[string]string `yaml:"env,omitempty"`
 
 	// URL is the upstream MCP server URL (for http/sse transports).
-	URL string `yaml:"url,omitempty" env:"URL"`
+	URL string `yaml:"url,omitempty"`
 
 	// Headers are HTTP headers to forward (for http transport).
 	Headers map[string]string `yaml:"headers,omitempty"`
 
 	// Autostart determines if this server starts with the daemon.
-	Autostart bool `yaml:"autostart,omitempty" env:"AUTOSTART" env-default:"false"`
+	Autostart bool `yaml:"autostart,omitempty"`
 
 	// RestartPolicy controls automatic restart behavior.
-	RestartPolicy RestartPolicy `yaml:"restart_policy,omitempty" env:"RESTART_POLICY" env-default:"on-failure"`
+	RestartPolicy RestartPolicy `yaml:"restart_policy,omitempty"`
 
 	// MaxRestarts is the maximum restart attempts within a 5-minute window.
 	// A pointer preserves omitted versus explicit zero at the YAML boundary.
-	MaxRestarts *int `yaml:"max_restarts,omitempty" env:"MAX_RESTARTS" env-default:"5"`
+	MaxRestarts *int `yaml:"max_restarts,omitempty"`
 
 	// Stateful enables process-per-session mode for isolated state.
-	Stateful bool `yaml:"stateful,omitempty" env:"STATEFUL" env-default:"false"`
+	Stateful bool `yaml:"stateful,omitempty"`
 
 	// AvailabilityProfile selects opinionated resilience defaults for the server.
-	AvailabilityProfile AvailabilityProfile `yaml:"availability_profile,omitempty" env:"AVAILABILITY_PROFILE"`
+	AvailabilityProfile AvailabilityProfile `yaml:"availability_profile,omitempty"`
 
 	// SessionTimeout is how long an idle session lives (for stateful servers).
-	SessionTimeout Duration `yaml:"session_timeout,omitempty" env:"SESSION_TIMEOUT" env-default:"5m"`
+	SessionTimeout Duration `yaml:"session_timeout,omitempty"`
 
 	// MaxSessions limits concurrent sessions (for stateful servers, 0 = unlimited).
-	MaxSessions int `yaml:"max_sessions,omitempty" env:"MAX_SESSIONS" env-default:"0"`
+	MaxSessions int `yaml:"max_sessions,omitempty"`
 
 	// SessionTTL is the absolute maximum lifetime of a session regardless of activity.
 	// 0 means no TTL (sessions only expire via idle timeout or explicit close).
-	SessionTTL Duration `yaml:"session_ttl,omitempty" env:"SESSION_TTL" env-default:"0s"`
+	SessionTTL Duration `yaml:"session_ttl,omitempty"`
 
 	// HealthCheckInterval is how often to probe idle downstream sessions for liveness.
 	// When set, the proxy layer sends periodic tools/list calls to detect dead
 	// subprocesses before a tool call hits the failure path. Must be >= 5s if set.
 	// 0 means use default (30s).
-	// It has no environment binding because a single variable cannot address a
-	// field inside the servers map.
 	HealthCheckInterval Duration `yaml:"health_check_interval,omitempty"`
 
 	// RequestTimeout is the default deadline Vision applies to downstream tool calls
 	// when the upstream request does not already specify one. 0 means use default (30s).
-	RequestTimeout Duration `yaml:"request_timeout,omitempty" env:"REQUEST_TIMEOUT" env-default:"30s"`
+	RequestTimeout Duration `yaml:"request_timeout,omitempty"`
 
 	// Retry configures retry/backoff behavior for retryable downstream tool-call failures.
 	Retry *RetryConfig `yaml:"retry,omitempty"`
@@ -144,15 +142,15 @@ type ServerConfig struct {
 
 	// SharedResultCacheTTL is how long successful shared read-only results stay cached.
 	// 0 disables caching while still allowing in-flight coalescing.
-	SharedResultCacheTTL Duration `yaml:"shared_result_cache_ttl,omitempty" env:"SHARED_RESULT_CACHE_TTL"`
+	SharedResultCacheTTL Duration `yaml:"shared_result_cache_ttl,omitempty"`
 
 	// SharedResultCacheSize caps cached shared read-only results per server.
 	// 0 uses the default for the selected profile.
-	SharedResultCacheSize int `yaml:"shared_result_cache_size,omitempty" env:"SHARED_RESULT_CACHE_SIZE"`
+	SharedResultCacheSize int `yaml:"shared_result_cache_size,omitempty"`
 
 	// MaxInFlightRequests caps concurrent downstream tool calls per server.
 	// 0 means unlimited.
-	MaxInFlightRequests int `yaml:"max_in_flight_requests,omitempty" env:"MAX_IN_FLIGHT_REQUESTS"`
+	MaxInFlightRequests int `yaml:"max_in_flight_requests,omitempty"`
 
 	// Required indicates the server MUST be running for Vision (and any
 	// dependent agent) to function correctly. When both Autostart and
@@ -160,7 +158,7 @@ type ServerConfig struct {
 	// (daemon.StartAll returns a non-nil error). When Required is true but
 	// Autostart is false, the field is informational only — external tools
 	// such as OCA may surface it in doctor output.
-	Required bool `yaml:"required,omitempty" env:"REQUIRED" env-default:"false"`
+	Required bool `yaml:"required,omitempty"`
 
 	// Source is an informational URL describing where this server comes
 	// from (homepage, repo). Accepted and preserved on round-trip; not
@@ -215,32 +213,32 @@ type SlotGroupConfig struct {
 
 // RetryConfig controls retry behavior for retryable downstream failures.
 type RetryConfig struct {
-	MaxAttempts     int      `yaml:"max_attempts,omitempty" env:"MAX_ATTEMPTS" env-default:"1"`
-	InitialDelay    Duration `yaml:"initial_delay,omitempty" env:"INITIAL_DELAY" env-default:"100ms"`
-	MaxDelay        Duration `yaml:"max_delay,omitempty" env:"MAX_DELAY" env-default:"5s"`
+	MaxAttempts     int      `yaml:"max_attempts,omitempty"`
+	InitialDelay    Duration `yaml:"initial_delay,omitempty"`
+	MaxDelay        Duration `yaml:"max_delay,omitempty"`
 	RetryableErrors []string `yaml:"retryable_errors,omitempty"`
 }
 
 // CircuitBreakerConfig controls fast-fail behavior after repeated failures.
 type CircuitBreakerConfig struct {
-	FailureThreshold int      `yaml:"failure_threshold,omitempty" env:"FAILURE_THRESHOLD" env-default:"5"`
-	RecoveryTimeout  Duration `yaml:"recovery_timeout,omitempty" env:"RECOVERY_TIMEOUT" env-default:"60s"`
+	FailureThreshold int      `yaml:"failure_threshold,omitempty"`
+	RecoveryTimeout  Duration `yaml:"recovery_timeout,omitempty"`
 }
 
 // SupervisionConfig holds global supervisor settings.
 type SupervisionConfig struct {
 	// HealthCheckInterval is how often to run reachability probes for managed
 	// servers. Must be >= 5s if set; 0 means use the default (30s).
-	HealthCheckInterval Duration `yaml:"health_check_interval" env:"HEALTH_CHECK_INTERVAL" env-default:"30s"`
+	HealthCheckInterval Duration `yaml:"health_check_interval"`
 
 	// ShutdownTimeout is the grace period for graceful shutdown.
-	ShutdownTimeout Duration `yaml:"shutdown_timeout" env:"SHUTDOWN_TIMEOUT" env-default:"10s"`
+	ShutdownTimeout Duration `yaml:"shutdown_timeout"`
 
 	// RestartDelay is the initial delay before restarting a crashed server.
-	RestartDelay Duration `yaml:"restart_delay" env:"RESTART_DELAY" env-default:"1s"`
+	RestartDelay Duration `yaml:"restart_delay"`
 
 	// MaxRestartDelay is the maximum delay (for exponential backoff).
-	MaxRestartDelay Duration `yaml:"max_restart_delay" env:"MAX_RESTART_DELAY" env-default:"60s"`
+	MaxRestartDelay Duration `yaml:"max_restart_delay"`
 }
 
 // SecurityConfig holds daemon-wide security settings for MCP endpoints.
@@ -248,7 +246,7 @@ type SecurityConfig struct {
 	// BearerToken is the shared secret for Authorization header validation.
 	// When empty, authentication is not enforced (open access).
 	// Supports ${VAR} expansion from the environment.
-	BearerToken string `yaml:"bearer_token,omitempty" env:"VISION_BEARER_TOKEN"`
+	BearerToken string `yaml:"bearer_token,omitempty"`
 
 	// AllowedOrigins is the list of permitted Origin header values.
 	// When empty, origin checking is not enforced.
