@@ -318,6 +318,7 @@ var (
 	ErrInvalidCircuitRecoveryTimeout  = errors.New("config: circuit_breaker.recovery_timeout must be >= 1s")
 	ErrInvalidSharedResultCacheSize   = errors.New("config: shared_result_cache_size must be >= 0")
 	ErrInvalidMaxInFlightRequests     = errors.New("config: max_in_flight_requests must be >= 0")
+	ErrSettingNotSupportedByTransport = errors.New("config: setting is not supported by transport")
 )
 
 // InferTransport determines the transport type from config fields.
@@ -372,6 +373,57 @@ func (s *ServerConfig) ResolvedIdleReapTimeout() time.Duration {
 		return defaultIdleReapTimeout
 	}
 	return d
+}
+
+func (s *ServerConfig) validateTransportSettings(name string, transport TransportType) error {
+	for _, setting := range GovernedSettingKeys {
+		disposition, reason, ok := lookupCapability(transport, setting)
+		if !ok || disposition != DispositionRefused || !s.hasNonZeroSetting(setting) {
+			continue
+		}
+
+		return fmt.Errorf(
+			"%w: %s is not supported by transport %q on server %q: %s",
+			ErrSettingNotSupportedByTransport,
+			setting,
+			transport,
+			name,
+			refusalReasonText(reason),
+		)
+	}
+	return nil
+}
+
+func (s *ServerConfig) hasNonZeroSetting(setting SettingKey) bool {
+	switch setting {
+	case SettingSharedReadOnlyTools:
+		return len(s.SharedReadOnlyTools) > 0
+	case SettingSharedResultCacheTTL:
+		return s.SharedResultCacheTTL != 0
+	case SettingSharedResultCacheSize:
+		return s.SharedResultCacheSize != 0
+	case SettingMaxInFlightRequests:
+		return s.MaxInFlightRequests != 0
+	case SettingIdleReapTimeout:
+		return s.IdleReapTimeout != 0
+	case SettingDisconnectGracePeriod:
+		return s.DisconnectGracePeriod != 0
+	default:
+		return false
+	}
+}
+
+func refusalReasonText(reason RefusalReason) string {
+	switch reason {
+	case ReasonSessionIsolation:
+		return "cross-session result sharing contradicts per-session isolation (see docs/adr/0001-managed-native-http-playwright.md)"
+	case ReasonSupersededKnob:
+		return "idle session lifetime is governed by session_timeout on this transport"
+	case ReasonNotImplemented:
+		return "the managed-http path does not implement this setting"
+	default:
+		return "the transport does not implement this setting"
+	}
 }
 
 // Validate checks that the ServerConfig is valid.
@@ -435,6 +487,10 @@ func (s *ServerConfig) Validate(name string) error {
 		if s.URL == "" {
 			return fmt.Errorf("%w: server %q", ErrMissingURL, name)
 		}
+	}
+
+	if err := s.validateTransportSettings(name, transport); err != nil {
+		return err
 	}
 
 	// Health check interval validation (0 means use default, >0 must be >= 5s)

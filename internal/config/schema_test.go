@@ -2,9 +2,166 @@ package config
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestServerConfig_ManagedHTTPRefusesUnsupportedSettings(t *testing.T) {
+	tests := []struct {
+		name       string
+		settingKey string
+		configure  func(*ServerConfig)
+		reasonText string
+	}{
+		{
+			name:       "shared read only tools",
+			settingKey: string(SettingSharedReadOnlyTools),
+			configure:  func(server *ServerConfig) { server.SharedReadOnlyTools = []string{"browser_navigate"} },
+			reasonText: "cross-session result sharing contradicts per-session isolation",
+		},
+		{
+			name:       "shared result cache ttl",
+			settingKey: string(SettingSharedResultCacheTTL),
+			configure:  func(server *ServerConfig) { server.SharedResultCacheTTL = Duration(time.Minute) },
+			reasonText: "cross-session result sharing contradicts per-session isolation",
+		},
+		{
+			name:       "shared result cache size",
+			settingKey: string(SettingSharedResultCacheSize),
+			configure:  func(server *ServerConfig) { server.SharedResultCacheSize = 1 },
+			reasonText: "cross-session result sharing contradicts per-session isolation",
+		},
+		{
+			name:       "max in flight requests",
+			settingKey: string(SettingMaxInFlightRequests),
+			configure:  func(server *ServerConfig) { server.MaxInFlightRequests = 1 },
+			reasonText: "the managed-http path does not implement this setting",
+		},
+		{
+			name:       "idle reap timeout",
+			settingKey: string(SettingIdleReapTimeout),
+			configure:  func(server *ServerConfig) { server.IdleReapTimeout = Duration(time.Minute) },
+			reasonText: "idle session lifetime is governed by session_timeout on this transport",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := managedHTTPTestServer()
+			tt.configure(server)
+
+			err := server.Validate("playwright")
+			if !errors.Is(err, ErrSettingNotSupportedByTransport) {
+				t.Fatalf("Validate() error = %v, want ErrSettingNotSupportedByTransport", err)
+			}
+			message := err.Error()
+			for _, want := range []string{tt.settingKey, `transport "managed-http"`, `server "playwright"`, tt.reasonText} {
+				if !strings.Contains(message, want) {
+					t.Errorf("Validate() error %q does not contain %q", message, want)
+				}
+			}
+		})
+	}
+}
+
+func TestServerConfig_ManagedHTTPRefusesNegativeIdleReapTimeout(t *testing.T) {
+	server := managedHTTPTestServer()
+	server.IdleReapTimeout = Duration(-1)
+
+	err := server.Validate("playwright")
+	if !errors.Is(err, ErrSettingNotSupportedByTransport) {
+		t.Fatalf("Validate() error = %v, want ErrSettingNotSupportedByTransport", err)
+	}
+	if !strings.Contains(err.Error(), string(SettingIdleReapTimeout)) {
+		t.Errorf("Validate() error %q does not contain %q", err, SettingIdleReapTimeout)
+	}
+}
+
+func TestServerConfig_ManagedHTTPRefusalIsDeterministic(t *testing.T) {
+	server := managedHTTPTestServer()
+	server.SharedReadOnlyTools = []string{"browser_navigate"}
+	server.SharedResultCacheTTL = Duration(time.Minute)
+	server.SharedResultCacheSize = 1
+	server.MaxInFlightRequests = 1
+	server.IdleReapTimeout = Duration(time.Minute)
+
+	var first string
+	for i := 0; i < 20; i++ {
+		err := server.Validate("playwright")
+		if err == nil {
+			t.Fatal("Validate() = nil, want unsupported setting error")
+		}
+		if i == 0 {
+			first = err.Error()
+			continue
+		}
+		if err.Error() != first {
+			t.Fatalf("Validate() error changed on run %d: got %q, first %q", i, err, first)
+		}
+	}
+	if !strings.Contains(first, string(SettingSharedReadOnlyTools)) {
+		t.Errorf("deterministic first error = %q, want %q", first, SettingSharedReadOnlyTools)
+	}
+}
+
+func TestServerConfig_ManagedHTTPHonorsDisconnectGracePeriod(t *testing.T) {
+	server := managedHTTPTestServer()
+	server.DisconnectGracePeriod = Duration(time.Minute)
+
+	if err := server.Validate("playwright"); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestServerConfig_OtherTransportsStillValidateGovernedSettings(t *testing.T) {
+	transports := []struct {
+		name      string
+		transport TransportType
+		configure func(*ServerConfig)
+	}{
+		{
+			name:      "stdio",
+			transport: TransportStdio,
+			configure: func(server *ServerConfig) { server.Command = "playwright" },
+		},
+		{
+			name:      "http",
+			transport: TransportHTTP,
+			configure: func(server *ServerConfig) { server.URL = "http://127.0.0.1:3000/mcp" },
+		},
+		{
+			name:      "sse",
+			transport: TransportSSE,
+			configure: func(server *ServerConfig) { server.URL = "http://127.0.0.1:3000" },
+		},
+	}
+
+	for _, transport := range transports {
+		t.Run(transport.name, func(t *testing.T) {
+			server := &ServerConfig{Port: 6276, Transport: transport.transport}
+			transport.configure(server)
+			server.SharedReadOnlyTools = []string{"browser_navigate"}
+			server.SharedResultCacheTTL = Duration(time.Minute)
+			server.SharedResultCacheSize = 1
+			server.MaxInFlightRequests = 1
+			server.IdleReapTimeout = Duration(time.Minute)
+
+			if err := server.Validate(transport.name); err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func managedHTTPTestServer() *ServerConfig {
+	return &ServerConfig{
+		Port:      6276,
+		Transport: TransportManagedHTTP,
+		Command:   "playwright",
+		URL:       "http://127.0.0.1:3000/mcp",
+	}
+}
 
 func TestServerConfig_NetworkedManagedHTTPDefaultsSkipRefusedSettings(t *testing.T) {
 	server := &ServerConfig{
