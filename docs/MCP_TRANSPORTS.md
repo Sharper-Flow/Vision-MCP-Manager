@@ -29,7 +29,7 @@ The MCP specification defines two standard transports:
 
 **Endpoints:**
 - `POST /mcp` - Send requests/notifications, receive responses; normal completion is not a session disconnect signal
-- `GET /mcp` - Open SSE stream for server-initiated messages; stream closure is the disconnect signal used for shared-session grace cleanup
+- `GET /mcp` - Open SSE stream for server-initiated messages; stream closure is the disconnect signal used for shared-session and managed-http lease grace cleanup
 - `DELETE /mcp` - Close session and release resources
 
 **Go SDK types:**
@@ -107,11 +107,27 @@ Stateful servers (`stateful: true`) give every upstream MCP session a **dedicate
 5. Subsequent `tools/call` requests are proxied to the downstream subprocess
 6. On `DELETE /mcp` or session cleanup, Vision removes the upstream session. Stateful cleanup terminates that session's subprocess; shared-mode cleanup decrements the shared refcount and leaves the downstream subprocess healthy for other sessions.
 
-### Shared-Mode Disconnect Tracking
+### Disconnect Tracking and Lease Reaping
 
-For shared-mode servers, disconnect detection tracks session-bound GET/SSE receive streams. When the last tracked stream closes and no reconnect arrives before `disconnect_grace_period`, Vision removes the upstream session and frees admission capacity.
+Disconnect tracking applies to shared-mode stdio sessions and managed-http leases. It tracks session-bound GET/SSE receive streams, not generic inactivity. In shared mode, when the last tracked stream closes and the grace period expires, Vision removes the upstream session/refcount while leaving the shared downstream subprocess healthy for other sessions. In managed-http, the last stream closure starts a lease disconnect window; if no application activity re-arms it before expiry, the lease becomes eligible for cleanup and the gateway sends one downstream `DELETE`; successful disposal or `404` releases admission capacity. SSE connectivity is not counted as in-flight work, but every managed-http lease reap still requires `inFlight == 0`.
 
-Normal POST completion does **not** start disconnect grace. In Go, an incoming request context is cancelled when `ServeHTTP` returns, so treating POST completion as disconnect would create false `session.disconnect_detected` / `session.disconnect_cancelled` churn while the logical MCP session is still alive.
+Normal POST completion does **not** start a disconnect grace window. An HTTP request context ends when `ServeHTTP` returns, but that does not mean the logical MCP session disconnected. Treating POST completion as a disconnect would create false `session.disconnect_detected` / `session.disconnect_cancelled` churn. A structurally valid application request can re-arm an already-open managed-http disconnect window; it never opens a window when no stream-closure deadline exists. Notifications, responses, GET/SSE reconnects, and keepalives do not count as application activity.
+
+The expiry sweep checks eligible leases in strict first-match order:
+
+1. `client_disconnected` — the disconnect grace deadline elapsed after the last GET/SSE stream closed.
+2. `never_streamed` — the lease never opened a stream and exceeded its derived bound.
+3. `idle_timeout` — application inactivity exceeded `session_timeout`.
+
+For managed-http lease sweeps, all three rules require `inFlight == 0`, including protocol-maintenance POSTs that do not count as application activity. The never-streamed bound starts as `5 * grace` capped by a positive idle timeout, and is then raised to a 30s handshake floor if it would otherwise fall below it; a non-positive bound disables that rule. The floor is deliberately not capped back to `session_timeout`: the expiry sweep also runs synchronously on admission under capacity pressure, so a bound shorter than a normal `initialize`→GET handshake could reap a lease mid-connect. A short `session_timeout` is still honoured by the independent idle rule. With disconnect grace disabled, the disconnect-deadline rule is disabled while a positive `session_timeout` still supplies the idle/never-streamed fallback. The first matching rule supplies the lifecycle and reap reason.
+
+Managed-http timing derives from these server settings:
+
+- `disconnect_grace_period` supplies grace: unset means `60s`; a negative value disables disconnect grace. After a stream closes, application activity re-arms the existing window from the activity time.
+- `session_timeout` supplies the lease idle timeout and the managed-http reap cadence. The cadence starts at `session_timeout / 2`, is capped at `30s`, is further capped by `disconnect_grace_period / 2` when grace is positive, and is floored at `1s`.
+- `request_timeout` supplies the managed-http hung-request bound as `10 * request_timeout`. The gateway uses a clone of `http.DefaultTransport` with `ResponseHeaderTimeout` set to that bound: it limits waiting for response headers only. Response bodies, including a POST response served as `text/event-stream`, are not bounded by it. A header timeout returns `504` and increments `BackendHeaderTimeout`; other transport failures return `502`.
+
+`disconnect_grace_period` and `request_timeout` were previously dead configuration on the managed-http path. They are now live: the former controls stream-disconnect lease cleanup, and the latter controls the outbound response-header bound.
 
 ### Notification Relay
 

@@ -1,7 +1,7 @@
 # Mcp Streamable Transport
 
-> **Version:** 1.0.1
-> **Updated:** 2026-05-24
+> **Version:** 1.0.2
+> **Updated:** 2026-08-16
 
 ## Purpose
 
@@ -43,10 +43,10 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 - The request is rejected as an unknown or expired session
 - No previous session resources remain attached
 
-**Disconnect-triggered cleanup reaps stale shared sessions** (`rq-mcpstr01.3`)
+**Disconnect-triggered cleanup reaps stale sessions** (`rq-mcpstr01.3`)
 
 **Given:**
-- A shared-mode server has an active upstream session
+- A shared-mode stdio server or managed-http gateway has an active upstream session
 - The client disconnects the session-bound GET/SSE receive stream without sending DELETE
 
 **When:** The configured disconnect grace period expires after the last session-bound GET/SSE stream closes
@@ -54,8 +54,8 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 **Then:**
 - The upstream session is removed from tracking
 - Admission capacity is freed for new sessions
-- The downstream subprocess remains healthy for other sessions
-- A structured audit event is logged with the reap reason
+- The shared downstream subprocess or managed HTTP backend remains healthy for other sessions
+- A canonical reap reason is recorded in lifecycle metrics
 
 **Idle zero-ref reaping tears down shared downstream** (`rq-mcpstr01.4`)
 
@@ -71,10 +71,10 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 - The next `GetOrCreateSession` spawns a fresh downstream subprocess
 - Admission state is unaffected (already at zero)
 
-**POST completion does not trigger shared disconnect cleanup** (`rq-mcpstr01.5`)
+**POST completion does not trigger disconnect cleanup** (`rq-mcpstr01.5`)
 
 **Given:**
-- A shared-mode server has an active upstream session
+- A shared-mode stdio server or managed-http gateway has an active upstream session
 - A normal POST request with `Mcp-Session-Id` completes successfully
 
 **When:** No DELETE is sent and no session-bound GET/SSE stream closes
@@ -83,6 +83,19 @@ Vision MUST expose MCP endpoints using the go-sdk StreamableHTTPHandler per serv
 - Vision does not start the disconnect grace period for that POST completion
 - The upstream session remains tracked
 - No `session.disconnect_detected` event is emitted for ordinary POST completion
+
+**Application activity re-arms managed-http disconnect grace** (`rq-mcpstr01.6`)
+
+**Given:**
+- A managed-http lease has no open GET/SSE stream and is inside its disconnect grace window
+- An application request for the same session arrives before the window expires
+
+**When:** The application request is admitted
+
+**Then:**
+- The lease is not reaped by the original disconnect deadline
+- Application activity extends the disconnect grace window
+- The lease remains tracked while the re-armed window is open
 
 ---
 

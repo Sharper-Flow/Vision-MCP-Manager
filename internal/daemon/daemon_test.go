@@ -324,6 +324,69 @@ func TestReload_AggregatesErrors(t *testing.T) {
 	}
 }
 
+func TestManagedHTTPGatewayTimingConfig(t *testing.T) {
+	t.Run("disconnect grace resolves configured, default, and disabled values", func(t *testing.T) {
+		tests := []struct {
+			name string
+			cfg  config.Duration
+			want time.Duration
+		}{
+			{name: "configured", cfg: config.Duration(10 * time.Second), want: 10 * time.Second},
+			{name: "default", want: 60 * time.Second},
+			{name: "negative disables", cfg: config.Duration(-time.Second), want: 0},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cfg := &config.ServerConfig{DisconnectGracePeriod: tt.cfg}
+				if got := cfg.ResolvedDisconnectGracePeriod(); got != tt.want {
+					t.Fatalf("ResolvedDisconnectGracePeriod() = %v, want %v", got, tt.want)
+				}
+			})
+		}
+	})
+
+	t.Run("hung request bound is ten times resolved request timeout", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			profile config.AvailabilityProfile
+			want    time.Duration
+		}{
+			{name: "default", want: 5 * time.Minute},
+			{name: "networked", profile: config.AvailabilityProfileNetworked, want: 10 * time.Minute},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cfg := &config.ServerConfig{AvailabilityProfile: tt.profile}
+				cfg.ApplyDefaults()
+				if got := 10 * cfg.RequestTimeout.Duration(); got != tt.want {
+					t.Fatalf("10 * RequestTimeout = %v, want %v", got, tt.want)
+				}
+			})
+		}
+	})
+}
+
+func TestManagedHTTPReapInterval(t *testing.T) {
+	const sessionTimeout = 5 * time.Minute
+	tests := []struct {
+		name  string
+		grace time.Duration
+		want  time.Duration
+	}{
+		{name: "default cadence", grace: 60 * time.Second, want: 30 * time.Second},
+		{name: "short grace", grace: 10 * time.Second, want: 5 * time.Second},
+		{name: "floor", grace: time.Second, want: time.Second},
+		{name: "disabled grace falls back", grace: 0, want: 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := managedHTTPReapInterval(sessionTimeout, tt.grace); got != tt.want {
+				t.Fatalf("managedHTTPReapInterval() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSetupSlotGroupProxies_RegistersVirtualGroupListener(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pm := visionmcp.NewPortManager(logger)

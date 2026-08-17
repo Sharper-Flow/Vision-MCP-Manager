@@ -232,6 +232,206 @@ func TestManagedHTTPGatewayExpiresByApplicationIdleNotSSE(t *testing.T) {
 	}
 }
 
+func TestManagedHTTPGatewayReapsDisconnectedSSEAfterGrace(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
+	var deletes atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Mcp-Session-Id", "disconnected-session")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, ": keepalive\n\n")
+		case http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer backend.Close()
+	serverMetrics := metrics.NewServerMetrics()
+	target, _ := url.Parse(backend.URL + "/mcp")
+	grace := 2 * time.Minute
+	gateway, err := NewManagedHTTPGateway(ManagedHTTPGatewayConfig{
+		Target: target, MaxSessions: 1, IdleTimeout: time.Hour, DisconnectGracePeriod: grace,
+		Clock: clock, Transport: backend.Client().Transport, Metrics: serverMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := initializeManagedSession(t, gateway)
+	openManagedSSE(t, gateway, id)
+	clock.Advance(grace + time.Nanosecond)
+	gateway.pruneIdle(context.Background())
+
+	snapshot := serverMetrics.Snapshot()
+	if deletes.Load() != 1 || gateway.Snapshot(10).CapacityUsed != 0 {
+		t.Fatalf("delete=%d capacity=%d, want one delete and released capacity", deletes.Load(), gateway.Snapshot(10).CapacityUsed)
+	}
+	if snapshot.ReapedByReason[metrics.ReapReasonClientDisconnected] != 1 {
+		t.Fatalf("reaped metrics = %#v, want client_disconnected=1", snapshot.ReapedByReason)
+	}
+}
+
+func TestManagedHTTPGatewayReconnectCancelsDisconnectGrace(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
+	var deletes atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Mcp-Session-Id", "reconnect-session")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, ": keepalive\n\n")
+		case http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL + "/mcp")
+	grace := 2 * time.Minute
+	gateway, err := NewManagedHTTPGateway(ManagedHTTPGatewayConfig{
+		Target: target, MaxSessions: 1, IdleTimeout: time.Hour, DisconnectGracePeriod: grace,
+		Clock: clock, Transport: backend.Client().Transport,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := initializeManagedSession(t, gateway)
+	openManagedSSE(t, gateway, id)
+	clock.Advance(time.Minute)
+	openManagedSSE(t, gateway, id)
+	clock.Advance(time.Minute + time.Nanosecond)
+	gateway.pruneIdle(context.Background())
+
+	if deletes.Load() != 0 || gateway.Snapshot(10).CapacityUsed != 1 {
+		t.Fatalf("delete=%d capacity=%d, want no delete and active lease", deletes.Load(), gateway.Snapshot(10).CapacityUsed)
+	}
+}
+
+func TestManagedHTTPGatewayZeroDisconnectGraceRestoresIdleOnlyReaping(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
+	var deletes atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Mcp-Session-Id", "zero-grace-session")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, ": keepalive\n\n")
+		case http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer backend.Close()
+	serverMetrics := metrics.NewServerMetrics()
+	target, _ := url.Parse(backend.URL + "/mcp")
+	gateway, err := NewManagedHTTPGateway(ManagedHTTPGatewayConfig{
+		Target: target, MaxSessions: 1, IdleTimeout: time.Hour, DisconnectGracePeriod: 0,
+		Clock: clock, Transport: backend.Client().Transport, Metrics: serverMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := initializeManagedSession(t, gateway)
+	openManagedSSE(t, gateway, id)
+	clock.Advance(time.Hour)
+	gateway.pruneIdle(context.Background())
+
+	snapshot := serverMetrics.Snapshot()
+	if deletes.Load() != 1 || snapshot.ReapedByReason[metrics.ReapReasonIdleTimeout] != 1 || gateway.Snapshot(10).CapacityUsed != 0 {
+		t.Fatalf("delete=%d metrics=%#v capacity=%d, want idle_timeout reap", deletes.Load(), snapshot.ReapedByReason, gateway.Snapshot(10).CapacityUsed)
+	}
+	if snapshot.ReapedByReason[metrics.ReapReasonClientDisconnected] != 0 {
+		t.Fatalf("unexpected disconnect reap metrics = %#v", snapshot.ReapedByReason)
+	}
+}
+
+func TestManagedHTTPGatewayNeverStreamedReasonReachesMetrics(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
+	var deletes atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Mcp-Session-Id", "never-streamed-session")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		case http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer backend.Close()
+	serverMetrics := metrics.NewServerMetrics()
+	target, _ := url.Parse(backend.URL + "/mcp")
+	grace := time.Minute
+	gateway, err := NewManagedHTTPGateway(ManagedHTTPGatewayConfig{
+		Target: target, MaxSessions: 1, IdleTimeout: time.Hour, DisconnectGracePeriod: grace,
+		Clock: clock, Transport: backend.Client().Transport, Metrics: serverMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initializeManagedSession(t, gateway)
+	clock.Advance(5*grace + time.Nanosecond)
+	gateway.pruneIdle(context.Background())
+
+	snapshot := serverMetrics.Snapshot()
+	if deletes.Load() != 1 || snapshot.ReapedByReason[metrics.ReapReasonNeverStreamed] != 1 {
+		t.Fatalf("delete=%d metrics=%#v, want never_streamed reap", deletes.Load(), snapshot.ReapedByReason)
+	}
+	if snapshot.ReapedByReason[metrics.ReapReasonUnknown] != 0 {
+		t.Fatalf("never_streamed reason collapsed to unknown: %#v", snapshot.ReapedByReason)
+	}
+}
+
+func TestManagedHTTPGatewayExpiryDeleteIsAtMostOnce(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
+	var deletes atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Mcp-Session-Id", "once-session")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		case http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer backend.Close()
+	target, _ := url.Parse(backend.URL + "/mcp")
+	gateway, err := NewManagedHTTPGateway(ManagedHTTPGatewayConfig{
+		Target: target, MaxSessions: 1, IdleTimeout: time.Minute, Clock: clock,
+		Transport: backend.Client().Transport,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initializeManagedSession(t, gateway)
+	clock.Advance(time.Minute + time.Nanosecond)
+	gateway.pruneIdle(context.Background())
+	gateway.pruneIdle(context.Background())
+
+	if deletes.Load() != 1 || gateway.Snapshot(10).CapacityUsed != 0 {
+		t.Fatalf("delete=%d capacity=%d, want one delete and released capacity", deletes.Load(), gateway.Snapshot(10).CapacityUsed)
+	}
+}
+
+func openManagedSSE(t *testing.T, gateway http.Handler, sessionID string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	req.Header.Set("Accept", "text/event-stream")
+	resp := httptest.NewRecorder()
+	gateway.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("SSE status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestManagedHTTPGatewayDoesNotExpireInflightApplicationRequest(t *testing.T) {
 	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
 	started := make(chan struct{})
@@ -395,6 +595,272 @@ func TestManagedHTTPGatewayReadinessProbeInitializesAndDeletesOnce(t *testing.T)
 	if initializes.Load() != 1 || deletes.Load() != 1 {
 		t.Fatalf("probe calls initialize=%d delete=%d, want one each", initializes.Load(), deletes.Load())
 	}
+}
+
+func TestManagedHTTPGatewayBackendHeaderTimeoutReturns504AndReapsLease(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
+	const bound = 30 * time.Millisecond
+	requestDone := make(chan struct{})
+	releaseHungRequest := make(chan struct{})
+	var requests atomic.Int32
+	var deletes atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			requests.Add(1)
+			if r.Header.Get("Mcp-Session-Id") == "" {
+				w.Header().Set("Mcp-Session-Id", "timeout-session")
+				_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+				return
+			}
+			<-releaseHungRequest
+			close(requestDone)
+		case http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer backend.Close()
+
+	target, err := url.Parse(backend.URL + "/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverMetrics := metrics.NewServerMetrics()
+	gateway, err := NewManagedHTTPGateway(ManagedHTTPGatewayConfig{
+		Target: target, MaxSessions: 1, IdleTimeout: time.Second,
+		DisconnectGracePeriod: 0, Clock: clock, HungRequestBound: bound, Metrics: serverMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := initializeManagedSession(t, gateway)
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{}}`))
+	req.Header.Set("Mcp-Session-Id", id)
+	resp := httptest.NewRecorder()
+	gateway.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d, want 504; body = %s", resp.Code, resp.Body.String())
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("backend requests = %d, want initialize plus one timed-out request", requests.Load())
+	}
+	if got := gateway.leases.AggregateInFlight(); got != 0 {
+		t.Fatalf("aggregate in-flight = %d, want 0", got)
+	}
+	if got := serverMetrics.Snapshot().BackendHeaderTimeout; got != 1 {
+		t.Fatalf("backend header timeout metric = %d, want 1", got)
+	}
+
+	close(releaseHungRequest)
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("hung backend request did not finish after test release")
+	}
+	clock.Advance(time.Second)
+	gateway.pruneIdle(context.Background())
+	if deletes.Load() != 1 || gateway.Snapshot(10).CapacityUsed != 0 {
+		t.Fatalf("reap delete=%d capacity=%d, want one delete and zero capacity", deletes.Load(), gateway.Snapshot(10).CapacityUsed)
+	}
+}
+
+func TestManagedHTTPGatewayPostStreamSurvivesHeaderBound(t *testing.T) {
+	const bound = 25 * time.Millisecond
+	bodyStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Mcp-Session-Id") == "" {
+			w.Header().Set("Mcp-Session-Id", "post-stream-session")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "event: start\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(bodyStarted)
+		<-releaseBody
+		_, _ = io.WriteString(w, "event: end\n\n")
+	}))
+	defer backend.Close()
+
+	gateway := newManagedGatewayWithBound(t, backend.URL+"/mcp", bound)
+	id := initializeManagedSession(t, gateway)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{}}`))
+	req.Header.Set("Mcp-Session-Id", id)
+	resp := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		gateway.ServeHTTP(resp, req)
+		close(done)
+	}()
+
+	<-bodyStarted
+	select {
+	case <-done:
+		t.Fatal("POST stream ended before the body outlived the header bound")
+	case <-time.After(3 * bound):
+	}
+	close(releaseBody)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("POST stream did not finish after backend body release")
+	}
+	if resp.Code != http.StatusOK || resp.Body.String() != "event: start\n\nevent: end\n\n" {
+		t.Fatalf("POST stream response = %d %q", resp.Code, resp.Body.String())
+	}
+}
+
+func TestManagedHTTPGatewayGETStreamSurvivesHeaderBound(t *testing.T) {
+	const bound = 25 * time.Millisecond
+	bodyStarted := make(chan struct{})
+	releaseBody := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			w.Header().Set("Mcp-Session-Id", "get-stream-session")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, ": start\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(bodyStarted)
+		<-releaseBody
+		_, _ = io.WriteString(w, ": end\n\n")
+	}))
+	defer backend.Close()
+
+	gateway := newManagedGatewayWithBound(t, backend.URL+"/mcp", bound)
+	id := initializeManagedSession(t, gateway)
+	req := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	req.Header.Set("Mcp-Session-Id", id)
+	req.Header.Set("Accept", "text/event-stream")
+	resp := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		gateway.ServeHTTP(resp, req)
+		close(done)
+	}()
+
+	<-bodyStarted
+	select {
+	case <-done:
+		t.Fatal("GET stream ended before the body outlived the header bound")
+	case <-time.After(3 * bound):
+	}
+	close(releaseBody)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("GET stream did not finish after backend body release")
+	}
+	if resp.Code != http.StatusOK || resp.Body.String() != ": start\n\n: end\n\n" {
+		t.Fatalf("GET stream response = %d %q", resp.Code, resp.Body.String())
+	}
+}
+
+func TestManagedHTTPGatewayNonTimeoutFailureRemains502(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	target := backend.URL + "/mcp"
+	backend.Close()
+
+	gateway := newManagedGatewayWithMetrics(t, target, 25*time.Millisecond)
+	resp := httptest.NewRecorder()
+	gateway.ServeHTTP(resp, newInitializeRequest())
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.Code)
+	}
+	if got := gateway.metrics.(*metrics.ServerMetrics).Snapshot().BackendHeaderTimeout; got != 0 {
+		t.Fatalf("backend header timeout metric = %d, want 0", got)
+	}
+}
+
+func TestManagedHTTPGatewayDefaultTransportCloneDoesNotMutateGlobal(t *testing.T) {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Skip("http.DefaultTransport is not *http.Transport")
+	}
+	if base.ResponseHeaderTimeout != 0 {
+		t.Fatalf("pre-test default ResponseHeaderTimeout = %s, want 0", base.ResponseHeaderTimeout)
+	}
+	gateway := newManagedGatewayWithBound(t, "http://127.0.0.1:1/mcp", 40*time.Millisecond)
+	if gateway.transport == base {
+		t.Fatal("gateway reused process-global default transport")
+	}
+	if base.ResponseHeaderTimeout != 0 {
+		t.Fatalf("default ResponseHeaderTimeout = %s, want 0", base.ResponseHeaderTimeout)
+	}
+	clone, ok := gateway.transport.(*http.Transport)
+	if !ok || clone.ResponseHeaderTimeout != 40*time.Millisecond {
+		t.Fatalf("gateway transport = %#v, want cloned transport with 40ms header bound", gateway.transport)
+	}
+}
+
+func TestManagedHTTPGatewayInjectedTransportIsUnmodified(t *testing.T) {
+	transport := &http.Transport{ResponseHeaderTimeout: time.Second}
+	gateway := newManagedGatewayWithTransport(t, "http://127.0.0.1:1/mcp", 40*time.Millisecond, transport)
+	if gateway.transport != transport {
+		t.Fatal("gateway did not retain injected transport")
+	}
+	if transport.ResponseHeaderTimeout != time.Second {
+		t.Fatalf("injected ResponseHeaderTimeout = %s, want 1s", transport.ResponseHeaderTimeout)
+	}
+}
+
+func TestManagedHTTPGatewayNonHTTPDefaultTransportDoesNotPanic(t *testing.T) {
+	original := http.DefaultTransport
+	defer func() { http.DefaultTransport = original }()
+	http.DefaultTransport = &failingManagedTransport{}
+
+	gateway := newManagedGatewayWithBound(t, "http://127.0.0.1:1/mcp", 40*time.Millisecond)
+	transport, ok := gateway.transport.(*http.Transport)
+	if !ok || transport.ResponseHeaderTimeout != 40*time.Millisecond {
+		t.Fatalf("fallback transport = %#v, want dedicated transport with 40ms header bound", gateway.transport)
+	}
+}
+
+func newManagedGatewayWithBound(t *testing.T, target string, bound time.Duration) *ManagedHTTPGateway {
+	return newManagedGatewayWithConfig(t, target, ManagedHTTPGatewayConfig{HungRequestBound: bound})
+}
+
+func newManagedGatewayWithMetrics(t *testing.T, target string, bound time.Duration) *ManagedHTTPGateway {
+	return newManagedGatewayWithConfig(t, target, ManagedHTTPGatewayConfig{
+		HungRequestBound: bound,
+		Metrics:          metrics.NewServerMetrics(),
+	})
+}
+
+func newManagedGatewayWithTransport(t *testing.T, target string, bound time.Duration, transport http.RoundTripper) *ManagedHTTPGateway {
+	return newManagedGatewayWithConfig(t, target, ManagedHTTPGatewayConfig{
+		HungRequestBound: bound,
+		Transport:        transport,
+	})
+}
+
+func newManagedGatewayWithConfig(t *testing.T, target string, cfg ManagedHTTPGatewayConfig) *ManagedHTTPGateway {
+	t.Helper()
+	u, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Target = u
+	cfg.MaxSessions = 1
+	cfg.IdleTimeout = 30 * time.Minute
+	gateway, err := NewManagedHTTPGateway(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gateway
 }
 
 type failingManagedTransport struct{ calls atomic.Int32 }

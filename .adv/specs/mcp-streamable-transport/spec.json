@@ -3,8 +3,8 @@
   "name": "mcp-streamable-transport",
   "title": "Mcp Streamable Transport",
   "purpose": "Capability: Mcp Streamable Transport",
-  "version": "1.0.1",
-  "updated_at": "2026-05-24T22:46:00.000Z",
+  "version": "1.0.2",
+  "updated_at": "2026-08-16T00:00:00.000Z",
   "requirements": [
     {
       "id": "rq-mcpstr01",
@@ -45,17 +45,17 @@
         },
         {
           "id": "rq-mcpstr01.3",
-          "title": "Disconnect-triggered cleanup reaps stale shared sessions",
+          "title": "Disconnect-triggered cleanup reaps stale sessions",
           "given": [
-            "A shared-mode server has an active upstream session",
+            "A shared-mode stdio server or managed-http gateway has an active upstream session",
             "The client disconnects the session-bound GET/SSE receive stream without sending DELETE"
           ],
           "when": "The configured disconnect grace period expires after the last session-bound GET/SSE stream closes",
           "then": [
             "The upstream session is removed from tracking",
             "Admission capacity is freed for new sessions",
-            "The downstream subprocess remains healthy for other sessions",
-            "A structured audit event is logged with the reap reason"
+            "The shared downstream subprocess or managed HTTP backend remains healthy for other sessions",
+            "A canonical reap reason is recorded in lifecycle metrics"
           ]
         },
         {
@@ -75,9 +75,9 @@
         },
         {
           "id": "rq-mcpstr01.5",
-          "title": "POST completion does not trigger shared disconnect cleanup",
+          "title": "POST completion does not trigger disconnect cleanup",
           "given": [
-            "A shared-mode server has an active upstream session",
+            "A shared-mode stdio server or managed-http gateway has an active upstream session",
             "A normal POST request with Mcp-Session-Id completes successfully"
           ],
           "when": "No DELETE is sent and no session-bound GET/SSE stream closes",
@@ -85,6 +85,20 @@
             "Vision does not start the disconnect grace period for that POST completion",
             "The upstream session remains tracked",
             "No session.disconnect_detected event is emitted for ordinary POST completion"
+          ]
+        },
+        {
+          "id": "rq-mcpstr01.6",
+          "title": "Application activity re-arms managed-http disconnect grace",
+          "given": [
+            "A managed-http lease has no open GET/SSE stream and is inside its disconnect grace window",
+            "An application request for the same session arrives before the window expires"
+          ],
+          "when": "The application request is admitted",
+          "then": [
+            "The lease is not reaped by the original disconnect deadline",
+            "Application activity extends the disconnect grace window",
+            "The lease remains tracked while the re-armed window is open"
           ]
         }
       ]

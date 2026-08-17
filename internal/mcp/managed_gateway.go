@@ -30,19 +30,22 @@ type ManagedGatewayMetrics interface {
 	IncActiveSessions()
 	DecActiveSessions()
 	IncAdmissionDenied()
+	IncBackendHeaderTimeout()
 	IncReaped(reason string)
 }
 
 type ManagedHTTPGatewayConfig struct {
-	Target             *url.URL
-	MaxSessions        int
-	IdleTimeout        time.Duration
-	Clock              LeaseClock
-	Transport          http.RoundTripper
-	Backend            ManagedBackendGate
-	OnAmbiguousFailure func(error)
-	Metrics            ManagedGatewayMetrics
-	Logger             *slog.Logger
+	Target                *url.URL
+	MaxSessions           int
+	IdleTimeout           time.Duration
+	DisconnectGracePeriod time.Duration
+	HungRequestBound      time.Duration
+	Clock                 LeaseClock
+	Transport             http.RoundTripper
+	Backend               ManagedBackendGate
+	OnAmbiguousFailure    func(error)
+	Metrics               ManagedGatewayMetrics
+	Logger                *slog.Logger
 }
 
 // ManagedHTTPGateway is the lifecycle-aware boundary between Vision's public
@@ -67,13 +70,20 @@ func NewManagedHTTPGateway(cfg ManagedHTTPGatewayConfig) (*ManagedHTTPGateway, e
 	if err := validateManagedGatewayTarget(cfg.Target); err != nil {
 		return nil, err
 	}
-	transport := cfg.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	transport := cfg.Transport
+	if transport == nil {
+		if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			clone := base.Clone()
+			clone.ResponseHeaderTimeout = cfg.HungRequestBound
+			transport = clone
+		} else {
+			logger.Warn("http.DefaultTransport is not *http.Transport; using a dedicated transport")
+			transport = &http.Transport{ResponseHeaderTimeout: cfg.HungRequestBound}
+		}
 	}
 	target := *cfg.Target
 	return &ManagedHTTPGateway{
@@ -81,7 +91,7 @@ func NewManagedHTTPGateway(cfg ManagedHTTPGatewayConfig) (*ManagedHTTPGateway, e
 		transport:          transport,
 		backend:            cfg.Backend,
 		onAmbiguousFailure: cfg.OnAmbiguousFailure,
-		leases:             NewLeaseManager(cfg.MaxSessions, cfg.IdleTimeout, cfg.Clock),
+		leases:             NewLeaseManagerWithDisconnectGrace(cfg.MaxSessions, cfg.IdleTimeout, cfg.DisconnectGracePeriod, cfg.Clock),
 		logger:             logger,
 		metrics:            cfg.Metrics,
 	}, nil
@@ -259,7 +269,8 @@ func (g *ManagedHTTPGateway) reserveWithPrune(ctx context.Context) (Reservation,
 // lease. Capacity is released only when the backend proves disposal with a
 // successful response or 404.
 func (g *ManagedHTTPGateway) pruneIdle(ctx context.Context) {
-	for _, sessionID := range g.leases.ExpireIdle() {
+	for _, expired := range g.leases.ExpireEligible() {
+		sessionID := expired.SessionID
 		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, g.target.String(), nil)
 		if err != nil {
 			g.leases.MarkCleanupUncertain(sessionID, "cleanup_request_invalid")
@@ -280,7 +291,7 @@ func (g *ManagedHTTPGateway) pruneIdle(ctx context.Context) {
 		}
 		_ = resp.Body.Close()
 		if isSuccessfulStatus(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
-			g.finalizeClose(sessionID, "idle_timeout")
+			g.finalizeClose(sessionID, expired.Reason)
 			continue
 		}
 		g.leases.MarkCleanupUncertain(sessionID, "cleanup_rejected")
@@ -311,7 +322,15 @@ func (g *ManagedHTTPGateway) proxy(state *managedProxyRequest) *httputil.Reverse
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			g.observeProxyError(state, err)
-			writeManagedError(w, http.StatusBadGateway, -32003, "managed MCP backend request failed")
+			status := http.StatusBadGateway
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				status = http.StatusGatewayTimeout
+				if g.metrics != nil {
+					g.metrics.IncBackendHeaderTimeout()
+				}
+			}
+			writeManagedError(w, status, -32003, "managed MCP backend request failed")
 		},
 	}
 }
