@@ -59,13 +59,14 @@ type Daemon struct {
 	serverMetrics   map[string]*metrics.ServerMetrics
 	serverMetricsMu sync.RWMutex
 
-	managedGateways   map[string]*mcp.ManagedHTTPGateway
-	managedBackends   map[string]*supervisor.BackendCoordinator
-	managedCancels    map[string]context.CancelFunc
-	managedGatewaysMu sync.RWMutex
-	ownershipStore    *ownership.Store
-	reconciler        ownershipReconciler
-	daemonID          string
+	managedGateways                  map[string]*mcp.ManagedHTTPGateway
+	managedBackends                  map[string]*supervisor.BackendCoordinator
+	managedCancels                   map[string]context.CancelFunc
+	managedHTTPDrainWarningThreshold time.Duration
+	managedGatewaysMu                sync.RWMutex
+	ownershipStore                   *ownership.Store
+	reconciler                       ownershipReconciler
+	daemonID                         string
 }
 
 type ownershipReconciler interface {
@@ -159,24 +160,25 @@ func New(cfg Config) (*Daemon, error) {
 	})
 
 	d := &Daemon{
-		cfg:                visionCfg,
-		configPath:         cfg.ConfigPath,
-		supervisor:         sup,
-		registry:           reg,
-		portManager:        pm,
-		adminServer:        adminSrv,
-		catalog:            cat,
-		suggestionProvider: suggestionProvider,
-		logger:             cfg.Logger,
-		ctx:                ctx,
-		cancel:             cancel,
-		serverMetrics:      make(map[string]*metrics.ServerMetrics),
-		managedGateways:    make(map[string]*mcp.ManagedHTTPGateway),
-		managedBackends:    make(map[string]*supervisor.BackendCoordinator),
-		managedCancels:     make(map[string]context.CancelFunc),
-		ownershipStore:     store,
-		reconciler:         reconciler,
-		daemonID:           daemonID,
+		cfg:                              visionCfg,
+		configPath:                       cfg.ConfigPath,
+		supervisor:                       sup,
+		registry:                         reg,
+		portManager:                      pm,
+		adminServer:                      adminSrv,
+		catalog:                          cat,
+		suggestionProvider:               suggestionProvider,
+		logger:                           cfg.Logger,
+		ctx:                              ctx,
+		cancel:                           cancel,
+		serverMetrics:                    make(map[string]*metrics.ServerMetrics),
+		managedGateways:                  make(map[string]*mcp.ManagedHTTPGateway),
+		managedBackends:                  make(map[string]*supervisor.BackendCoordinator),
+		managedCancels:                   make(map[string]context.CancelFunc),
+		managedHTTPDrainWarningThreshold: defaultManagedHTTPDrainWarningThreshold,
+		ownershipStore:                   store,
+		reconciler:                       reconciler,
+		daemonID:                         daemonID,
 	}
 	reg.SetStartupGuard(d.reconcileManagedBackend)
 
@@ -979,7 +981,25 @@ func managedHTTPReapInterval(sessionTimeout, disconnectGracePeriod time.Duration
 	return reapInterval
 }
 
+const defaultManagedHTTPDrainWarningThreshold = 30 * time.Second
+
+func (d *Daemon) managedHTTPDrainWarningThresholdDuration() time.Duration {
+	if d.managedHTTPDrainWarningThreshold > 0 {
+		return d.managedHTTPDrainWarningThreshold
+	}
+	return defaultManagedHTTPDrainWarningThreshold
+}
+
 func (d *Daemon) recycleManagedHTTPBackend(ctx context.Context, name string, process *supervisor.ManagedProcess, coordinator *supervisor.BackendCoordinator, cause error) {
+	slowDrainWarning := time.AfterFunc(d.managedHTTPDrainWarningThresholdDuration(), func() {
+		if coordinator.State() != supervisor.BackendDraining {
+			return
+		}
+		d.logger.Warn("managed HTTP recycle drain is slow",
+			slog.String("server", name), slog.Int("in_flight", coordinator.InFlight()))
+	})
+	defer slowDrainWarning.Stop()
+
 	err := coordinator.DrainAndRecycle(ctx, func() error {
 		if process == nil {
 			return supervisor.ErrBackendUnavailable

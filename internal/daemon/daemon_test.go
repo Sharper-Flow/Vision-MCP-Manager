@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -81,6 +82,113 @@ func TestRecycleManagedHTTPBackendCancelsOnServerTeardown(t *testing.T) {
 	}
 	if state := coordinator.State(); state != supervisor.BackendRestarting {
 		t.Fatalf("State() after canceled drain = %q, want restarting", state)
+	}
+}
+
+type drainWarningHandler struct {
+	records chan slog.Record
+}
+
+func (h *drainWarningHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *drainWarningHandler) Handle(_ context.Context, record slog.Record) error {
+	h.records <- record.Clone()
+	return nil
+}
+
+func (h *drainWarningHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *drainWarningHandler) WithGroup(string) slog.Handler      { return h }
+
+func waitForBackendState(t *testing.T, coordinator *supervisor.BackendCoordinator, want supervisor.BackendState) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for coordinator.State() != want {
+		select {
+		case <-deadline.C:
+			t.Fatalf("backend state = %q, want %q", coordinator.State(), want)
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestRecycleManagedHTTPBackendWarnsOnceForSlowDrain(t *testing.T) {
+	coordinator := supervisor.NewBackendCoordinator()
+	coordinator.MarkReady()
+	requestDone, err := coordinator.BeginRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := &drainWarningHandler{records: make(chan slog.Record, 2)}
+	d := &Daemon{
+		logger:                           slog.New(handler),
+		managedHTTPDrainWarningThreshold: time.Millisecond,
+	}
+	recycleDone := make(chan struct{})
+	go func() {
+		d.recycleManagedHTTPBackend(context.Background(), "test", nil, coordinator, errors.New("ambiguous failure"))
+		close(recycleDone)
+	}()
+	waitForBackendState(t, coordinator, supervisor.BackendDraining)
+
+	select {
+	case record := <-handler.records:
+		if record.Level != slog.LevelWarn {
+			t.Fatalf("warning level = %s, want WARN", record.Level)
+		}
+		if record.Message != "managed HTTP recycle drain is slow" {
+			t.Fatalf("warning message = %q", record.Message)
+		}
+		var server string
+		var inFlight int64
+		record.Attrs(func(attr slog.Attr) bool {
+			switch attr.Key {
+			case "server":
+				server = attr.Value.String()
+			case "in_flight":
+				inFlight = attr.Value.Int64()
+			}
+			return true
+		})
+		if server != "test" {
+			t.Fatalf("warning server = %q, want test", server)
+		}
+		if inFlight != 1 {
+			t.Fatalf("warning in_flight = %d, want 1", inFlight)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow-drain warning did not fire")
+	}
+
+	requestDone()
+	select {
+	case <-recycleDone:
+	case <-time.After(time.Second):
+		t.Fatal("recycle did not complete")
+	}
+	select {
+	case record := <-handler.records:
+		t.Fatalf("unexpected second warning: %q", record.Message)
+	default:
+	}
+}
+
+func TestRecycleManagedHTTPBackendDoesNotWarnForFastDrain(t *testing.T) {
+	handler := &drainWarningHandler{records: make(chan slog.Record, 1)}
+	d := &Daemon{
+		logger:                           slog.New(handler),
+		managedHTTPDrainWarningThreshold: time.Second,
+	}
+	coordinator := supervisor.NewBackendCoordinator()
+	coordinator.MarkReady()
+
+	d.recycleManagedHTTPBackend(context.Background(), "test", nil, coordinator, errors.New("ambiguous failure"))
+	select {
+	case record := <-handler.records:
+		t.Fatalf("unexpected warning: %q", record.Message)
+	default:
 	}
 }
 
