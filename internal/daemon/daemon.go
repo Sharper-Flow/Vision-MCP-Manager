@@ -304,6 +304,11 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 		d.logger.Warn("some servers failed to stop", slog.String("error", err.Error()))
 	}
 
+	// Drain remaining lifecycle events and stop the registry's delivery
+	// goroutine. Ordered after StopAll so the Stop events it just produced are
+	// still delivered to the handler rather than dropped at teardown.
+	d.registry.Close()
+
 	// Cancel supervisor context (stops it)
 	// Note: suture.Supervisor stops when context is cancelled
 

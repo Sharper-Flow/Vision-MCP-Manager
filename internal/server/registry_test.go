@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -854,5 +857,190 @@ func TestRegistry_HttpStart_UsesSupervisor(t *testing.T) {
 	// Clean up
 	if err := reg.Stop("http-server"); err != nil {
 		t.Fatalf("Stop() error: %v", err)
+	}
+}
+
+// TestRegistry_FireEvent_PreservesOrder pins the ordering invariant directly.
+//
+// Root cause of two confirmed production outages (pokeedge-query-ops, playwright):
+// fireEvent dispatched every event via a bare `go handler(event)`, and Go
+// guarantees no FIFO ordering across separate `go` statements. Handlers therefore
+// observed lifecycle events in an order that never occurred.
+//
+// Firing a long run of distinct events and requiring byte-identical arrival order
+// makes the defect deterministic rather than probabilistic: unordered dispatch has
+// a vanishing chance of reproducing the exact input sequence.
+func TestRegistry_FireEvent_PreservesOrder(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+
+	const eventCount = 100
+
+	got := make(chan string, eventCount*2)
+	reg.SetEventHandler(func(event ServerEvent) {
+		got <- event.Name
+	})
+
+	want := make([]string, 0, eventCount)
+	for i := range eventCount {
+		name := fmt.Sprintf("srv-%03d", i)
+		want = append(want, name)
+
+		// Alternate types so an implementation cannot pass by coalescing or
+		// deduplicating on type alone.
+		evType := EventServerStarted
+		if i%2 == 1 {
+			evType = EventServerStopped
+		}
+		reg.fireEvent(ServerEvent{Type: evType, Name: name})
+	}
+
+	for i, wantName := range want {
+		select {
+		case gotName := <-got:
+			if gotName != wantName {
+				t.Fatalf("event %d delivered out of order: got %q, want %q", i, gotName, wantName)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for event %d (%q); delivery stalled", i, wantName)
+		}
+	}
+}
+
+// TestRegistry_Restart_EventOrderingAlternates covers the real production path
+// that produced incident 1.
+//
+// Restart is Stop-then-Start, and each fires an event. When the Start handler ran
+// first it saw the stale listener and silently returned success; the late Stop
+// handler then tore that listener down by name. Nothing was bound afterwards, yet
+// State remained Running and nothing was logged — a silent 15h59m outage.
+//
+// Strict Stopped -> Started alternation is the invariant that makes the
+// interleaving impossible.
+func TestRegistry_Restart_EventOrderingAlternates(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+
+	const restarts = 25
+
+	// Buffer generously so the handler never blocks and never itself becomes the
+	// source of a stall.
+	events := make(chan ServerEventType, restarts*2+8)
+	reg.SetEventHandler(func(event ServerEvent) {
+		events <- event.Type
+	})
+
+	// stdio transport: Process stays nil and the supervisor is bypassed
+	// (registry.go stdio branch), so restarts are cheap and deterministic.
+	// This is also incident 1's transport.
+	cfg := &config.ServerConfig{
+		Port:    6296,
+		Command: "sleep",
+		Args:    []string{"60"},
+	}
+	if err := reg.Add("restart-order", cfg); err != nil {
+		t.Fatalf("Add() error: %v", err)
+	}
+
+	if err := reg.Start("restart-order"); err != nil {
+		t.Fatalf("Start() error: %v", err)
+	}
+
+	expectEvent := func(step int, want ServerEventType) {
+		t.Helper()
+		select {
+		case got := <-events:
+			if got != want {
+				t.Fatalf("step %d: event = %v, want %v (lifecycle events delivered out of order)", step, got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("step %d: timed out waiting for %v", step, want)
+		}
+	}
+
+	expectEvent(0, EventServerStarted)
+
+	for i := range restarts {
+		if err := reg.Restart("restart-order"); err != nil {
+			t.Fatalf("Restart() #%d error: %v", i, err)
+		}
+		// Restart is Stop then Start; the handler must observe that same order.
+		expectEvent(i, EventServerStopped)
+		expectEvent(i, EventServerStarted)
+	}
+
+	if err := reg.Stop("restart-order"); err != nil {
+		t.Fatalf("Stop() error: %v", err)
+	}
+	expectEvent(restarts, EventServerStopped)
+}
+
+// TestRegistry_Close_DrainsPendingEvents verifies Close is a real teardown
+// boundary: queued events are delivered before it returns, and the drain
+// goroutine does not outlive the registry.
+func TestRegistry_Close_DrainsPendingEvents(t *testing.T) {
+	reg, _ := newTestRegistry()
+
+	var mu sync.Mutex
+	var delivered []string
+	reg.SetEventHandler(func(event ServerEvent) {
+		mu.Lock()
+		delivered = append(delivered, event.Name)
+		mu.Unlock()
+	})
+
+	const eventCount = 20
+	for i := range eventCount {
+		reg.fireEvent(ServerEvent{Type: EventServerStarted, Name: fmt.Sprintf("srv-%02d", i)})
+	}
+
+	reg.Close()
+
+	mu.Lock()
+	count := len(delivered)
+	mu.Unlock()
+
+	if count != eventCount {
+		t.Fatalf("delivered %d events, want %d — Close() must drain the queue", count, eventCount)
+	}
+
+	// Close must be idempotent; daemon shutdown paths can reach it more than once.
+	reg.Close()
+
+	// Firing after Close must not panic on a closed channel.
+	reg.fireEvent(ServerEvent{Type: EventServerStopped, Name: "after-close"})
+}
+
+// TestRegistry_FireEvent_SlowHandlerDoesNotStallForever ensures the serialized
+// drain cannot become a permanent daemon stall. Ordering is restored by putting
+// events through one queue, which introduces head-of-line blocking; a per-event
+// handler timeout is what bounds it.
+func TestRegistry_FireEvent_SlowHandlerDoesNotStallForever(t *testing.T) {
+	reg, _ := newTestRegistry()
+	reg.handlerTimeout = 200 * time.Millisecond
+	defer reg.Close()
+
+	release := make(chan struct{})
+	defer close(release)
+
+	var seen atomic.Int32
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Name == "slow" {
+			<-release // blocks until the test finishes
+			return
+		}
+		seen.Add(1)
+	})
+
+	reg.fireEvent(ServerEvent{Type: EventServerStarted, Name: "slow"})
+	reg.fireEvent(ServerEvent{Type: EventServerStarted, Name: "fast"})
+
+	deadline := time.After(10 * time.Second)
+	for seen.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("a wedged handler blocked event delivery indefinitely; per-event timeout did not fire")
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }

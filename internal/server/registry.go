@@ -34,7 +34,8 @@ const (
 )
 
 // ServerEvent contains information about a server lifecycle change.
-// Events are fired asynchronously after the corresponding operation completes.
+// Events are fired asynchronously after the corresponding operation completes,
+// and are delivered to the handler in the order the operations occurred.
 type ServerEvent struct {
 	Type   ServerEventType
 	Name   string
@@ -42,8 +43,25 @@ type ServerEvent struct {
 }
 
 // ServerEventHandler is called when server lifecycle events occur.
-// Handlers should be non-blocking and not call back into the registry.
+//
+// Handlers must be non-blocking and must not call back into the registry.
+// Events are delivered sequentially by a single goroutine, so a slow handler
+// delays every subsequent event; delivery is bounded by handlerTimeout, after
+// which the handler is abandoned and ordering is no longer guaranteed for it.
 type ServerEventHandler func(event ServerEvent)
+
+const (
+	// eventQueueCapacity bounds the lifecycle event queue. Events are produced
+	// at server start/stop cadence, so this is far above steady-state depth; it
+	// exists to bound memory if a handler wedges, not to absorb normal load.
+	eventQueueCapacity = 256
+
+	// eventHandlerTimeout bounds how long a single handler invocation may delay
+	// delivery of the next event. Serializing delivery restores ordering but
+	// introduces head-of-line blocking; this is what keeps that blocking finite,
+	// so one wedged handler cannot stall daemon lifecycle handling forever.
+	eventHandlerTimeout = 30 * time.Second
+)
 
 // Registry manages MCP server configurations and their lifecycle.
 // It provides a thread-safe interface for adding, removing, starting,
@@ -56,6 +74,17 @@ type Registry struct {
 	eventHandler  ServerEventHandler
 	startupBlocks map[string]error
 	startupGuard  func(string) error
+
+	// Lifecycle events are delivered through a single queue drained by one
+	// goroutine, so handlers observe events in the order they occurred.
+	eventQueue chan ServerEvent
+	stopCh     chan struct{}
+	drainDone  chan struct{}
+	closeOnce  sync.Once
+
+	// handlerTimeout defaults to eventHandlerTimeout; overridable in tests so
+	// timeout behavior can be exercised without a 30s wait.
+	handlerTimeout time.Duration
 }
 
 func (r *Registry) SetStartupGuard(guard func(string) error) {
@@ -69,12 +98,88 @@ func NewRegistry(sup *supervisor.Supervisor, logger *slog.Logger) *Registry {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Registry{
-		supervisor:    sup,
-		servers:       make(map[string]*ManagedServer),
-		logger:        logger,
-		startupBlocks: make(map[string]error),
+	r := &Registry{
+		supervisor:     sup,
+		servers:        make(map[string]*ManagedServer),
+		logger:         logger,
+		startupBlocks:  make(map[string]error),
+		eventQueue:     make(chan ServerEvent, eventQueueCapacity),
+		stopCh:         make(chan struct{}),
+		drainDone:      make(chan struct{}),
+		handlerTimeout: eventHandlerTimeout,
 	}
+	go r.drainEvents()
+	return r
+}
+
+// drainEvents delivers queued lifecycle events one at a time, in arrival order.
+// A single drain goroutine is what makes ordering observable to handlers.
+func (r *Registry) drainEvents() {
+	defer close(r.drainDone)
+
+	for {
+		select {
+		case event := <-r.eventQueue:
+			r.deliverEvent(event)
+		case <-r.stopCh:
+			// Deliver whatever is already queued before shutting down, so a
+			// pending Stop event is never lost at teardown.
+			for {
+				select {
+				case event := <-r.eventQueue:
+					r.deliverEvent(event)
+				default:
+					return
+				}
+			}
+		}
+	}
+}
+
+// deliverEvent invokes the registered handler for a single event, bounded by
+// eventHandlerTimeout. On timeout the handler is abandoned (Go cannot cancel a
+// running function) and delivery continues, trading strict serialization for
+// liveness — a wedged handler degrades ordering rather than halting the daemon.
+func (r *Registry) deliverEvent(event ServerEvent) {
+	r.mu.RLock()
+	handler := r.eventHandler
+	r.mu.RUnlock()
+
+	if handler == nil {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler(event)
+	}()
+
+	timeout := r.handlerTimeout
+	if timeout <= 0 {
+		timeout = eventHandlerTimeout
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+	case <-timer.C:
+		r.logger.Error("server lifecycle event handler timed out; continuing delivery",
+			slog.String("name", event.Name),
+			slog.Duration("timeout", timeout),
+		)
+	}
+}
+
+// Close stops event delivery and waits for queued events to drain.
+// It is safe to call multiple times.
+func (r *Registry) Close() {
+	r.closeOnce.Do(func() {
+		close(r.stopCh)
+	})
+	<-r.drainDone
 }
 
 // BlockStartup records a reconciliation conflict without changing config.
@@ -91,23 +196,36 @@ func (r *Registry) BlockStartup(name string, err error) {
 // SetEventHandler registers a callback for server lifecycle events.
 // Only one handler can be registered at a time; subsequent calls replace
 // the previous handler. Pass nil to unregister the current handler.
-// The handler is called asynchronously after state changes complete.
+// The handler is called asynchronously after state changes complete, and
+// receives events in the order those state changes occurred.
 func (r *Registry) SetEventHandler(handler ServerEventHandler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.eventHandler = handler
 }
 
-// fireEvent sends an event to the registered handler, if any.
+// fireEvent enqueues an event for ordered delivery to the registered handler.
 // This is called outside of locks to avoid deadlocks.
+//
+// Events MUST be delivered in the order they occurred. A previous implementation
+// dispatched each event with a bare `go handler(event)`, which provides no
+// ordering guarantee across goroutines. Because Restart is Stop-then-Start, a
+// Start handler could run before the Stop handler that preceded it — the Start
+// path then saw a stale listener and returned success, and the late Stop tore
+// that listener down. The server reported Running with nothing bound. This was
+// the shared root cause of two confirmed production outages.
+//
+// The send blocks when the queue is full, applying backpressure rather than
+// dropping events: a lost Stop event would resurrect exactly the defect above.
+// Progress is guaranteed because delivery is bounded by handlerTimeout.
 func (r *Registry) fireEvent(event ServerEvent) {
-	r.mu.RLock()
-	handler := r.eventHandler
-	r.mu.RUnlock()
-
-	if handler != nil {
-		// Fire asynchronously to prevent blocking and deadlocks
-		go handler(event)
+	select {
+	case r.eventQueue <- event:
+	case <-r.stopCh:
+		// Registry is shutting down; drop rather than block a caller forever.
+		r.logger.Debug("dropping lifecycle event after registry close",
+			slog.String("name", event.Name),
+		)
 	}
 }
 
