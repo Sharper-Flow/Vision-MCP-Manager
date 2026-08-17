@@ -71,18 +71,55 @@ servers:
     availability_profile: networked
 
     # Explicitly safe read-only tools that may share results across sessions.
+    # Not supported on managed-http (see "Transport support" below).
     shared_read_only_tools:
       - kagi_search_fetch
       - kagi_summarizer
 
     # Cache successful shared read-only results for this long (default: 10s for networked)
+    # Not supported on managed-http.
     shared_result_cache_ttl: 10s
 
     # Max cached shared results per server (default: 128 for networked)
+    # Not supported on managed-http.
     shared_result_cache_size: 128
 
     # Max concurrent downstream tool calls per server (default: 4 for networked)
+    # Not supported on managed-http.
     max_in_flight_requests: 4
+
+### Transport support for tuning settings
+
+Not every setting applies to every transport. Where support differs, Vision
+rejects the setting at config load rather than accepting and ignoring it, so a
+typo or a wrong assumption surfaces as a startup error instead of silently
+doing nothing.
+
+| Setting | stdio | http | sse | managed-http |
+|---|---|---|---|---|
+| `shared_read_only_tools` | yes | yes | yes | **rejected** |
+| `shared_result_cache_ttl` | yes | yes | yes | **rejected** |
+| `shared_result_cache_size` | yes | yes | yes | **rejected** |
+| `max_in_flight_requests` | yes | yes | yes | **rejected** |
+| `idle_reap_timeout` | yes | yes | yes | **rejected** |
+| `disconnect_grace_period` | yes | yes | yes | yes |
+
+**Why the three shared-result settings are rejected on managed-http.** They
+coalesce and cache tool results *across* client sessions. Managed-http gives
+each MCP session its own isolated browser context (see
+`docs/adr/0001-managed-native-http-playwright.md`), so serving one session a
+result produced in another would cross that isolation boundary. Listing a tool
+in `shared_read_only_tools` does not make this safe: read-only is not the same
+as session-independent, and a tool such as a page snapshot is both read-only and
+entirely specific to the session that asked. This is a deliberate boundary, not
+a missing feature.
+
+**Idle lifetime on managed-http** is governed by `session_timeout`, which the
+gateway's lease manager and reaper consume. Use that instead of
+`idle_reap_timeout`.
+
+`disconnect_grace_period` *is* honored on managed-http, despite applying to
+shared-mode servers as well.
 
 # Security settings (applied to all Streamable HTTP endpoints)
 security:

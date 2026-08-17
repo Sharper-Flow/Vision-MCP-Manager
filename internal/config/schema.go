@@ -174,15 +174,24 @@ type ServerConfig struct {
 	Description string `yaml:"description,omitempty"`
 
 	// DisconnectGracePeriod controls how long to wait after the last HTTP connection
-	// closes before removing a shared-mode upstream session. Only applies to
-	// non-stateful servers using SharedSessionManager. 0 uses default (60s).
+	// closes before removing an upstream session. 0 uses default (60s).
 	// Negative values disable disconnect detection entirely.
+	//
+	// Honored by shared-mode servers using SharedSessionManager AND by
+	// managed-http, whose gateway receives it through
+	// ResolvedDisconnectGracePeriod(). Despite sitting next to IdleReapTimeout
+	// below, this setting is NOT inert on managed-http -- do not "fix" it.
 	DisconnectGracePeriod Duration `yaml:"disconnect_grace_period,omitempty"`
 
 	// IdleReapTimeout controls how long a shared-mode backend subprocess lives after
-	// the last upstream session disconnects. Only applies to non-stateful servers
-	// using SharedSessionManager. 0 uses default (5m). Negative values disable
-	// idle reaping entirely (subprocess lives forever).
+	// the last upstream session disconnects. 0 uses default (5m). Negative values
+	// disable idle reaping entirely (subprocess lives forever).
+	//
+	// Applies only to non-stateful servers using SharedSessionManager, and that
+	// limit is enforced: setting it on a managed-http server is a validation
+	// error rather than a silently ignored value. Managed-http governs idle
+	// session lifetime through SessionTimeout instead, which its lease manager
+	// and reaper consume.
 	IdleReapTimeout Duration `yaml:"idle_reap_timeout,omitempty"`
 
 	// SlotGroup is internal metadata set when this server was synthesized from a
