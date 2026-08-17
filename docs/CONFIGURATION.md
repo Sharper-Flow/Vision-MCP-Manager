@@ -95,7 +95,7 @@ security:
 
 # Global supervision settings
 supervision:
-  # Reachability probe cadence for managed servers (default: 30s;
+  # Reachability probe cadence for managed servers (default: 30s; minimum: 5s;
   # end-to-end probes run at 10x this interval)
   health_check_interval: 30s
 
@@ -267,6 +267,12 @@ its existing raw `state` field and adds `process_state`, `effective_status`, and
 an optional `effective_reason`. A recycling or restarting backend reports
 effective `error`, never `running`; a ready backend with a running process
 reports `running`.
+
+Server and slot responses also include `reachability`, `probe_depth`,
+`last_probe_at`, `last_probe_outcome`, `last_probe_error`, and
+`consecutive_probe_failures`. During the 30-second startup grace while a
+managed server awaits its first probe, aggregate `/health` reports `degraded`
+and `vision_status.healthy` is `false`.
 
 #### Native HTTP server (proxy mode)
 

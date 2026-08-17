@@ -170,7 +170,7 @@ servers:
 
 # Global supervision settings
 supervision:
-  # How often to check server health
+  # Reachability probe cadence for managed servers (default: 30s; minimum: 5s)
   health_check_interval: 30s
   
   # Time to wait for graceful shutdown

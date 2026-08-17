@@ -4,13 +4,13 @@
  * Provides health checking for the Vision daemon on port 6275.
  * Used to determine if the daemon is running before attempting MCP calls.
  *
- * Contract source: internal/admin/server.go handleHealth (lines 195-237).
+ * Contract source: internal/admin/server.go handleHealth (lines 207-251).
  * Port 6275 serves the Admin MCP. It replaced a legacy REST API that returned
  * {"status":"healthy","uptime":...}; the removal is recorded in
  * internal/daemon/daemon.go:194. Responses are:
  *
  *   200 {"status":"ok"}                          daemon up, all servers fine
- *   200 {"status":"degraded","errors":[...]}     daemon up, some servers failed
+ *   200 {"status":"degraded","errors":[...]}     daemon up, servers failed or await first probe
  *   503 {"status":"unhealthy"}                   daemon not running
  *
  * Neither `uptime` nor `port` is ever returned.
@@ -31,7 +31,7 @@ async function readJsonWithTimeout<T>(response: Response, timeoutMs: number): Pr
 
 export interface HealthStatus {
   healthy: boolean
-  /** True when the daemon is reachable but some managed servers have failed. */
+  /** True when the daemon is reachable but managed servers failed or await their first probe. */
   degraded?: boolean
   /** Per-server failure details, present only when degraded. */
   errors?: string[]
@@ -78,8 +78,8 @@ export async function checkHealth(): Promise<HealthStatus> {
         return { healthy: true }
       case "degraded":
         // The daemon itself is up and its management tools work; individual
-        // managed servers have failed. Reporting this as unhealthy would gate
-        // off the very tools needed to diagnose and restart them.
+        // managed servers have failed or await their first probe. Reporting
+        // this as unhealthy would gate off the tools needed to diagnose and restart them.
         return {
           healthy: true,
           degraded: true,

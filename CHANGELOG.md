@@ -2,6 +2,10 @@
 
 ### Changed
 
+- report probe-backed reachability for managed servers; `supervision.health_check_interval` now controls probe cadence (minimum `5s`)
+- return `503` with `status` and `reason` from per-server `/health` when the server is unprobed or unreachable
+- report aggregate `/health` as `degraded` and `vision_status.healthy` as `false` during the 30-second startup grace while managed servers await their first probe
+- add `reachability`, `probe_depth`, `last_probe_at`, `last_probe_outcome`, `last_probe_error`, and `consecutive_probe_failures` to admin server and slot responses; per-server `health_check_interval` no longer has a `HEALTH_CHECK_INTERVAL` binding
 - checkpoint tk-0885d8af1be1 (chore: adv)
 - checkpoint tk-97951e2b97ef (chore: adv)
 - checkpoint tk-0b869fd741ac (chore: adv)

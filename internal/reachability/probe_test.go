@@ -135,7 +135,6 @@ func TestVersionSelectorChoosesListenerProbeForSupportedRevisions(t *testing.T) 
 
 func TestManagerSkipsEndToEndProbeWhenSessionEvidenceIsRecent(t *testing.T) {
 	store := reachability.NewStore()
-	store.RecordProbe("busy", reachability.ProbeResult{Depth: reachability.DepthSession, Success: true})
 	listener := &recordingProbe{result: true}
 	deep := &recordingProbe{result: true}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(listener, deep))
@@ -143,11 +142,41 @@ func TestManagerSkipsEndToEndProbeWhenSessionEvidenceIsRecent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer manager.Close()
+
+	controlStore := reachability.NewStore()
+	controlListener := &recordingProbe{result: true}
+	controlDeep := &recordingProbe{result: true}
+	controlManager := reachability.NewManager(controlStore, reachability.NewVersionSelector(controlListener, controlDeep))
+	if err := controlManager.Start(context.Background(), reachability.Target{Name: "idle", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, 5*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	defer controlManager.Close()
+
 	waitFor(t, func() bool { return listener.count() >= 2 })
-	store.RecordProbe("busy", reachability.ProbeResult{Depth: reachability.DepthSession, Success: true})
-	time.Sleep(10 * time.Millisecond)
+	refreshDone := make(chan struct{})
+	defer close(refreshDone)
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-refreshDone:
+				return
+			case <-ticker.C:
+				store.RecordProbe("busy", reachability.ProbeResult{Depth: reachability.DepthSession, Success: true})
+			}
+		}
+	}()
+
+	// Let both workers pass the 50ms deep-probe eligibility point. The control
+	// worker has no session evidence and must run; the busy worker must keep
+	// skipping while its session evidence is refreshed.
+	time.Sleep(100 * time.Millisecond)
 	if got := deep.count(); got != 0 {
 		t.Fatalf("end-to-end probes with recent session evidence = %d, want 0", got)
+	}
+	if got := controlDeep.count(); got == 0 {
+		t.Fatal("control worker without session evidence did not run an end-to-end probe")
 	}
 }
 

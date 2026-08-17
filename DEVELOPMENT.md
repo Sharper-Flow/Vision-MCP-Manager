@@ -147,7 +147,7 @@ Integration tests use embedded Node.js MCP servers defined as JavaScript strings
 | `TestFullRequestFlow` | HTTP → Bridge → Subprocess → Response |
 | `TestConcurrentClients` | 10 simultaneous clients work correctly |
 | `TestCrashRecovery` | Supervisor restarts crashed processes |
-| `TestHealthEndpoint` | Per-server /health endpoint works |
+| `TestPerServerHealthReportsUnreachableServerWithReason` | Per-server `/health` reports an unreachable server with a reason |
 | `TestHotReload` | Config file changes trigger server add/remove |
 
 ### Race Detection

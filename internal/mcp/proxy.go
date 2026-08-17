@@ -208,24 +208,6 @@ type ProxyConfig struct {
 	Metrics metrics.ServerMetricsReporter
 }
 
-type reachabilityAwareHandler struct {
-	handler  http.Handler
-	setStore func(*reachability.Store)
-}
-
-func (h *reachabilityAwareHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.handler.ServeHTTP(w, r)
-}
-
-// SetReachabilityStore configures the optional store for current and future
-// downstream probes. A nil store disables reporting.
-func (h *reachabilityAwareHandler) SetReachabilityStore(store *reachability.Store) {
-	if h == nil || h.setStore == nil {
-		return
-	}
-	h.setStore(store)
-}
-
 // hasExactlyOneManagerSource reports whether exactly one of SessionManager,
 // SharedManager, or Selector is set. NewProxyHandler requires this invariant.
 func (cfg ProxyConfig) hasExactlyOneManagerSource() bool {
@@ -545,7 +527,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 		setReachabilityStore(cfg.ReachabilityStore)
 	}
 
-	return &reachabilityAwareHandler{handler: resultHandler, setStore: setReachabilityStore}
+	return resultHandler
 }
 
 func isInitializeRequest(r *http.Request) bool {

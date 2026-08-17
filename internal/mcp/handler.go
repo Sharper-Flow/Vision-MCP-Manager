@@ -213,11 +213,12 @@ func (pm *PortManager) recordListenerProbeFailure(name string, err error) {
 		return
 	}
 
-	store.RecordProbe(name, reachability.ProbeResult{
-		Depth:       reachability.DepthListener,
-		AttemptedAt: time.Now(),
-		Error:       err.Error(),
-	})
+	store.RecordDefinitiveFailure(
+		name,
+		reachability.DepthListener,
+		time.Now(),
+		err.Error(),
+	)
 }
 
 // ProbeCompatibilityMiddleware returns a short-lived legacy SSE handshake for

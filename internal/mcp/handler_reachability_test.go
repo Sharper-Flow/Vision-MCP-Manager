@@ -147,6 +147,12 @@ func TestPortManagerBindFailureRecordsListenerProbe(t *testing.T) {
 			if !ok {
 				t.Fatal("bind failure did not record listener-depth evidence")
 			}
+			if value.State != reachability.StateUnreachable {
+				t.Fatalf("bind failure state = %q, want %q", value.State, reachability.StateUnreachable)
+			}
+			if evidence.ConsecutiveFailures != 1 {
+				t.Fatalf("bind failure consecutive failures = %d, want 1", evidence.ConsecutiveFailures)
+			}
 			if evidence.LastProbeOutcome != reachability.OutcomeFailure {
 				t.Fatalf("expected failed listener probe, got %q", evidence.LastProbeOutcome)
 			}

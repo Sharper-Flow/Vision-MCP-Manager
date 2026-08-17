@@ -163,20 +163,7 @@ func probeEvidencePreferred(state reachability.State, candidate, selected reacha
 	if !candidate.LastProbeAttempt.Equal(selected.LastProbeAttempt) {
 		return candidate.LastProbeAttempt.After(selected.LastProbeAttempt)
 	}
-	return probeDepthRank(candidate.Depth) > probeDepthRank(selected.Depth)
-}
-
-func probeDepthRank(depth reachability.Depth) int {
-	switch depth {
-	case reachability.DepthListener:
-		return 1
-	case reachability.DepthSession:
-		return 2
-	case reachability.DepthEndToEnd:
-		return 3
-	default:
-		return 0
-	}
+	return candidate.Depth.Rank() > selected.Depth.Rank()
 }
 
 func (s *Server) reachabilityFor(name string) reachability.Reachability {

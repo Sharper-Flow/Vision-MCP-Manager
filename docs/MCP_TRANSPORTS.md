@@ -294,6 +294,7 @@ When `transport` is not specified, Vision infers it from the config:
 | `internal/session` | `Manager` — per-session subprocess lifecycle (spawn, track, teardown), reaper |
 | `internal/mcp` | `NewProxyHandler` for stdio; `ManagedHTTPGateway` for native HTTP; lease/classification/security middleware; per-port listeners |
 | `internal/admin` | Admin MCP server on port 6275 with `vision_*` management tools |
+| `internal/reachability` | Probe-backed reachability evidence and probe-worker scheduling |
 | `internal/daemon` | Orchestrates config, registry, supervisor, and proxy setup |
 | `internal/supervisor` | Suture process ownership and backend drain/readiness coordination for managed/native transports |
 

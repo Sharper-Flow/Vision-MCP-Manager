@@ -1257,12 +1257,6 @@ func (d *Daemon) Registry() *server.Registry {
 	return d.registry
 }
 
-// Reachability returns the probe-backed reachability store used by status
-// surfaces. The store is independent from managed-server lifecycle state.
-func (d *Daemon) Reachability() *reachability.Store {
-	return d.reachabilityStore
-}
-
 // Config returns the current configuration.
 func (d *Daemon) Config() *config.Config {
 	d.mu.RLock()

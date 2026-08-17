@@ -143,8 +143,12 @@ vision daemon status
 # Check health
 vision health
 
-# Test a server health endpoint
-curl http://localhost:6276/health
+# Inspect per-server reachability; 503 with status and reason means it is
+# warming up or unreachable, not necessarily dead
+curl -i http://localhost:6276/health
+
+# Daemon liveness remains 200 while the daemon is up
+curl http://localhost:6275/healthz
 ```
 
 ## Key Differences
@@ -210,7 +214,10 @@ lsof -i :6276
 
 1. Verify daemon is running: `vision daemon status`
 2. Check server state with the Admin MCP tool `vision_list`
-3. Test endpoint directly: `curl http://localhost:6276/health`
+3. Inspect per-server reachability: `curl -i http://localhost:6276/health`.
+   A `503` with `status` and `reason` can mean the server is awaiting its first
+   probe; use `curl http://localhost:6275/healthz` for the unchanged daemon
+   liveness check.
 
 ### Missing environment variables
 

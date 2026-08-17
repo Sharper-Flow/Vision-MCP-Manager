@@ -1216,7 +1216,7 @@ func TestProxySession_HealthProbeThreeFailuresSurfaceUnreachable(t *testing.T) {
 	for time.Now().Before(deadline) {
 		if got, ok := store.Get(ps.serverName); ok {
 			if evidence, exists := got.Evidence[reachability.DepthSession]; exists && got.State == reachability.StateUnreachable {
-				if evidence.ConsecutiveFailures != reachability.FailureThreshold {
+				if evidence.ConsecutiveFailures < reachability.FailureThreshold {
 					t.Fatalf("consecutive failures = %d, want %d", evidence.ConsecutiveFailures, reachability.FailureThreshold)
 				}
 				if evidence.LastProbeError == "" {

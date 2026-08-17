@@ -28,6 +28,20 @@ const (
 	DepthEndToEnd Depth = "end_to_end"
 )
 
+// Rank orders probe depths from shallowest to deepest for evidence selection.
+func (d Depth) Rank() int {
+	switch d {
+	case DepthListener:
+		return 1
+	case DepthSession:
+		return 2
+	case DepthEndToEnd:
+		return 3
+	default:
+		return 0
+	}
+}
+
 // Outcome is the result of a completed probe.
 type Outcome string
 
@@ -254,7 +268,7 @@ func stateFor(record *serverRecord) State {
 	// No depth is failing; the deepest evidence is the most informative.
 	deepest := DepthListener
 	for depth := range record.reachability.Evidence {
-		if depthRank(depth) > depthRank(deepest) {
+		if depth.Rank() > deepest.Rank() {
 			deepest = depth
 		}
 	}
@@ -269,21 +283,8 @@ func cloneReachability(value Reachability) Reachability {
 	return clone
 }
 
-func depthRank(depth Depth) int {
-	switch depth {
-	case DepthListener:
-		return 1
-	case DepthSession:
-		return 2
-	case DepthEndToEnd:
-		return 3
-	default:
-		return 0
-	}
-}
-
 func validateDepth(depth Depth) {
-	if depthRank(depth) == 0 {
+	if depth.Rank() == 0 {
 		panic("reachability: invalid probe depth")
 	}
 }
