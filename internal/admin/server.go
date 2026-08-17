@@ -104,6 +104,9 @@ func NewServer(cfg Config) *Server {
 		reachabilityGrace:        cfg.ReachabilityGrace,
 		Metrics:                  cfg.Metrics,
 		listenerExposure:         visionmcp.ListenerLoopback,
+		// Clock starts at construction so health uptime is truthful even
+		// before Start() runs; Start() re-stamps it to the listen time.
+		startedAt: time.Now(),
 	}
 }
 
@@ -219,7 +222,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy"})
 		return
 	}
-	uptime := time.Since(startedAt).Round(time.Second).String()
+	// Zero startedAt means the server was hand-constructed without a start
+	// stamp (tests) or before NewServer's construction clock. Report 0s
+	// rather than time.Since(zero)'s 292-year fiction; uptime must be
+	// present and truthful, and 0s is the least-false claim available.
+	uptime := "0s"
+	if !startedAt.IsZero() {
+		uptime = time.Since(startedAt).Round(time.Second).String()
+	}
 
 	// Project every server through the shared effective-status precedence table.
 	var errors []string

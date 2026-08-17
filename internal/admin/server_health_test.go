@@ -57,9 +57,9 @@ func TestHandleHealthEffectiveStatusCasesAndResponseShape(t *testing.T) {
 		wantStatus   string
 		wantKeys     []string
 	}{
-		{name: "healthy fleet", state: server.StateRunning, reachability: reachableHealthTestValue(), wantStatus: "ok", wantKeys: []string{"status"}},
-		{name: "failed server", state: server.StateFailed, lastError: "start failed", wantStatus: "degraded", wantKeys: []string{"status", "errors"}},
-		{name: "crashed server", state: server.StateCrashed, lastError: "process exited", wantStatus: "degraded", wantKeys: []string{"status", "errors"}},
+		{name: "healthy fleet", state: server.StateRunning, reachability: reachableHealthTestValue(), wantStatus: "ok", wantKeys: []string{"status", "uptime"}},
+		{name: "failed server", state: server.StateFailed, lastError: "start failed", wantStatus: "degraded", wantKeys: []string{"status", "errors", "uptime"}},
+		{name: "crashed server", state: server.StateCrashed, lastError: "process exited", wantStatus: "degraded", wantKeys: []string{"status", "errors", "uptime"}},
 	}
 
 	for _, tc := range tests {
@@ -108,7 +108,7 @@ func TestHandleHealthUnprobedServerWithinGraceIsNotHealthy(t *testing.T) {
 	if body["status"] != "degraded" {
 		t.Fatalf("status=%v, want degraded during grace; body=%v", body["status"], body)
 	}
-	assertJSONKeys(t, body, []string{"status", "errors"})
+	assertJSONKeys(t, body, []string{"status", "errors", "uptime"})
 }
 
 func TestToolStatusDoesNotClaimHealthyWithoutProbeEvidence(t *testing.T) {
