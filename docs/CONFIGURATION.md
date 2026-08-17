@@ -95,14 +95,21 @@ rejects the setting at config load rather than accepting and ignoring it, so a
 typo or a wrong assumption surfaces as a startup error instead of silently
 doing nothing.
 
-| Setting | stdio | http | sse | managed-http |
-|---|---|---|---|---|
-| `shared_read_only_tools` | yes | yes | yes | **rejected** |
-| `shared_result_cache_ttl` | yes | yes | yes | **rejected** |
-| `shared_result_cache_size` | yes | yes | yes | **rejected** |
-| `max_in_flight_requests` | yes | yes | yes | **rejected** |
-| `idle_reap_timeout` | yes | yes | yes | **rejected** |
-| `disconnect_grace_period` | yes | yes | yes | yes |
+| Setting | stdio | http / sse | managed-http |
+|---|---|---|---|
+| `shared_read_only_tools` | yes | n/a | **rejected** |
+| `shared_result_cache_ttl` | yes | n/a | **rejected** |
+| `shared_result_cache_size` | yes | n/a | **rejected** |
+| `max_in_flight_requests` | yes | n/a | **rejected** |
+| `idle_reap_timeout` | yes | n/a | **rejected** |
+| `disconnect_grace_period` | yes | n/a | yes |
+
+`n/a` for `http` and `sse` means the setting has no effect there, and is
+accepted rather than rejected. Vision does not proxy externally owned HTTP and
+SSE servers — it only routes to them — so no server-level tuning reaches a
+consumer on those transports. That applies to `request_timeout`, `retry`,
+`circuit_breaker` and `health_check_interval` as well, not just the settings
+above, which is why these are still accepted rather than turned into errors.
 
 **Why the three shared-result settings are rejected on managed-http.** They
 coalesce and cache tool results *across* client sessions. Managed-http gives

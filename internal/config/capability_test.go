@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestCapabilityTableCoversAllGovernedSettings(t *testing.T) {
 	transports := []TransportType{
@@ -54,6 +57,32 @@ func TestManagedHTTPDispositions(t *testing.T) {
 		if reason != expected.reason {
 			t.Errorf("managed-http %q reason = %v, want %v", setting, reason, expected.reason)
 		}
+	}
+}
+
+// TestSlotGroupSynthesizedManagedHTTPIsStillRefused pins the rule that support
+// is keyed by a server's transport, not by how the server came to exist. Slot
+// group members are synthesized from group defaults, and nothing stops those
+// defaults declaring managed-http, so a synthesized member must be refused on
+// exactly the same terms as a hand-written one. Getting this wrong would leave
+// a synthesis-shaped hole in the fix.
+func TestSlotGroupSynthesizedManagedHTTPIsStillRefused(t *testing.T) {
+	synthesized := &ServerConfig{
+		Port:                6290,
+		Transport:           TransportManagedHTTP,
+		Command:             "npx",
+		URL:                 "http://127.0.0.1:16290/mcp",
+		MaxInFlightRequests: 4,
+		SlotGroup:           "browser-pool",
+		SlotIndex:           1,
+	}
+
+	err := synthesized.Validate("browser-pool-1")
+	if err == nil {
+		t.Fatal("synthesized managed-http slot member must be refused, got nil")
+	}
+	if !errors.Is(err, ErrSettingNotSupportedByTransport) {
+		t.Fatalf("error = %v, want ErrSettingNotSupportedByTransport", err)
 	}
 }
 

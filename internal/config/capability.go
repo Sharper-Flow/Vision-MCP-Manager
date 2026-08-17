@@ -61,6 +61,19 @@ var GovernedSettingKeys = []SettingKey{
 // transportCapabilities is the single source of truth for validation and
 // availability-profile defaulting.
 //
+// DispositionHonored means "this change does not refuse the setting here". It
+// is a policy statement, not a claim that the transport consumes the value.
+// That distinction matters for http and sse: setupProxyForServer returns early
+// for every non-stdio transport, because Vision does not proxy externally owned
+// HTTP servers at all, so none of the governed settings reach a consumer on
+// those transports either. They are recorded as honored only to preserve
+// existing behavior -- refusing them would be a second, wider breaking change
+// than the one this change was approved to make, and it would need to cover the
+// whole server-level tuning surface rather than these six settings, since
+// request_timeout, retry, circuit_breaker and health_check_interval are equally
+// unreachable there. That wider question is a follow-up, recorded alongside the
+// deferred settings below.
+//
 // The refusal check reads post-default values. An explicit user-written zero
 // is therefore indistinguishable from unset and is not refused. That is
 // accepted because zero means unlimited or use-default for every governed
