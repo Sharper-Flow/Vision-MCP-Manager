@@ -16,12 +16,14 @@ import (
 
 func TestEndToEndProbeLeavesAdmissionAtBaselineAcrossCycles(t *testing.T) {
 	var next atomic.Int32
+	var deletes atomic.Int32
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			w.Header().Set("Mcp-Session-Id", fmt.Sprintf("probe-%d", next.Add(1)))
 			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
 			return
 		}
+		deletes.Add(1)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
@@ -33,7 +35,8 @@ func TestEndToEndProbeLeavesAdmissionAtBaselineAcrossCycles(t *testing.T) {
 	probe := NewEndToEndProbe()
 	target := reachability.Target{Port: listener.Listener.Addr().(*net.TCPAddr).Port}
 	baseline := gateway.Snapshot(0)
-	for cycle := 0; cycle < 3; cycle++ {
+	const cycles = 10
+	for cycle := 0; cycle < cycles; cycle++ {
 		reachable, err := probe.Probe(context.Background(), target)
 		if err != nil || !reachable {
 			t.Fatalf("cycle %d probe = %t, %v; want reachable", cycle, reachable, err)
@@ -43,10 +46,14 @@ func TestEndToEndProbeLeavesAdmissionAtBaselineAcrossCycles(t *testing.T) {
 			t.Fatalf("cycle %d admission residue: snapshot=%#v baseline=%#v", cycle, snapshot, baseline)
 		}
 	}
+	if got := deletes.Load(); got != cycles {
+		t.Fatalf("cleanup DELETE count = %d, want %d", got, cycles)
+	}
 }
 
 func TestEndToEndProbeCleansUpAfterInitializeFailure(t *testing.T) {
 	var deletes atomic.Int32
+	var deleteSessionID atomic.Value
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Mcp-Session-Id", "failed-probe-session")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -56,6 +63,7 @@ func TestEndToEndProbeCleansUpAfterInitializeFailure(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			deletes.Add(1)
+			deleteSessionID.Store(r.Header.Get("Mcp-Session-Id"))
 		}
 		gateway.ServeHTTP(w, r)
 	}))
@@ -69,6 +77,9 @@ func TestEndToEndProbeCleansUpAfterInitializeFailure(t *testing.T) {
 	}
 	if deletes.Load() != 1 {
 		t.Fatalf("cleanup DELETE count = %d, want 1", deletes.Load())
+	}
+	if got := deleteSessionID.Load().(string); got != "failed-probe-session" {
+		t.Fatalf("cleanup session ID = %q, want failed-probe-session", got)
 	}
 	if snapshot := gateway.Snapshot(0); snapshot.CapacityUsed != baseline.CapacityUsed || len(snapshot.Rows) != len(baseline.Rows) {
 		t.Fatalf("error-path admission residue: snapshot=%#v baseline=%#v", snapshot, baseline)
@@ -163,13 +174,21 @@ func TestEndToEndProbeTreatsCapacityDenialAsReachable(t *testing.T) {
 	listener := httptest.NewServer(gateway)
 	defer listener.Close()
 
-	probe := NewEndToEndProbe()
+	transport := &probeRecordingTransport{base: http.DefaultTransport}
+	probe := &EndToEndProbe{Client: &http.Client{Transport: transport}}
+	baseline := gateway.Snapshot(0)
 	reachable, err := probe.Probe(context.Background(), reachability.Target{Port: listener.Listener.Addr().(*net.TCPAddr).Port})
 	if err != nil || !reachable {
 		t.Fatalf("capacity-denied probe = %t, %v; want reachable", reachable, err)
 	}
-	if got := gateway.Snapshot(0).CapacityUsed; got != 1 {
-		t.Fatalf("capacity after denial = %d, want 1", got)
+	if len(transport.statuses) != 1 || transport.statuses[0] != http.StatusTooManyRequests {
+		t.Fatalf("capacity-denied HTTP statuses = %v, want [%d]", transport.statuses, http.StatusTooManyRequests)
+	}
+	if got := transport.deletes.Load(); got != 0 {
+		t.Fatalf("capacity-denied cleanup DELETE count = %d, want 0", got)
+	}
+	if snapshot := gateway.Snapshot(0); snapshot.CapacityUsed != baseline.CapacityUsed || len(snapshot.Rows) != len(baseline.Rows) {
+		t.Fatalf("capacity-denied residue: snapshot=%#v baseline=%#v", snapshot, baseline)
 	}
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
 	deleteRequest.Header.Set("Mcp-Session-Id", active)

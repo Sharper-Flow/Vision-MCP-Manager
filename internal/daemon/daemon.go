@@ -598,6 +598,23 @@ func (d *Daemon) setupHTTPProxies() error {
 	return nil
 }
 
+func slotServerHealthy(srv *server.ManagedServer, value reachability.Reachability, grace time.Duration) bool {
+	if srv == nil || srv.State != server.StateRunning {
+		return false
+	}
+
+	switch value.State {
+	case reachability.StateReachable, reachability.StateProbing:
+		return true
+	case reachability.StateUnreachable:
+		return false
+	case reachability.StateUnprobed:
+		return srv.Uptime() <= grace
+	default:
+		return false
+	}
+}
+
 func (d *Daemon) setupSlotGroupProxies() error {
 	d.mu.RLock()
 	cfg := d.cfg
@@ -637,7 +654,11 @@ func (d *Daemon) setupSlotGroupProxies() error {
 						return true
 					}
 					srv := d.registry.Get(nameCopy)
-					return srv != nil && srv.State == server.StateRunning
+					if d.reachabilityStore == nil {
+						return srv != nil && srv.State == server.StateRunning
+					}
+					value, _ := d.reachabilityStore.Get(nameCopy)
+					return slotServerHealthy(srv, value, admin.DefaultReachabilityGrace)
 				},
 			})
 		}
