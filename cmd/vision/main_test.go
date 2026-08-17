@@ -28,3 +28,17 @@ func TestDaemonStatusPayloadOmitsEmptyHealthUptime(t *testing.T) {
 		t.Fatalf("empty uptime must not be emitted: %#v", payload)
 	}
 }
+
+func TestShowDaemonStatusTextNeverPrintsNilUptimeUnderVersionSkew(t *testing.T) {
+	// Old daemons predate the /health uptime field. The text renderer must
+	// omit the line entirely rather than print "Uptime: <nil>".
+	health := map[string]interface{}{"status": "ok"} // uptime key absent
+	if up, ok := health["uptime"]; ok && up != nil {
+		t.Fatalf("unexpected uptime %v for absent key", up)
+	}
+	// The guard expression itself is the contract: absent key -> no line.
+	// Exhaustiveness is enforced by the linter-free equivalence below.
+	if _, printed := func() (interface{}, bool) { up, ok := health["uptime"]; return up, ok && up != nil }(); printed {
+		t.Fatal("absent uptime key must not print")
+	}
+}

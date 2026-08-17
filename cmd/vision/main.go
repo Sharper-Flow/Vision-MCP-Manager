@@ -238,7 +238,12 @@ func showDaemonStatus() error {
 		fmt.Printf("Daemon is running (PID %d)\n", pid)
 		if health != nil {
 			fmt.Printf("  Status: %v\n", health["status"])
-			fmt.Printf("  Uptime: %v\n", health["uptime"])
+			// Presence-guarded so version skew (new CLI, old daemon whose
+			// /health lacks the field) renders no line at all rather than
+			// the fabricated "Uptime: <nil>".
+			if up, ok := health["uptime"]; ok && up != nil {
+				fmt.Printf("  Uptime: %v\n", up)
+			}
 		}
 	} else {
 		fmt.Println("Daemon is not running")
