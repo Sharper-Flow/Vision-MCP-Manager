@@ -22,6 +22,7 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/slots"
@@ -38,6 +39,9 @@ type Daemon struct {
 	portManager *mcp.PortManager
 	adminServer *admin.Server // Admin MCP server on port 6275
 	catalog     *catalog.Catalog
+
+	reachabilityStore *reachability.Store
+	probeManager      *reachability.Manager
 
 	suggestionProvider mcp.FallbackSuggestionProvider
 
@@ -179,7 +183,13 @@ func New(cfg Config) (*Daemon, error) {
 		ownershipStore:                   store,
 		reconciler:                       reconciler,
 		daemonID:                         daemonID,
+		reachabilityStore:                reachability.NewStore(),
 	}
+	d.probeManager = reachability.NewManager(d.reachabilityStore, reachability.NewVersionSelector(mcp.NewListenerProbe()), cfg.Logger)
+
+	// Give the port manager the store so a listener that fails to bind records
+	// listener-depth evidence instead of silently reporting running.
+	pm.SetReachabilityStore(d.reachabilityStore)
 	reg.SetStartupGuard(d.reconcileManagedBackend)
 
 	// Register event handler for dynamic server lifecycle management
@@ -314,6 +324,9 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 
 	// Cancel daemon context
 	d.cancel()
+	if d.probeManager != nil {
+		d.probeManager.Close()
+	}
 
 	// Wait for all goroutines
 	d.wg.Wait()
@@ -668,6 +681,7 @@ func (d *Daemon) setupSlotGroupProxies() error {
 			ServerName:            groupName,
 			Selector:              selector,
 			Logger:                d.logger,
+			ReachabilityStore:     d.reachabilityStore,
 			SuggestionProvider:    d.suggestionProvider,
 			HealthCheckInterval:   healthCheckInterval,
 			RequestTimeout:        requestTimeout,
@@ -710,8 +724,39 @@ func (d *Daemon) handleServerEvent(event server.ServerEvent) {
 				slog.String("error", err.Error()),
 			)
 		}
+		d.startProbeWorker(event.Server, reachability.DefaultProbeInterval)
 	case server.EventServerStopped:
+		d.removeProbeWorker(event.Name)
 		d.teardownProxyForServer(event.Name)
+	}
+}
+
+func (d *Daemon) startProbeWorker(srv *server.ManagedServer, interval time.Duration) {
+	if d.probeManager == nil || srv == nil || srv.Config == nil || srv.Config.Port <= 0 {
+		return
+	}
+	err := d.probeManager.Start(d.ctx, reachability.Target{
+		Name:            srv.Name,
+		Port:            srv.Config.Port,
+		ProtocolVersion: reachability.ProtocolVersion2025_11_25,
+	}, interval)
+	if err != nil {
+		d.logger.Warn("failed to start reachability probe worker",
+			slog.String("server", srv.Name),
+			slog.String("error", err.Error()),
+		)
+	}
+}
+
+func (d *Daemon) removeProbeWorker(name string) {
+	if d.probeManager == nil {
+		return
+	}
+	if err := d.probeManager.Remove(name); err != nil {
+		d.logger.Warn("failed to stop reachability probe worker",
+			slog.String("server", name),
+			slog.String("error", err.Error()),
+		)
 	}
 }
 
@@ -765,6 +810,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	proxyCfg := mcp.ProxyConfig{
 		ServerName:            srv.Name,
 		Logger:                d.logger,
+		ReachabilityStore:     d.reachabilityStore,
 		SuggestionProvider:    d.suggestionProvider,
 		HealthCheckInterval:   srv.Config.HealthCheckInterval.Duration(),
 		RequestTimeout:        srv.Config.RequestTimeout.Duration(),
@@ -1120,6 +1166,12 @@ func (d *Daemon) deleteServerMetrics(name string) {
 // Registry returns the server registry.
 func (d *Daemon) Registry() *server.Registry {
 	return d.registry
+}
+
+// Reachability returns the probe-backed reachability store used by status
+// surfaces. The store is independent from managed-server lifecycle state.
+func (d *Daemon) Reachability() *reachability.Store {
+	return d.reachabilityStore
 }
 
 // Config returns the current configuration.

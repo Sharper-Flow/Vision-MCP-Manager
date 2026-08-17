@@ -144,6 +144,11 @@ type ProxyConfig struct {
 	// ServerName is the name of the MCP server being proxied.
 	ServerName string
 
+	// ReachabilityStore receives session-depth probe evidence from the existing
+	// downstream health probes. Optional; nil disables reporting and leaves
+	// probe behavior unchanged.
+	ReachabilityStore *reachability.Store
+
 	// SessionManager manages downstream subprocess lifecycle.
 	SessionManager *session.Manager
 
@@ -532,6 +537,14 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	if tracker != nil {
 		resultHandler = tracker.Wrap(resultHandler)
 	}
+
+	// Inject the reachability store at construction time. Callers that build a
+	// proxy with a store configured get downstream probe reporting without
+	// needing a type assertion on the returned http.Handler.
+	if cfg.ReachabilityStore != nil {
+		setReachabilityStore(cfg.ReachabilityStore)
+	}
+
 	return &reachabilityAwareHandler{handler: resultHandler, setStore: setReachabilityStore}
 }
 
