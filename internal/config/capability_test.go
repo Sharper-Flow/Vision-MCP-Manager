@@ -40,6 +40,10 @@ func TestManagedHTTPDispositions(t *testing.T) {
 		// gateway via ResolvedDisconnectGracePeriod(). Refusing it would break
 		// working behavior.
 		SettingDisconnectGracePeriod: {DispositionHonored, ReasonNone},
+		SettingRetry:                 {DispositionRefused, ReasonNotImplemented},
+		SettingCircuitBreaker:        {DispositionRefused, ReasonNotImplemented},
+		SettingHealthCheckInterval:   {DispositionRefused, ReasonNotImplemented},
+		SettingSessionTTL:            {DispositionRefused, ReasonNotImplemented},
 	}
 
 	for _, setting := range GovernedSettingKeys {

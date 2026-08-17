@@ -14,6 +14,10 @@ const (
 	// SettingDisconnectGracePeriod is honored by managed-http: daemon.go feeds
 	// it to managed_gateway.go through ResolvedDisconnectGracePeriod().
 	SettingDisconnectGracePeriod SettingKey = "disconnect_grace_period"
+	SettingRetry                 SettingKey = "retry"
+	SettingCircuitBreaker        SettingKey = "circuit_breaker"
+	SettingHealthCheckInterval   SettingKey = "health_check_interval"
+	SettingSessionTTL            SettingKey = "session_ttl"
 )
 
 // Disposition describes whether this capability policy accepts or refuses a
@@ -58,6 +62,10 @@ var GovernedSettingKeys = []SettingKey{
 	SettingMaxInFlightRequests,
 	SettingIdleReapTimeout,
 	SettingDisconnectGracePeriod,
+	SettingRetry,
+	SettingCircuitBreaker,
+	SettingHealthCheckInterval,
+	SettingSessionTTL,
 }
 
 // transportCapabilities is the single source of truth for validation and
@@ -90,6 +98,10 @@ var transportCapabilities = map[TransportType]map[SettingKey]settingCapability{
 		SettingMaxInFlightRequests:   {disposition: DispositionHonored, reason: ReasonNone},
 		SettingIdleReapTimeout:       {disposition: DispositionHonored, reason: ReasonNone},
 		SettingDisconnectGracePeriod: {disposition: DispositionHonored, reason: ReasonNone},
+		SettingRetry:                 {disposition: DispositionHonored, reason: ReasonNone},
+		SettingCircuitBreaker:        {disposition: DispositionHonored, reason: ReasonNone},
+		SettingHealthCheckInterval:   {disposition: DispositionHonored, reason: ReasonNone},
+		SettingSessionTTL:            {disposition: DispositionHonored, reason: ReasonNone},
 	},
 	TransportHTTP: {
 		SettingSharedReadOnlyTools:   {disposition: DispositionHonored, reason: ReasonNone},
@@ -98,6 +110,10 @@ var transportCapabilities = map[TransportType]map[SettingKey]settingCapability{
 		SettingMaxInFlightRequests:   {disposition: DispositionHonored, reason: ReasonNone},
 		SettingIdleReapTimeout:       {disposition: DispositionHonored, reason: ReasonNone},
 		SettingDisconnectGracePeriod: {disposition: DispositionHonored, reason: ReasonNone},
+		SettingRetry:                 {disposition: DispositionHonored, reason: ReasonNone},
+		SettingCircuitBreaker:        {disposition: DispositionHonored, reason: ReasonNone},
+		SettingHealthCheckInterval:   {disposition: DispositionHonored, reason: ReasonNone},
+		SettingSessionTTL:            {disposition: DispositionHonored, reason: ReasonNone},
 	},
 	TransportSSE: {
 		SettingSharedReadOnlyTools:   {disposition: DispositionHonored, reason: ReasonNone},
@@ -106,6 +122,10 @@ var transportCapabilities = map[TransportType]map[SettingKey]settingCapability{
 		SettingMaxInFlightRequests:   {disposition: DispositionHonored, reason: ReasonNone},
 		SettingIdleReapTimeout:       {disposition: DispositionHonored, reason: ReasonNone},
 		SettingDisconnectGracePeriod: {disposition: DispositionHonored, reason: ReasonNone},
+		SettingRetry:                 {disposition: DispositionHonored, reason: ReasonNone},
+		SettingCircuitBreaker:        {disposition: DispositionHonored, reason: ReasonNone},
+		SettingHealthCheckInterval:   {disposition: DispositionHonored, reason: ReasonNone},
+		SettingSessionTTL:            {disposition: DispositionHonored, reason: ReasonNone},
 	},
 	TransportManagedHTTP: {
 		SettingSharedReadOnlyTools:   {disposition: DispositionRefused, reason: ReasonSessionIsolation},
@@ -114,6 +134,10 @@ var transportCapabilities = map[TransportType]map[SettingKey]settingCapability{
 		SettingMaxInFlightRequests:   {disposition: DispositionRefused, reason: ReasonNotImplemented},
 		SettingIdleReapTimeout:       {disposition: DispositionRefused, reason: ReasonSupersededKnob},
 		SettingDisconnectGracePeriod: {disposition: DispositionHonored, reason: ReasonNone},
+		SettingRetry:                 {disposition: DispositionRefused, reason: ReasonNotImplemented},
+		SettingCircuitBreaker:        {disposition: DispositionRefused, reason: ReasonNotImplemented},
+		SettingHealthCheckInterval:   {disposition: DispositionRefused, reason: ReasonNotImplemented},
+		SettingSessionTTL:            {disposition: DispositionRefused, reason: ReasonNotImplemented},
 	},
 }
 
@@ -154,26 +178,6 @@ var ungovernedSettings = map[SettingKey]string{
 	"source":               "informational only, preserved on round-trip and never interpreted",
 	"description":          "informational only, preserved on round-trip and never interpreted",
 	"request_timeout":      "applied by the shared HTTP client layer beneath every transport",
-
-	// KNOWN SAME-CLASS DEFECTS -- deferred, not benign.
-	//
-	// Each of these is accepted on managed-http and never read there:
-	// setupManagedHTTPProxy and ManagedHTTPGatewayConfig reference none of
-	// them, and managed-http handles failure by recycling on ambiguity rather
-	// than by retrying or circuit-breaking. They are the same defect this
-	// change fixes for five other settings.
-	//
-	// They are ungoverned only because the approved agreement for
-	// fixSilentlyIgnoredManagedHttp scoped it to those five. Refusing or
-	// implementing these is a follow-up recorded in that change's design D6.
-	// Extending the fix is a capability-table row plus a guard in
-	// applyAvailabilityProfileDefaults -- note that the retry defaults
-	// dereference s.Retry immediately after allocating it, so a guard must wrap
-	// the whole retry block rather than each statement.
-	"health_check_interval": "DEFERRED SAME-CLASS DEFECT: unread on managed-http and injected there by the networked profile; refusing it is out of scope for the change that added this table (see design D6)",
-	"retry":                 "DEFERRED SAME-CLASS DEFECT: unread on managed-http and injected there by the networked profile; refusing it is out of scope for the change that added this table (see design D6)",
-	"circuit_breaker":       "DEFERRED SAME-CLASS DEFECT: unread on managed-http and injected there by the networked profile; refusing it is out of scope for the change that added this table (see design D6)",
-	"session_ttl":           "DEFERRED SAME-CLASS DEFECT: unread on managed-http, though unlike the others it is not profile-injected; refusing it is out of scope for the change that added this table (see design D6)",
 }
 
 func lookupCapability(transport TransportType, setting SettingKey) (Disposition, RefusalReason, bool) {

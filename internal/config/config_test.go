@@ -550,13 +550,29 @@ func TestSave_RoundTripsNetworkedManagedHTTPWithoutRefusedProfileDefaults(t *tes
 	if err != nil {
 		t.Fatalf("ReadFile() error: %v", err)
 	}
-	for _, key := range []string{"shared_result_cache_ttl:", "shared_result_cache_size:", "max_in_flight_requests:"} {
+	for _, key := range []string{
+		"            shared_result_cache_ttl:",
+		"            shared_result_cache_size:",
+		"            max_in_flight_requests:",
+		"            retry:",
+		"            circuit_breaker:",
+		"            health_check_interval:",
+		"            session_ttl:",
+	} {
 		if strings.Contains(string(data), key) {
 			t.Errorf("Save() materialized refused managed-http profile default %q:\n%s", key, data)
 		}
 	}
-	if _, err := Load(path); err != nil {
+	loaded, err := Load(path)
+	if err != nil {
 		t.Fatalf("Load() after Save() error: %v", err)
+	}
+	managed := loaded.GetServer("managed")
+	if managed == nil {
+		t.Fatal("managed server missing after reload")
+	}
+	if managed.Retry != nil || managed.CircuitBreaker != nil || managed.HealthCheckInterval != 0 || managed.SessionTTL != 0 {
+		t.Fatalf("reloaded managed-http server retained refused settings: %#v", managed)
 	}
 }
 

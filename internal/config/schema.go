@@ -417,9 +417,22 @@ func (s *ServerConfig) hasNonZeroSetting(setting SettingKey) bool {
 		return s.IdleReapTimeout != 0
 	case SettingDisconnectGracePeriod:
 		return s.DisconnectGracePeriod != 0
+	case SettingRetry:
+		return s.Retry != nil
+	case SettingCircuitBreaker:
+		return s.CircuitBreaker != nil
+	case SettingHealthCheckInterval:
+		return s.HealthCheckInterval != 0
+	case SettingSessionTTL:
+		return s.SessionTTL != 0
 	default:
 		return false
 	}
+}
+
+func (s *ServerConfig) transportHonors(setting SettingKey) bool {
+	disposition, _, known := lookupCapability(s.InferTransport(), setting)
+	return !known || disposition != DispositionRefused
 }
 
 func refusalReasonText(reason RefusalReason) string {
@@ -647,35 +660,39 @@ func (s *ServerConfig) ApplyDefaults() {
 	if s.SessionTimeout == 0 {
 		s.SessionTimeout = Duration(5 * time.Minute)
 	}
-	if s.HealthCheckInterval == 0 {
+	if s.transportHonors(SettingHealthCheckInterval) && s.HealthCheckInterval == 0 {
 		s.HealthCheckInterval = Duration(30 * time.Second)
 	}
 	if s.RequestTimeout == 0 {
 		s.RequestTimeout = Duration(30 * time.Second)
 	}
-	if s.Retry == nil {
-		s.Retry = &RetryConfig{}
+	if s.transportHonors(SettingRetry) {
+		if s.Retry == nil {
+			s.Retry = &RetryConfig{}
+		}
+		if s.Retry.MaxAttempts == 0 {
+			s.Retry.MaxAttempts = 1
+		}
+		if s.Retry.InitialDelay == 0 {
+			s.Retry.InitialDelay = Duration(100 * time.Millisecond)
+		}
+		if s.Retry.MaxDelay == 0 {
+			s.Retry.MaxDelay = Duration(5 * time.Second)
+		}
+		if len(s.Retry.RetryableErrors) == 0 {
+			s.Retry.RetryableErrors = []string{"timeout", "429", "502", "503", "ECONNRESET", "ECONNREFUSED", "ENETUNREACH"}
+		}
 	}
-	if s.Retry.MaxAttempts == 0 {
-		s.Retry.MaxAttempts = 1
-	}
-	if s.Retry.InitialDelay == 0 {
-		s.Retry.InitialDelay = Duration(100 * time.Millisecond)
-	}
-	if s.Retry.MaxDelay == 0 {
-		s.Retry.MaxDelay = Duration(5 * time.Second)
-	}
-	if len(s.Retry.RetryableErrors) == 0 {
-		s.Retry.RetryableErrors = []string{"timeout", "429", "502", "503", "ECONNRESET", "ECONNREFUSED", "ENETUNREACH"}
-	}
-	if s.CircuitBreaker == nil {
-		s.CircuitBreaker = &CircuitBreakerConfig{}
-	}
-	if s.CircuitBreaker.FailureThreshold == 0 {
-		s.CircuitBreaker.FailureThreshold = 5
-	}
-	if s.CircuitBreaker.RecoveryTimeout == 0 {
-		s.CircuitBreaker.RecoveryTimeout = Duration(60 * time.Second)
+	if s.transportHonors(SettingCircuitBreaker) {
+		if s.CircuitBreaker == nil {
+			s.CircuitBreaker = &CircuitBreakerConfig{}
+		}
+		if s.CircuitBreaker.FailureThreshold == 0 {
+			s.CircuitBreaker.FailureThreshold = 5
+		}
+		if s.CircuitBreaker.RecoveryTimeout == 0 {
+			s.CircuitBreaker.RecoveryTimeout = Duration(60 * time.Second)
+		}
 	}
 }
 
@@ -691,68 +708,54 @@ func (s *ServerConfig) MaxRestartCount() int {
 func (s *ServerConfig) applyAvailabilityProfileDefaults() {
 	switch s.AvailabilityProfile {
 	case AvailabilityProfileNetworked:
-		transport := s.InferTransport()
-		profileDefaultAllowed := func(setting SettingKey) bool {
-			disposition, _, known := lookupCapability(transport, setting)
-			return !known || disposition != DispositionRefused
-		}
-
 		if s.SessionTimeout == 0 {
 			s.SessionTimeout = Duration(30 * time.Minute)
 		}
-		if s.HealthCheckInterval == 0 {
+		if s.transportHonors(SettingHealthCheckInterval) && s.HealthCheckInterval == 0 {
 			s.HealthCheckInterval = Duration(60 * time.Second)
 		}
 		if s.RequestTimeout == 0 {
 			s.RequestTimeout = Duration(60 * time.Second)
 		}
-		if s.Retry == nil {
-			s.Retry = &RetryConfig{}
+		if s.transportHonors(SettingRetry) {
+			if s.Retry == nil {
+				s.Retry = &RetryConfig{}
+			}
+			if s.Retry.MaxAttempts == 0 {
+				s.Retry.MaxAttempts = 2
+			}
+			if s.Retry.InitialDelay == 0 {
+				s.Retry.InitialDelay = Duration(500 * time.Millisecond)
+			}
+			if s.Retry.MaxDelay == 0 {
+				s.Retry.MaxDelay = Duration(5 * time.Second)
+			}
+			if len(s.Retry.RetryableErrors) == 0 {
+				s.Retry.RetryableErrors = []string{"timeout", "429", "502", "503", "504", "ECONNRESET", "ECONNREFUSED", "ENETUNREACH"}
+			}
 		}
-		if s.Retry.MaxAttempts == 0 {
-			s.Retry.MaxAttempts = 2
-		}
-		if s.Retry.InitialDelay == 0 {
-			s.Retry.InitialDelay = Duration(500 * time.Millisecond)
-		}
-		if s.Retry.MaxDelay == 0 {
-			s.Retry.MaxDelay = Duration(5 * time.Second)
-		}
-		if len(s.Retry.RetryableErrors) == 0 {
-			s.Retry.RetryableErrors = []string{"timeout", "429", "502", "503", "504", "ECONNRESET", "ECONNREFUSED", "ENETUNREACH"}
-		}
-		if s.CircuitBreaker == nil {
-			s.CircuitBreaker = &CircuitBreakerConfig{}
-		}
-		if s.CircuitBreaker.FailureThreshold == 0 {
-			s.CircuitBreaker.FailureThreshold = 3
-		}
-		if s.CircuitBreaker.RecoveryTimeout == 0 {
-			s.CircuitBreaker.RecoveryTimeout = Duration(45 * time.Second)
+		if s.transportHonors(SettingCircuitBreaker) {
+			if s.CircuitBreaker == nil {
+				s.CircuitBreaker = &CircuitBreakerConfig{}
+			}
+			if s.CircuitBreaker.FailureThreshold == 0 {
+				s.CircuitBreaker.FailureThreshold = 3
+			}
+			if s.CircuitBreaker.RecoveryTimeout == 0 {
+				s.CircuitBreaker.RecoveryTimeout = Duration(45 * time.Second)
+			}
 		}
 
-		// Skipping refused settings here establishes the invariant that
-		// ServerConfig.Validate relies on: on a transport that refuses a
-		// governed setting, a non-zero value at validation time can only have
-		// come from the user, never from this profile. That is what allows the
-		// refusal check to read plain post-default values instead of tracking
-		// which keys the user actually wrote.
-		//
-		// retry, circuit_breaker, and health_check_interval are also unread on
-		// managed-http and are deliberately left unguarded: refusing them is
-		// out of this change's approved scope. Extending refusal to them is a
-		// capability-table edit plus a guard here -- and note that the retry
-		// defaults below dereference s.Retry immediately after allocating it,
-		// so any future guard must wrap the whole retry block rather than each
-		// statement, or the nil allocation can be skipped while the following
-		// dereference still runs.
-		if profileDefaultAllowed(SettingSharedResultCacheTTL) && s.SharedResultCacheTTL == 0 {
+		// These guards realize the capability-table invariant that refused
+		// settings can only be non-zero at validation time when the user wrote
+		// them, never when this profile supplied a default.
+		if s.transportHonors(SettingSharedResultCacheTTL) && s.SharedResultCacheTTL == 0 {
 			s.SharedResultCacheTTL = Duration(10 * time.Second)
 		}
-		if profileDefaultAllowed(SettingSharedResultCacheSize) && s.SharedResultCacheSize == 0 {
+		if s.transportHonors(SettingSharedResultCacheSize) && s.SharedResultCacheSize == 0 {
 			s.SharedResultCacheSize = 128
 		}
-		if profileDefaultAllowed(SettingMaxInFlightRequests) && s.MaxInFlightRequests == 0 {
+		if s.transportHonors(SettingMaxInFlightRequests) && s.MaxInFlightRequests == 0 {
 			s.MaxInFlightRequests = 4
 		}
 	}
