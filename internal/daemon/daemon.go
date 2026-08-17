@@ -812,12 +812,22 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		return nil
 	}
 
-	// Check if proxy already exists
-	if d.portManager.Get(srv.Name) != nil {
-		d.logger.Debug("proxy already exists for server",
-			slog.String("server", srv.Name),
-		)
-		return nil
+	// A listener is expected here only when an earlier setup completed. The
+	// setup marker is written after AddStreamable succeeds, so a listener with
+	// no marker is stale or was installed by an unexpected owner.
+	if listener := d.portManager.Get(srv.Name); listener != nil {
+		d.serverMetricsMu.RLock()
+		configured := d.serverMetrics[srv.Name] != nil
+		d.serverMetricsMu.RUnlock()
+		if configured {
+			d.logger.Debug("proxy already exists for server",
+				slog.String("server", srv.Name),
+			)
+			return nil
+		}
+		err := fmt.Errorf("unexpected pre-existing proxy listener: server=%s listener_port=%d configured_port=%d", srv.Name, listener.Port, srv.Config.Port)
+		d.recordListenerSetupFailure(srv.Name, err)
+		return err
 	}
 
 	// Check if we're already setting up this server (deduplication)
@@ -856,9 +866,6 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	// Per-server metrics for session observability.
 	srvMetrics := metrics.NewServerMetrics()
 	proxyCfg.Metrics = srvMetrics
-	d.serverMetricsMu.Lock()
-	d.serverMetrics[srv.Name] = srvMetrics
-	d.serverMetricsMu.Unlock()
 
 	var closer mcp.SessionCloser
 
@@ -946,8 +953,13 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 
 	// Add to port manager with session manager for cleanup and security middleware.
 	if err := d.portManager.AddStreamable(srv.Name, srv.Config.Port, handler, closer, secCfg); err != nil {
-		return fmt.Errorf("failed to add streamable proxy: %w", err)
+		setupErr := fmt.Errorf("failed to add streamable proxy: %w", err)
+		d.recordListenerSetupFailure(srv.Name, setupErr)
+		return setupErr
 	}
+	d.serverMetricsMu.Lock()
+	d.serverMetrics[srv.Name] = srvMetrics
+	d.serverMetricsMu.Unlock()
 
 	d.logger.Info("streamable proxy started",
 		slog.String("server", srv.Name),
@@ -967,8 +979,19 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 }
 
 func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
-	if d.portManager.Get(srv.Name) != nil {
-		return nil
+	if listener := d.portManager.Get(srv.Name); listener != nil {
+		d.managedGatewaysMu.RLock()
+		configured := d.managedGateways[srv.Name] != nil
+		d.managedGatewaysMu.RUnlock()
+		if configured {
+			d.logger.Debug("managed HTTP proxy already exists for server",
+				slog.String("server", srv.Name),
+			)
+			return nil
+		}
+		err := fmt.Errorf("unexpected pre-existing managed HTTP listener: server=%s listener_port=%d configured_port=%d", srv.Name, listener.Port, srv.Config.Port)
+		d.recordListenerSetupFailure(srv.Name, err)
+		return err
 	}
 	if _, loaded := d.proxySetupInProgress.LoadOrStore(srv.Name, true); loaded {
 		return nil
@@ -977,14 +1000,18 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 
 	target, err := url.Parse(srv.Config.URL)
 	if err != nil {
-		return fmt.Errorf("parse managed HTTP target: %w", err)
+		setupErr := fmt.Errorf("parse managed HTTP target: %w", err)
+		d.recordListenerSetupFailure(srv.Name, setupErr)
+		return setupErr
 	}
 	coordinator := supervisor.NewBackendCoordinator()
 	coordinator.MarkProbing()
 	srvMetrics := metrics.NewServerMetrics()
 	process := srv.Process
 	if process == nil {
-		return errors.New("managed HTTP server has no supervised process")
+		setupErr := errors.New("managed HTTP server has no supervised process")
+		d.recordListenerSetupFailure(srv.Name, setupErr)
+		return setupErr
 	}
 	monitorCtx, monitorCancel := context.WithCancel(d.ctx)
 	success := false
@@ -1008,7 +1035,9 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 		Logger:  d.logger.With(slog.String("server", srv.Name)),
 	})
 	if err != nil {
-		return fmt.Errorf("create managed HTTP gateway: %w", err)
+		setupErr := fmt.Errorf("create managed HTTP gateway: %w", err)
+		d.recordListenerSetupFailure(srv.Name, setupErr)
+		return setupErr
 	}
 
 	d.mu.RLock()
@@ -1019,7 +1048,9 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 	}
 	d.mu.RUnlock()
 	if err := d.portManager.AddStreamable(srv.Name, srv.Config.Port, gateway, gateway, secCfg); err != nil {
-		return fmt.Errorf("add managed HTTP listener: %w", err)
+		setupErr := fmt.Errorf("add managed HTTP listener: %w", err)
+		d.recordListenerSetupFailure(srv.Name, setupErr)
+		return setupErr
 	}
 	reapInterval := managedHTTPReapInterval(
 		srv.Config.SessionTimeout.Duration(),
@@ -1039,6 +1070,22 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 	d.wg.Add(1)
 	go d.monitorManagedHTTPBackend(monitorCtx, srv.Name, process, target, gateway, coordinator)
 	return nil
+}
+
+// recordListenerSetupFailure turns a hard proxy setup failure into immediate
+// unreachable evidence. RecordProbe intentionally tolerates transient probe
+// failures, but setup cannot have a transient listener state: without a
+// successfully registered listener the running server is not reachable.
+func (d *Daemon) recordListenerSetupFailure(name string, err error) {
+	if d.reachabilityStore == nil {
+		return
+	}
+	d.reachabilityStore.RecordDefinitiveFailure(
+		name,
+		reachability.DepthListener,
+		time.Now(),
+		err.Error(),
+	)
 }
 
 func managedHTTPReapInterval(sessionTimeout, disconnectGracePeriod time.Duration) time.Duration {

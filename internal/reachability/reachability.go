@@ -149,6 +149,47 @@ func (s *Store) RecordProbe(serverName string, result ProbeResult) Reachability 
 	return cloneReachability(record.reachability)
 }
 
+// RecordDefinitiveFailure records a failure that is known to be terminal rather
+// than transient, marking the depth unreachable immediately without waiting for
+// FailureThreshold consecutive failures.
+//
+// FailureThreshold exists to stop a flaky probe from reporting a healthy server
+// as broken. That reasoning does not apply to a failure whose cause is already
+// proven, such as a proxy listener that failed to register: there is no listener
+// to become reachable again, so requiring two further confirmations would report
+// a known-broken server as healthy for the duration.
+//
+// Callers must use this only when the failure is structurally terminal. A probe
+// that merely failed to connect is transient and belongs in RecordProbe.
+func (s *Store) RecordDefinitiveFailure(serverName string, depth Depth, attemptedAt time.Time, cause string) Reachability {
+	validateDepth(depth)
+	if attemptedAt.IsZero() {
+		attemptedAt = time.Now()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.ensureRecord(serverName)
+	if record.probing[depth] > 0 {
+		record.probing[depth]--
+	}
+
+	evidence := record.reachability.Evidence[depth]
+	evidence.Depth = depth
+	evidence.LastProbeAttempt = attemptedAt
+	evidence.LastProbeOutcome = OutcomeFailure
+	evidence.LastProbeError = safeError(cause)
+	// Report the single failure that actually occurred. Inflating this counter
+	// to trip the threshold would misreport how many attempts were made in the
+	// same admin payload operators rely on to diagnose the outage.
+	evidence.ConsecutiveFailures++
+	record.stateByDepth[depth] = StateUnreachable
+
+	record.reachability.Evidence[depth] = evidence
+	record.reachability.State = stateFor(record)
+	return cloneReachability(record.reachability)
+}
+
 // Get returns the current reachability for serverName. An unseen server
 // returns an unprobed value and false.
 func (s *Store) Get(serverName string) (Reachability, bool) {

@@ -1,13 +1,18 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
 // --- handleV1Slots (GET /v1/slots) tests ---
@@ -57,6 +62,145 @@ func TestHandleV1Slots_ReturnsAllGroupsSummary(t *testing.T) {
 	}
 	if len(g.Slots) != 2 {
 		t.Fatalf("slots count = %d, want 2", len(g.Slots))
+	}
+}
+
+func TestSlotSurfacesReportEffectiveHealthAndAgree(t *testing.T) {
+	reg := newTestRegistry()
+	dcfg := &config.Config{
+		Servers: map[string]*config.ServerConfig{
+			"healthy": {Port: 7001, Command: "echo", SlotGroup: "playwright", MaxSessions: 5},
+			"broken":  {Port: 7002, Command: "echo", SlotGroup: "playwright", MaxSessions: 5},
+			"warming": {Port: 7003, Command: "echo", SlotGroup: "playwright", MaxSessions: 5},
+		},
+		SlotGroups: map[string]*config.SlotGroupConfig{
+			"playwright": {Template: "pw-slot", BasePort: 7001, Count: 3, GroupPort: 7000},
+		},
+	}
+	for name, cfg := range dcfg.Servers {
+		if err := reg.Add(name, cfg); err != nil {
+			t.Fatalf("add %s: %v", name, err)
+		}
+		managed := reg.Get(name)
+		managed.State = server.StateRunning
+		managed.StartedAt = time.Now()
+	}
+
+	store := reachability.NewStore()
+	store.RecordProbe("healthy", reachability.ProbeResult{Depth: reachability.DepthListener, Success: true})
+	for range reachability.FailureThreshold {
+		store.RecordProbe("broken", reachability.ProbeResult{
+			Depth: reachability.DepthListener, Error: "connection refused",
+		})
+	}
+	s := &Server{
+		registry:          reg,
+		daemonConfig:      dcfg,
+		running:           true,
+		reachabilityStore: store,
+		reachabilityGrace: DefaultReachabilityGrace,
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/slots", nil)
+	recorder := httptest.NewRecorder()
+	s.handleV1Slots(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET /v1/slots status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	var httpResponse SlotStatusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &httpResponse); err != nil {
+		t.Fatalf("unmarshal HTTP response: %v", err)
+	}
+	groups := httpResponse.Groups
+	if len(groups) != 1 || len(groups[0].Slots) != 3 {
+		t.Fatalf("unexpected HTTP slot shape: %#v", groups)
+	}
+	httpSlots := make(map[string]SlotDetail, len(groups[0].Slots))
+	for _, slot := range groups[0].Slots {
+		httpSlots[slot.Name] = slot
+	}
+
+	result, err := s.toolSlotStatus(context.TODO(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("toolSlotStatus error: %v", err)
+	}
+	var toolResponse SlotStatusResponse
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &toolResponse); err != nil {
+		t.Fatalf("unmarshal tool response: %v", err)
+	}
+	toolSlots := make(map[string]SlotDetail, len(toolResponse.Groups[0].Slots))
+	for _, slot := range toolResponse.Groups[0].Slots {
+		toolSlots[slot.Name] = slot
+	}
+
+	for name, wantStatus := range map[string]string{
+		"healthy": "running",
+		"broken":  "error",
+		"warming": "starting",
+	} {
+		httpSlot, ok := httpSlots[name]
+		if !ok {
+			t.Fatalf("HTTP surface omitted %s", name)
+		}
+		toolSlot, ok := toolSlots[name]
+		if !ok {
+			t.Fatalf("MCP surface omitted %s", name)
+		}
+		if httpSlot.EffectiveStatus != wantStatus || toolSlot.EffectiveStatus != wantStatus {
+			t.Errorf("%s effective_status = HTTP %q / MCP %q, want %q", name, httpSlot.EffectiveStatus, toolSlot.EffectiveStatus, wantStatus)
+		}
+		if !reflect.DeepEqual(httpSlot, toolSlot) {
+			t.Errorf("%s health differs between surfaces: HTTP=%#v MCP=%#v", name, httpSlot, toolSlot)
+		}
+	}
+
+	if httpSlots["broken"].EffectiveReason == nil || *httpSlots["broken"].EffectiveReason == "" {
+		t.Fatal("broken slot has no effective_reason")
+	}
+	if got := httpSlots["warming"].EffectiveReason; got == nil || *got == "" {
+		t.Fatal("warming slot has no explanatory effective_reason")
+	}
+	if httpSlots["warming"].EffectiveStatus == "error" {
+		t.Fatal("unprobed slot within grace was reported as failed")
+	}
+}
+
+func TestSlotHealthAdditiveFieldsPreserveExistingPayload(t *testing.T) {
+	reg := newTestRegistry()
+	dcfg := &config.Config{
+		Servers: map[string]*config.ServerConfig{
+			"pw-slot-1": {Port: 7001, Command: "echo", SlotGroup: "playwright", MaxSessions: 5},
+		},
+		SlotGroups: map[string]*config.SlotGroupConfig{
+			"playwright": {Template: "pw-slot", BasePort: 7001, Count: 1, GroupPort: 7000},
+		},
+	}
+	s := &Server{registry: reg, daemonConfig: dcfg, running: true}
+
+	result, err := s.toolSlotStatus(context.TODO(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("toolSlotStatus error: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	groups, ok := payload["groups"].([]any)
+	if !ok || len(groups) != 1 {
+		t.Fatalf("groups payload = %#v", payload["groups"])
+	}
+	group := groups[0].(map[string]any)
+	slots := group["slots"].([]any)
+	slot := slots[0].(map[string]any)
+	for _, field := range []string{"name", "port", "active_sessions", "max_sessions"} {
+		if _, ok := slot[field]; !ok {
+			t.Errorf("existing field %q missing from slot payload", field)
+		}
+	}
+	for _, field := range []string{"effective_status", "effective_reason", "reachability", "probe_depth", "last_probe_at", "last_probe_outcome", "last_probe_error", "consecutive_probe_failures"} {
+		if _, ok := slot[field]; !ok {
+			t.Errorf("health field %q missing from slot payload", field)
+		}
 	}
 }
 

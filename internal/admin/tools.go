@@ -506,52 +506,18 @@ type SlotGroupStatus struct {
 
 // SlotDetail describes one slot within a group.
 type SlotDetail struct {
-	Name           string `json:"name"`
-	Port           int    `json:"port"`
-	ActiveSessions int    `json:"active_sessions"`
-	MaxSessions    int    `json:"max_sessions"`
+	Name            string  `json:"name"`
+	Port            int     `json:"port"`
+	ActiveSessions  int     `json:"active_sessions"`
+	MaxSessions     int     `json:"max_sessions"`
+	EffectiveStatus string  `json:"effective_status"`
+	EffectiveReason *string `json:"effective_reason,omitempty"`
+	ReachabilityDetails
 }
 
 // toolSlotStatus implements vision_slot_status.
 func (s *Server) toolSlotStatus(_ context.Context, _ json.RawMessage) (*ToolCallResult, error) {
-	if s.daemonConfig == nil || len(s.daemonConfig.SlotGroups) == 0 {
-		return jsonToolResult(SlotStatusResponse{Groups: []SlotGroupStatus{}})
-	}
-
-	groups := make([]SlotGroupStatus, 0, len(s.daemonConfig.SlotGroups))
-	for groupName := range s.daemonConfig.SlotGroups {
-		g := SlotGroupStatus{GroupName: groupName}
-
-		for srvName, srvCfg := range s.daemonConfig.Servers {
-			if srvCfg == nil || srvCfg.SlotGroup != groupName {
-				continue
-			}
-			slot := SlotDetail{
-				Name:        srvName,
-				Port:        srvCfg.Port,
-				MaxSessions: srvCfg.MaxSessions,
-			}
-			if s.slotSessionAccessor != nil {
-				slot.ActiveSessions = s.slotSessionAccessor.ActiveSessionCount(srvName)
-			}
-			g.Slots = append(g.Slots, slot)
-		}
-
-		// Sort slots by name for deterministic output.
-		slices.SortFunc(g.Slots, func(a, b SlotDetail) int {
-			return cmp.Compare(a.Name, b.Name)
-		})
-
-		g.SlotCount = len(g.Slots)
-		groups = append(groups, g)
-	}
-
-	// Sort groups by name for deterministic output.
-	slices.SortFunc(groups, func(a, b SlotGroupStatus) int {
-		return cmp.Compare(a.GroupName, b.GroupName)
-	})
-
-	return jsonToolResult(SlotStatusResponse{Groups: groups})
+	return jsonToolResult(SlotStatusResponse{Groups: s.buildSlotGroupStatuses()})
 }
 
 // AddResponse is the response for vision_add.

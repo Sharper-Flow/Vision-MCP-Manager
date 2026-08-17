@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"time"
+
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 )
 
 // handleV1Slots handles GET /v1/slots — returns a JSON envelope with all
@@ -79,15 +83,7 @@ func (s *Server) buildSlotGroupStatuses() []SlotGroupStatus {
 			if srvCfg == nil || srvCfg.SlotGroup != groupName {
 				continue
 			}
-			slot := SlotDetail{
-				Name:        srvName,
-				Port:        srvCfg.Port,
-				MaxSessions: srvCfg.MaxSessions,
-			}
-			if s.slotSessionAccessor != nil {
-				slot.ActiveSessions = s.slotSessionAccessor.ActiveSessionCount(srvName)
-			}
-			g.Slots = append(g.Slots, slot)
+			g.Slots = append(g.Slots, s.slotDetail(srvName, srvCfg))
 		}
 
 		// Sort slots by name for deterministic output.
@@ -103,4 +99,46 @@ func (s *Server) buildSlotGroupStatuses() []SlotGroupStatus {
 		return cmp.Compare(a.GroupName, b.GroupName)
 	})
 	return groups
+}
+
+// slotDetail projects the config, session, lifecycle, and reachability state
+// for one slot. The effective status uses the same precedence table as the
+// other admin surfaces, so an unreachable slot cannot appear healthy here.
+func (s *Server) slotDetail(name string, cfg *config.ServerConfig) SlotDetail {
+	slot := SlotDetail{
+		Name:        name,
+		Port:        cfg.Port,
+		MaxSessions: cfg.MaxSessions,
+	}
+	if s.slotSessionAccessor != nil {
+		slot.ActiveSessions = s.slotSessionAccessor.ActiveSessionCount(name)
+	}
+
+	processState := server.StateStopped
+	processUptime := time.Duration(0)
+	var rawReason string
+	if s.registry != nil {
+		if managed := s.registry.Get(name); managed != nil {
+			status := managed.Status()
+			processState = status.State
+			processUptime = status.Uptime
+			rawReason = status.LastError
+		}
+	}
+	lifecycle := s.lifecycleSnapshot(name)
+	effective := deriveEffectiveStatus(
+		processState,
+		lifecycleBackendState(lifecycle),
+		s.reachabilityFor(name),
+		processUptime,
+		s.reachabilityGrace,
+		rawReason,
+	)
+	slot.EffectiveStatus = effective.Status
+	slot.ReachabilityDetails = effective.Reachability
+	if effective.Reason != "" {
+		reason := effective.Reason
+		slot.EffectiveReason = &reason
+	}
+	return slot
 }

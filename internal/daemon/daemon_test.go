@@ -14,7 +14,10 @@ import (
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/ownership"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/supervisor"
 )
@@ -730,6 +733,119 @@ func TestReload_RollbackOnStartFailure(t *testing.T) {
 	srv := d.registry.Get("echo")
 	if srv == nil {
 		t.Fatal("original server 'echo' should survive reload")
+	}
+}
+
+func TestSetupManagedHTTPProxyFailureMarksServerUnreachable(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := reachability.NewStore()
+	d := &Daemon{
+		cfg:               &config.Config{},
+		ctx:               context.Background(),
+		logger:            logger,
+		portManager:       visionmcp.NewPortManager(logger),
+		reachabilityStore: store,
+		managedGateways:   make(map[string]*visionmcp.ManagedHTTPGateway),
+		managedBackends:   make(map[string]*supervisor.BackendCoordinator),
+		managedCancels:    make(map[string]context.CancelFunc),
+		serverMetrics:     make(map[string]*metrics.ServerMetrics),
+	}
+	defer d.portManager.Close()
+
+	cfg := &config.ServerConfig{
+		Transport: config.TransportManagedHTTP,
+		URL:       "http://127.0.0.1:6276/not-mcp",
+	}
+	srv := &server.ManagedServer{
+		Name:    "playwright",
+		Config:  cfg,
+		State:   server.StateRunning,
+		Process: supervisor.NewManagedProcess("playwright", cfg, config.SupervisionConfig{}, logger),
+	}
+
+	if err := d.setupManagedHTTPProxy(srv); err == nil {
+		t.Fatal("setupManagedHTTPProxy() succeeded for invalid managed HTTP target")
+	}
+	value, ok := store.Get(srv.Name)
+	if !ok || value.State != reachability.StateUnreachable {
+		t.Fatalf("reachability = %#v, present=%v, want unreachable", value, ok)
+	}
+}
+
+func TestProxySetupFailureRecordsListenerDepthEvidence(t *testing.T) {
+	store := reachability.NewStore()
+	d := &Daemon{reachabilityStore: store}
+	failure := errors.New("listener already registered")
+
+	d.recordListenerSetupFailure("echo", failure)
+
+	value, ok := store.Get("echo")
+	if !ok {
+		t.Fatal("expected listener-depth failure evidence")
+	}
+	// The property that matters is that a terminal setup failure reports
+	// unreachable immediately, without waiting for FailureThreshold cycles.
+	if value.State != reachability.StateUnreachable {
+		t.Fatalf("state = %v, want %v immediately after setup failure", value.State, reachability.StateUnreachable)
+	}
+	evidence := value.Evidence[reachability.DepthListener]
+	if evidence.LastProbeOutcome != reachability.OutcomeFailure {
+		t.Fatalf("listener evidence = %#v, want failure outcome", evidence)
+	}
+	if evidence.LastProbeError == "" {
+		t.Fatal("listener evidence has no error; operators need the cause")
+	}
+	// Report the one failure that occurred. Inflating this to trip the
+	// threshold would misreport attempt count in the admin payload operators
+	// read to diagnose the outage.
+	if evidence.ConsecutiveFailures != 1 {
+		t.Fatalf("ConsecutiveFailures = %d, want 1", evidence.ConsecutiveFailures)
+	}
+}
+
+func TestSetupProxyForServerRejectsUnexpectedExistingListener(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pm := visionmcp.NewPortManager(logger)
+	defer pm.Close()
+	name := "echo"
+	if err := pm.AddStreamable(name, 0, http.NotFoundHandler(), nil); err != nil {
+		t.Fatalf("seed listener: %v", err)
+	}
+
+	cfg := &config.ServerConfig{Port: 6276, Command: "echo"}
+	d := &Daemon{
+		cfg:               &config.Config{},
+		ctx:               context.Background(),
+		logger:            logger,
+		portManager:       pm,
+		reachabilityStore: reachability.NewStore(),
+		serverMetrics:     make(map[string]*metrics.ServerMetrics),
+	}
+	srv := &server.ManagedServer{Name: name, Config: cfg, State: server.StateRunning}
+	if err := d.setupProxyForServer(srv); err == nil {
+		t.Fatal("setupProxyForServer() accepted unexpected existing listener")
+	}
+}
+
+func TestSetupProxyForServerAllowsConfiguredExistingListener(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	pm := visionmcp.NewPortManager(logger)
+	defer pm.Close()
+	cfg := &config.ServerConfig{Port: 0, Command: "echo", Stateful: true}
+	cfg.ApplyDefaults()
+	d := &Daemon{
+		cfg:           &config.Config{},
+		ctx:           context.Background(),
+		logger:        logger,
+		portManager:   pm,
+		serverMetrics: make(map[string]*metrics.ServerMetrics),
+	}
+	srv := &server.ManagedServer{Name: "echo", Config: cfg, State: server.StateRunning}
+	if err := d.setupProxyForServer(srv); err != nil {
+		t.Fatalf("initial setupProxyForServer(): %v", err)
+	}
+	if err := d.setupProxyForServer(srv); err != nil {
+		t.Fatalf("duplicate setupProxyForServer() on configured listener: %v", err)
 	}
 }
 
