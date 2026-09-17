@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -57,9 +58,9 @@ func TestHandleHealthEffectiveStatusCasesAndResponseShape(t *testing.T) {
 		wantStatus   string
 		wantKeys     []string
 	}{
-		{name: "healthy fleet", state: server.StateRunning, reachability: reachableHealthTestValue(), wantStatus: "ok", wantKeys: []string{"status", "uptime"}},
-		{name: "failed server", state: server.StateFailed, lastError: "start failed", wantStatus: "degraded", wantKeys: []string{"status", "errors", "uptime"}},
-		{name: "crashed server", state: server.StateCrashed, lastError: "process exited", wantStatus: "degraded", wantKeys: []string{"status", "errors", "uptime"}},
+		{name: "healthy fleet", state: server.StateRunning, reachability: reachableHealthTestValue(), wantStatus: "ok", wantKeys: []string{"status", "uptime", "memory_mb"}},
+		{name: "failed server", state: server.StateFailed, lastError: "start failed", wantStatus: "degraded", wantKeys: []string{"status", "errors", "uptime", "memory_mb"}},
+		{name: "crashed server", state: server.StateCrashed, lastError: "process exited", wantStatus: "degraded", wantKeys: []string{"status", "errors", "uptime", "memory_mb"}},
 	}
 
 	for _, tc := range tests {
@@ -90,6 +91,10 @@ func TestHandleHealthEffectiveStatusCasesAndResponseShape(t *testing.T) {
 				t.Fatalf("status=%v, want %q; body=%v", body["status"], tc.wantStatus, body)
 			}
 			assertJSONKeys(t, body, tc.wantKeys)
+			memory, ok := body["memory_mb"].(float64)
+			if !ok || memory <= 0 || memory != math.Round(memory*10)/10 {
+				t.Fatalf("memory_mb=%v, want a positive value rounded to one decimal place", body["memory_mb"])
+			}
 		})
 	}
 }
@@ -108,7 +113,7 @@ func TestHandleHealthUnprobedServerWithinGraceIsNotHealthy(t *testing.T) {
 	if body["status"] != "degraded" {
 		t.Fatalf("status=%v, want degraded during grace; body=%v", body["status"], body)
 	}
-	assertJSONKeys(t, body, []string{"status", "errors", "uptime"})
+	assertJSONKeys(t, body, []string{"status", "errors", "uptime", "memory_mb"})
 }
 
 func TestToolStatusDoesNotClaimHealthyWithoutProbeEvidence(t *testing.T) {

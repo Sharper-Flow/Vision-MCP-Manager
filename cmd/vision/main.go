@@ -244,6 +244,9 @@ func showDaemonStatus() error {
 			if up, ok := health["uptime"]; ok && up != nil {
 				fmt.Printf("  Uptime: %v\n", up)
 			}
+			if memory, ok := health["memory_mb"]; ok && memory != nil {
+				fmt.Printf("  Memory: %.1f MB\n", memory)
+			}
 		}
 	} else {
 		fmt.Println("Daemon is not running")
@@ -265,6 +268,9 @@ func daemonStatusPayload(running bool, pid int, health map[string]interface{}) m
 	}
 	if uptime, ok := health["uptime"].(string); ok && uptime != "" {
 		payload["uptime"] = uptime
+	}
+	if memory, ok := health["memory_mb"]; ok && memory != nil {
+		payload["memory_mb"] = memory
 	}
 	return payload
 }

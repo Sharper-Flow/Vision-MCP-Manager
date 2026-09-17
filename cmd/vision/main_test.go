@@ -4,8 +4,9 @@ import "testing"
 
 func TestDaemonStatusPayloadIncludesHealthUptime(t *testing.T) {
 	payload := daemonStatusPayload(true, 1234, map[string]interface{}{
-		"status": "ok",
-		"uptime": "5s",
+		"status":    "ok",
+		"uptime":    "5s",
+		"memory_mb": 130.4,
 	})
 
 	if got := payload["running"]; got != true {
@@ -20,12 +21,22 @@ func TestDaemonStatusPayloadIncludesHealthUptime(t *testing.T) {
 	if got := payload["uptime"]; got != "5s" {
 		t.Errorf("uptime = %v, want 5s", got)
 	}
+	if got := payload["memory_mb"]; got != 130.4 {
+		t.Errorf("memory_mb = %v, want 130.4", got)
+	}
 }
 
 func TestDaemonStatusPayloadOmitsEmptyHealthUptime(t *testing.T) {
 	payload := daemonStatusPayload(true, 1234, map[string]interface{}{"uptime": ""})
 	if _, ok := payload["uptime"]; ok {
 		t.Fatalf("empty uptime must not be emitted: %#v", payload)
+	}
+}
+
+func TestDaemonStatusPayloadOmitsMissingHealthMemory(t *testing.T) {
+	payload := daemonStatusPayload(true, 1234, map[string]interface{}{"status": "ok"})
+	if _, ok := payload["memory_mb"]; ok {
+		t.Fatalf("missing memory must not be emitted: %#v", payload)
 	}
 }
 

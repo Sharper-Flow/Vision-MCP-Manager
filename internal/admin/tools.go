@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -1378,9 +1377,6 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 	uptime := time.Since(s.startedAt)
 	s.mu.RUnlock()
 
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-
 	// Get registry status
 	var registryStatus server.RegistryStatus
 	if s.registry != nil {
@@ -1410,7 +1406,7 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 			Stopped: registryStatus.StoppedServers,
 			Error:   registryStatus.FailedServers,
 		},
-		MemoryMB: float64(memStats.Alloc) / 1024 / 1024,
+		MemoryMB: daemonMemoryMB(),
 	}
 
 	// Warn if bearer_token is not configured

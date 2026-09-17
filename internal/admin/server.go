@@ -230,6 +230,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !startedAt.IsZero() {
 		uptime = time.Since(startedAt).Round(time.Second).String()
 	}
+	memoryMB := daemonMemoryMB()
 
 	// Project every server through the shared effective-status precedence table.
 	var errors []string
@@ -255,14 +256,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if len(errors) > 0 {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "degraded",
-			"errors": errors,
-			"uptime": uptime,
+			"status":    "degraded",
+			"errors":    errors,
+			"uptime":    uptime,
+			"memory_mb": memoryMB,
 		})
 	} else {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status": "ok",
-			"uptime": uptime,
+			"status":    "ok",
+			"uptime":    uptime,
+			"memory_mb": memoryMB,
 		})
 	}
 }
