@@ -1,0 +1,14 @@
+{
+  "domains": [
+    {
+      "architecture_relations": [],
+      "domain_id": "product-root:vision",
+      "name": "Vision",
+      "purpose": "Product-wide Vision law: the MCP control-plane contract that binds daemon, proxy, supervision, configuration, and agent access while no child Domain has yet been enacted.",
+      "status": "current"
+    }
+  ],
+  "product_key": "vision",
+  "root_domain_id": "product-root:vision",
+  "schema_version": "1.0"
+}

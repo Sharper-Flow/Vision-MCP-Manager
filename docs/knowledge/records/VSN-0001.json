@@ -1,0 +1,30 @@
+{
+  "date": "2026-08-16T00:00:00Z",
+  "evidence": [
+    "docs/specs/mcp-streamable-transport.md",
+    "internal/mcp/handler.go",
+    "internal/session/manager.go",
+    "internal/supervisor/supervisor.go"
+  ],
+  "home_domain_id": "product-root:vision",
+  "id": "VSN-0001",
+  "kind": "spec",
+  "path": "docs/specs/mcp-streamable-transport.md",
+  "product_wide_rationale": "The specification governs the transport boundary shared by Vision's daemon, session manager, supervisor, and agent-facing proxy. No child Domain exists yet to own this cross-cutting contract.",
+  "scopes": {
+    "domain_ids": [],
+    "mode": "home",
+    "product_ids": [],
+    "project_ids": [],
+    "tag_ids": []
+  },
+  "sha256": "sha256:ac4715a4c96b37b7b3983b2a47834841d285cff517201d04ce70f012dd84921a",
+  "status": "accepted",
+  "summary": "Defines Vision's streamable MCP transport contract: session lifecycle, stateful and shared subprocess isolation, endpoint security and admission limits, operational compatibility, and lifecycle observability.",
+  "tags": [
+    "mcp",
+    "transport",
+    "control-plane"
+  ],
+  "title": "Vision streamable MCP transport contract"
+}
