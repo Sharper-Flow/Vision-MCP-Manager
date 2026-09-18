@@ -53,26 +53,6 @@ func newLeaseManagerForDisconnectTest(t *testing.T, grace time.Duration) (*Lease
 	return mgr, clock
 }
 
-func TestLeaseManagerBeginSSEMarksEverStreamedAndClearsDeadline(t *testing.T) {
-	mgr, _ := newLeaseManagerForDisconnectTest(t, time.Minute)
-	mgr.mu.Lock()
-	mgr.leases["session-a"].disconnectDeadline = time.Unix(600, 0)
-	mgr.mu.Unlock()
-
-	if err := mgr.BeginSSE("session-a"); err != nil {
-		t.Fatal(err)
-	}
-	mgr.mu.Lock()
-	lease := *mgr.leases["session-a"]
-	mgr.mu.Unlock()
-	if !lease.everStreamed {
-		t.Fatal("BeginSSE() did not mark lease as ever streamed")
-	}
-	if !lease.disconnectDeadline.IsZero() {
-		t.Fatalf("BeginSSE() deadline = %v, want zero", lease.disconnectDeadline)
-	}
-}
-
 func TestLeaseManagerEndSSEToZeroArmsDisconnectDeadline(t *testing.T) {
 	grace := 2 * time.Minute
 	mgr, clock := newLeaseManagerForDisconnectTest(t, grace)
@@ -211,6 +191,56 @@ func TestLeaseManagerEndSSEFromTwoConnectionsDoesNotArmDeadline(t *testing.T) {
 	}
 }
 
+func TestLeaseManagerBeginSSEClearsDeadlineWithoutMarkingApplicationActivity(t *testing.T) {
+	mgr, _ := newLeaseManagerForDisconnectTest(t, time.Minute)
+	mgr.mu.Lock()
+	mgr.leases["session-a"].disconnectDeadline = time.Unix(600, 0)
+	mgr.mu.Unlock()
+
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	mgr.mu.Lock()
+	lease := *mgr.leases["session-a"]
+	mgr.mu.Unlock()
+	if lease.everActive {
+		t.Fatal("BeginSSE() marked the lease application-active")
+	}
+	if !lease.disconnectDeadline.IsZero() {
+		t.Fatalf("BeginSSE() deadline = %v, want zero", lease.disconnectDeadline)
+	}
+}
+
+// Application requests mark the lease ever-active; maintenance traffic must
+// not. Rule 2 keys on this predicate.
+func TestLeaseManagerBeginRequestApplicationActivityMarksEverActive(t *testing.T) {
+	mgr, _ := newLeaseManagerForDisconnectTest(t, time.Minute)
+
+	done, err := mgr.BeginRequest("session-a", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done()
+	mgr.mu.Lock()
+	if mgr.leases["session-a"].everActive {
+		mgr.mu.Unlock()
+		t.Fatal("maintenance request marked the lease application-active")
+	}
+	mgr.mu.Unlock()
+
+	done, err = mgr.BeginRequest("session-a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done()
+	mgr.mu.Lock()
+	active := mgr.leases["session-a"].everActive
+	mgr.mu.Unlock()
+	if !active {
+		t.Fatal("application request did not mark the lease application-active")
+	}
+}
+
 type fakeLeaseClock struct {
 	mu  sync.Mutex
 	now time.Time
@@ -300,7 +330,7 @@ func TestLeaseManagerRequestGuardBlocksExpiryAndCompletesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	mgr.mu.Lock()
-	mgr.leases["session-a"].everStreamed = true
+	mgr.leases["session-a"].everActive = true
 	mgr.mu.Unlock()
 
 	clock.Advance(31 * time.Minute)
@@ -344,8 +374,10 @@ func TestLeaseManagerMaintenanceTrafficDoesNotRefreshActivity(t *testing.T) {
 	mgr.EndSSE("session-a")
 	clock.Advance(11 * time.Minute)
 
-	if expired := mgr.ExpireEligible(); len(expired) != 1 || expired[0].Reason != "idle_timeout" {
-		t.Fatalf("ExpireEligible() = %v, want one idle_timeout lease", expired)
+	// Maintenance traffic left lastActivity at the commit instant, so the
+	// never-active rule (same 30m derived bound) fires before the idle rule.
+	if expired := mgr.ExpireEligible(); len(expired) != 1 || expired[0].Reason != "never_streamed" {
+		t.Fatalf("ExpireEligible() = %v, want one never_streamed lease", expired)
 	}
 }
 
@@ -362,14 +394,14 @@ func TestLeaseManagerExpireEligibleRulesAndPrecedence(t *testing.T) {
 			idle:  time.Hour,
 			grace: time.Minute,
 			configure: func(lease *leaseRecord, now time.Time) {
-				lease.everStreamed = true
+				lease.everActive = true
 				lease.lastActivity = now
 				lease.disconnectDeadline = now
 			},
 			wantReason: "client_disconnected",
 		},
 		{
-			name:  "never streamed",
+			name:  "never active",
 			idle:  time.Hour,
 			grace: time.Minute,
 			configure: func(lease *leaseRecord, now time.Time) {
@@ -382,7 +414,7 @@ func TestLeaseManagerExpireEligibleRulesAndPrecedence(t *testing.T) {
 			idle:  5 * time.Minute,
 			grace: 0,
 			configure: func(lease *leaseRecord, now time.Time) {
-				lease.everStreamed = true
+				lease.everActive = true
 				lease.lastActivity = now.Add(-5 * time.Minute)
 			},
 			wantReason: "idle_timeout",
@@ -426,14 +458,14 @@ func TestLeaseManagerExpireEligiblePrecedence(t *testing.T) {
 			idle:  time.Minute,
 			grace: time.Minute,
 			configure: func(lease *leaseRecord, now time.Time) {
-				lease.everStreamed = true
+				lease.everActive = true
 				lease.lastActivity = now.Add(-time.Minute)
 				lease.disconnectDeadline = now.Add(-time.Second)
 			},
 			wantReason: "client_disconnected",
 		},
 		{
-			name:  "never streamed precedes idle",
+			name:  "never active precedes idle",
 			idle:  10 * time.Minute,
 			grace: time.Minute,
 			configure: func(lease *leaseRecord, now time.Time) {
@@ -480,9 +512,9 @@ func TestLeaseManagerExpireEligibleNeverSweepsInflight(t *testing.T) {
 	}
 	mgr.mu.Lock()
 	mgr.leases["disconnect"].disconnectDeadline = clock.Now().Add(-time.Second)
-	mgr.leases["disconnect"].everStreamed = true
+	mgr.leases["disconnect"].everActive = true
 	mgr.leases["never"].lastActivity = clock.Now().Add(-5 * time.Minute)
-	mgr.leases["idle"].everStreamed = true
+	mgr.leases["idle"].everActive = true
 	mgr.leases["idle"].lastActivity = clock.Now().Add(-time.Minute)
 	for _, lease := range mgr.leases {
 		lease.inFlight = 1
@@ -494,7 +526,10 @@ func TestLeaseManagerExpireEligibleNeverSweepsInflight(t *testing.T) {
 	}
 }
 
-func TestLeaseManagerExpireEligibleNeverStreamedRequiresNoStream(t *testing.T) {
+// A handshake GET streams but is not application activity. Rule 2 must
+// reclaim a session whose bound elapses without an application request, even
+// though the client completed the initialize-to-GET handshake.
+func TestLeaseManagerExpireEligibleNeverActiveReclaimsAfterHandshakeStream(t *testing.T) {
 	clock := &fakeLeaseClock{now: time.Unix(1000, 0)}
 	mgr := NewLeaseManagerWithDisconnectGrace(1, 10*time.Minute, time.Minute, clock)
 	reservation, err := mgr.Reserve()
@@ -511,17 +546,57 @@ func TestLeaseManagerExpireEligibleNeverStreamedRequiresNoStream(t *testing.T) {
 	mgr.mu.Lock()
 	mgr.leases["session-a"].disconnectDeadline = time.Time{}
 	mgr.mu.Unlock()
-	clock.Advance(6 * time.Minute)
 
+	// Derived bound is 5*grace = 5m; just before it the squatted lease survives.
+	clock.Advance(5*time.Minute - time.Nanosecond)
 	if got := mgr.ExpireEligible(); len(got) != 0 {
-		t.Fatalf("ExpireEligible() = %v after streaming, want no never_streamed expiry", got)
+		t.Fatalf("ExpireEligible() = %v before the never-active bound, want no expiry", got)
+	}
+
+	clock.Advance(time.Nanosecond)
+	got := mgr.ExpireEligible()
+	if len(got) != 1 || got[0] != (ExpiredLease{SessionID: "session-a", Reason: "never_streamed"}) {
+		t.Fatalf("ExpireEligible() = %v, want never_streamed after streaming without application activity", got)
+	}
+}
+
+// Application activity must suppress rule 2: an active session is preserved
+// past the never-active bound and stays subject only to idle and disconnect
+// rules.
+func TestLeaseManagerExpireEligibleApplicationActivitySuppressesNeverActiveRule(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1050, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(1, time.Hour, time.Minute, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "session-a"); err != nil {
+		t.Fatal(err)
+	}
+	done, err := mgr.BeginRequest("session-a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done()
+	if err := mgr.BeginSSE("session-a"); err != nil {
+		t.Fatal(err)
+	}
+	mgr.EndSSE("session-a")
+	mgr.mu.Lock()
+	mgr.leases["session-a"].disconnectDeadline = time.Time{}
+	mgr.mu.Unlock()
+
+	// Past the 5m never-active bound; idle is 1h so only rule 2 could fire.
+	clock.Advance(6 * time.Minute)
+	if got := mgr.ExpireEligible(); len(got) != 0 {
+		t.Fatalf("ExpireEligible() = %v, want the application-active lease preserved", got)
 	}
 }
 
 func TestLeaseManagerExpireEligibleIdleDisabledKeepsOtherRules(t *testing.T) {
 	clock := &fakeLeaseClock{now: time.Unix(1100, 0)}
 	mgr := NewLeaseManagerWithDisconnectGrace(3, 0, time.Minute, clock)
-	for _, id := range []string{"disconnect", "never", "streamed"} {
+	for _, id := range []string{"disconnect", "never", "active"} {
 		reservation, err := mgr.Reserve()
 		if err != nil {
 			t.Fatal(err)
@@ -532,11 +607,11 @@ func TestLeaseManagerExpireEligibleIdleDisabledKeepsOtherRules(t *testing.T) {
 	}
 	mgr.mu.Lock()
 	mgr.leases["disconnect"].disconnectDeadline = clock.Now().Add(-time.Second)
-	mgr.leases["disconnect"].everStreamed = true
-	// grace 1m -> never-streamed bound is 5m even though idleTimeout is disabled.
+	mgr.leases["disconnect"].everActive = true
+	// grace 1m -> never-active bound is 5m even though idleTimeout is disabled.
 	mgr.leases["never"].lastActivity = clock.Now().Add(-6 * time.Minute)
-	mgr.leases["streamed"].everStreamed = true
-	mgr.leases["streamed"].lastActivity = clock.Now().Add(-time.Hour)
+	mgr.leases["active"].everActive = true
+	mgr.leases["active"].lastActivity = clock.Now().Add(-time.Hour)
 	mgr.mu.Unlock()
 
 	got := mgr.ExpireEligible()
@@ -545,8 +620,8 @@ func TestLeaseManagerExpireEligibleIdleDisabledKeepsOtherRules(t *testing.T) {
 	}
 }
 
-// A never-streamed lease must not be reaped the instant it is created. When
-// idleTimeout is 0 the never-streamed bound must still derive from the grace
+// A never-active lease must not be reaped the instant it is created. When
+// idleTimeout is 0 the never-active bound must still derive from the grace
 // period, not collapse to 0 and make every rule-2 comparison trivially true.
 func TestLeaseManagerExpireEligibleFreshNeverStreamedLeaseSurvives(t *testing.T) {
 	clock := &fakeLeaseClock{now: time.Unix(1300, 0)}
@@ -587,7 +662,7 @@ func TestLeaseManagerExpireEligibleSmallGracePreservesHandshakeWindow(t *testing
 		t.Fatal(err)
 	}
 
-	// A realistic initialize-to-GET interval must not trigger never-streamed
+	// A realistic initialize-to-GET interval must not trigger never-active
 	// expiry even when disconnect grace is configured very small.
 	clock.Advance(time.Second)
 	if got := mgr.ExpireEligible(); len(got) != 0 {
@@ -606,7 +681,7 @@ func TestLeaseManagerExpireEligibleSmallGraceStillExpiresPastHandshakeFloor(t *t
 		t.Fatal(err)
 	}
 
-	clock.Advance(neverStreamedHandshakeFloor + time.Nanosecond)
+	clock.Advance(neverActiveHandshakeFloor + time.Nanosecond)
 	got := mgr.ExpireEligible()
 	if len(got) != 1 || got[0] != (ExpiredLease{SessionID: "expired", Reason: "never_streamed"}) {
 		t.Fatalf("ExpireEligible() = %v past handshake floor, want never_streamed expiry", got)
@@ -646,7 +721,7 @@ func TestLeaseManagerExpireEligibleSortsSessionIDs(t *testing.T) {
 	}
 	mgr.mu.Lock()
 	for _, lease := range mgr.leases {
-		lease.everStreamed = true
+		lease.everActive = true
 		lease.lastActivity = clock.Now().Add(-time.Minute)
 	}
 	mgr.mu.Unlock()
@@ -677,12 +752,92 @@ func TestLeaseManagerExpireEligibleSkipsNonActiveLeases(t *testing.T) {
 	mgr.mu.Lock()
 	mgr.leases["expiring"].state = LeaseStateExpiring
 	mgr.leases["expiring"].disconnectDeadline = clock.Now().Add(-time.Second)
-	mgr.leases["uncertain"].state = LeaseStateCleanupUncertain
+	mgr.mu.Unlock()
+	if !mgr.MarkCleanupUncertain("uncertain", "cleanup_rejected") {
+		t.Fatal("MarkCleanupUncertain() = false")
+	}
+	mgr.mu.Lock()
 	mgr.leases["uncertain"].lastActivity = clock.Now().Add(-time.Hour)
 	mgr.mu.Unlock()
 
 	if got := mgr.ExpireEligible(); len(got) != 0 {
 		t.Fatalf("ExpireEligible() = %v for non-active leases", got)
+	}
+	if got := mgr.CapacityUsed(); got != 2 {
+		t.Fatalf("CapacityUsed() before the quarantine deadline = %d, want 2", got)
+	}
+}
+
+// An ambiguous cleanup quarantines the slot until the bounded window elapses,
+// then ExpireCleanupUncertain releases capacity without another cleanup
+// attempt.
+func TestLeaseManagerCleanupUncertainQuarantinesThenReleasesCapacity(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(2000, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(1, 10*time.Minute, time.Minute, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "uncertain"); err != nil {
+		t.Fatal(err)
+	}
+	if !mgr.MarkCleanupUncertain("uncertain", "cleanup_result_ambiguous") {
+		t.Fatal("MarkCleanupUncertain() = false")
+	}
+
+	if _, err := mgr.Reserve(); !errors.Is(err, ErrLeaseCapacity) {
+		t.Fatalf("Reserve() during quarantine error = %v, want ErrLeaseCapacity", err)
+	}
+	if got := mgr.CapacityUsed(); got != 1 {
+		t.Fatalf("CapacityUsed() during quarantine = %d, want 1", got)
+	}
+	if closed := mgr.ExpireCleanupUncertain(); len(closed) != 0 {
+		t.Fatalf("ExpireCleanupUncertain() before the bound = %v, want none", closed)
+	}
+
+	clock.Advance(5 * time.Minute) // derived bound: 5 * grace
+	closed := mgr.ExpireCleanupUncertain()
+	if len(closed) != 1 || closed[0] != (ExpiredLease{SessionID: "uncertain", Reason: "cleanup_result_ambiguous"}) {
+		t.Fatalf("ExpireCleanupUncertain() = %v, want the quarantined lease closed with its reason", closed)
+	}
+	if got := mgr.CapacityUsed(); got != 0 {
+		t.Fatalf("CapacityUsed() after quarantine = %d, want 0", got)
+	}
+	if _, err := mgr.Reserve(); err != nil {
+		t.Fatalf("Reserve() after quarantine error = %v, want capacity released", err)
+	}
+	snapshot := mgr.Snapshot(10)
+	if len(snapshot.Closed) != 1 || snapshot.Closed[0].LifecycleReason != "cleanup_result_ambiguous" {
+		t.Fatalf("closed rows = %#v, want one cleanup_result_ambiguous row", snapshot.Closed)
+	}
+}
+
+// Even with every expiry bound disabled, an ambiguous cleanup must exit its
+// quarantine within the handshake floor instead of leaking the slot.
+func TestLeaseManagerCleanupUncertainBoundedWithDisabledExpiry(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(2100, 0)}
+	mgr := NewLeaseManagerWithDisconnectGrace(1, 0, 0, clock)
+	reservation, err := mgr.Reserve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Commit(reservation, "uncertain"); err != nil {
+		t.Fatal(err)
+	}
+	if !mgr.MarkCleanupUncertain("uncertain", "cleanup_rejected") {
+		t.Fatal("MarkCleanupUncertain() = false")
+	}
+
+	clock.Advance(neverActiveHandshakeFloor - time.Nanosecond)
+	if closed := mgr.ExpireCleanupUncertain(); len(closed) != 0 {
+		t.Fatalf("ExpireCleanupUncertain() before the floor = %v, want none", closed)
+	}
+	clock.Advance(time.Nanosecond)
+	if closed := mgr.ExpireCleanupUncertain(); len(closed) != 1 {
+		t.Fatalf("ExpireCleanupUncertain() at the floor = %v, want one closure", closed)
+	}
+	if got := mgr.CapacityUsed(); got != 0 {
+		t.Fatalf("CapacityUsed() after the floor = %d, want 0", got)
 	}
 }
 

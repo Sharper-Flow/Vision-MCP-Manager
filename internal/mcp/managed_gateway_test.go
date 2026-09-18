@@ -211,6 +211,7 @@ func TestManagedHTTPGatewayExpiresByApplicationIdleNotSSE(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := initializeManagedSession(t, gateway)
+	sendApplicationActivity(t, gateway, id)
 
 	clock.Advance(29 * time.Minute)
 	sse := httptest.NewRequest(http.MethodGet, "/mcp", nil)
@@ -227,7 +228,9 @@ func TestManagedHTTPGatewayExpiresByApplicationIdleNotSSE(t *testing.T) {
 	reuse.Header.Set("Mcp-Session-Id", id)
 	reuseResp := httptest.NewRecorder()
 	gateway.ServeHTTP(reuseResp, reuse)
-	if reuseResp.Code != http.StatusNotFound || toolCalls.Load() != 0 {
+	// Exactly one downstream application call (the pre-expiry activity request)
+	// must have happened; the expired reuse must not add a second.
+	if reuseResp.Code != http.StatusNotFound || toolCalls.Load() != 1 {
 		t.Fatalf("expired reuse status=%d downstream tool calls=%d", reuseResp.Code, toolCalls.Load())
 	}
 }
@@ -339,6 +342,7 @@ func TestManagedHTTPGatewayZeroDisconnectGraceRestoresIdleOnlyReaping(t *testing
 	}
 	id := initializeManagedSession(t, gateway)
 	openManagedSSE(t, gateway, id)
+	sendApplicationActivity(t, gateway, id)
 	clock.Advance(time.Hour)
 	gateway.pruneIdle(context.Background())
 
@@ -429,6 +433,19 @@ func openManagedSSE(t *testing.T, gateway http.Handler, sessionID string) {
 	gateway.ServeHTTP(resp, req)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("SSE status = %d, body = %s", resp.Code, resp.Body.String())
+	}
+}
+
+// sendApplicationActivity issues a JSON-RPC request that classifies as
+// application activity, marking the lease ever-active.
+func sendApplicationActivity(t *testing.T, gateway http.Handler, sessionID string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`))
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	resp := httptest.NewRecorder()
+	gateway.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("application activity status = %d, body = %s", resp.Code, resp.Body.String())
 	}
 }
 
@@ -861,6 +878,73 @@ func newManagedGatewayWithConfig(t *testing.T, target string, cfg ManagedHTTPGat
 		t.Fatal(err)
 	}
 	return gateway
+}
+
+// A cleanup DELETE whose backend response is neither success nor 404
+// quarantines the slot. The quarantine must hold capacity until its bounded
+// window elapses, then release the slot and settle metrics without another
+// cleanup attempt.
+func TestManagedHTTPGatewayQuarantinedSlotReleasesAfterBound(t *testing.T) {
+	clock := &fakeLeaseClock{now: time.Unix(1_700_000_000, 0)}
+	var deletes atomic.Int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Mcp-Session-Id", "quarantine-session")
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		case http.MethodDelete:
+			deletes.Add(1)
+			w.WriteHeader(http.StatusBadGateway)
+		}
+	}))
+	defer backend.Close()
+	serverMetrics := metrics.NewServerMetrics()
+	target, _ := url.Parse(backend.URL + "/mcp")
+	grace := time.Minute
+	gateway, err := NewManagedHTTPGateway(ManagedHTTPGatewayConfig{
+		Target: target, MaxSessions: 1, IdleTimeout: time.Hour, DisconnectGracePeriod: grace,
+		Clock: clock, Transport: backend.Client().Transport, Metrics: serverMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := initializeManagedSession(t, gateway)
+	del := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
+	del.Header.Set("Mcp-Session-Id", id)
+	gateway.ServeHTTP(httptest.NewRecorder(), del)
+	if got := gateway.Snapshot(10); got.CapacityUsed != 1 || got.Rows[0].State != LeaseStateCleanupUncertain {
+		t.Fatalf("post-delete snapshot = %#v, want one quarantined lease", got)
+	}
+
+	// Before the 5m quarantine bound the slot stays withheld.
+	clock.Advance(4 * time.Minute)
+	gateway.pruneIdle(context.Background())
+	if got := gateway.Snapshot(10); got.CapacityUsed != 1 || deletes.Load() != 1 {
+		t.Fatalf("mid-quarantine capacity=%d deletes=%d, want slot held with no retry", got.CapacityUsed, deletes.Load())
+	}
+
+	// After the bound the slot is released and metrics settle.
+	clock.Advance(time.Minute + time.Nanosecond)
+	gateway.pruneIdle(context.Background())
+	snapshot := serverMetrics.Snapshot()
+	if got := gateway.Snapshot(10); got.CapacityUsed != 0 {
+		t.Fatalf("post-bound capacity = %d, want released slot", got.CapacityUsed)
+	}
+	if snapshot.ActiveSessions != 0 || snapshot.ReapedByReason[metrics.ReapReasonCleanupUncertain] != 1 {
+		t.Fatalf("metrics = %#v, want active=0 and one cleanup_uncertain reap", snapshot)
+	}
+	if len(gateway.Snapshot(10).Closed) != 1 || gateway.Snapshot(10).Closed[0].LifecycleReason != "cleanup_rejected" {
+		t.Fatalf("closed rows = %#v, want one cleanup_rejected row", gateway.Snapshot(10).Closed)
+	}
+
+	// The released slot admits a new session again.
+	second := initializeManagedSession(t, gateway)
+	if second == "" {
+		t.Fatal("released slot did not admit a new session")
+	}
+	if deletes.Load() != 1 {
+		t.Fatalf("deletes = %d, want no cleanup retry for the quarantined session", deletes.Load())
+	}
 }
 
 type failingManagedTransport struct{ calls atomic.Int32 }

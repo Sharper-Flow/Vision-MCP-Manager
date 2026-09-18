@@ -36,10 +36,10 @@ const (
 	LeaseStateCleanupUncertain LeaseState = "cleanup_uncertain"
 	LeaseStateClosed           LeaseState = "closed"
 	maxClosedLeaseHistory                 = 1000
-	// neverStreamedHandshakeFloor keeps a lease alive through a normal
+	// neverActiveHandshakeFloor keeps a lease alive through a normal
 	// initialize-to-GET handshake. Thirty seconds comfortably exceeds
 	// realistic handshake latency, even when disconnect grace is unusually small.
-	neverStreamedHandshakeFloor = 30 * time.Second
+	neverActiveHandshakeFloor = 30 * time.Second
 )
 
 // Reservation is an opaque capacity claim created before a downstream server
@@ -54,8 +54,9 @@ type leaseRecord struct {
 	lastActivity       time.Time
 	inFlight           int
 	sseCount           int
-	everStreamed       bool
+	everActive         bool
 	disconnectDeadline time.Time
+	cleanupDeadline    time.Time
 	reason             string
 }
 
@@ -86,17 +87,18 @@ type ExpiredLease struct {
 // LeaseManager is the sole mutation authority for managed HTTP admission and
 // per-session lifecycle state.
 type LeaseManager struct {
-	mu                 sync.Mutex
-	maxSessions        int
-	idleTimeout        time.Duration
-	disconnectGrace    time.Duration
-	neverStreamedBound time.Duration
-	clock              LeaseClock
-	nextToken          atomic.Uint64
-	reservations       map[uint64]struct{}
-	leases             map[string]*leaseRecord
-	closed             []LeaseSnapshotRow
-	closedOmitted      int
+	mu                    sync.Mutex
+	maxSessions           int
+	idleTimeout           time.Duration
+	disconnectGrace       time.Duration
+	neverActiveBound      time.Duration
+	cleanupUncertainBound time.Duration
+	clock                 LeaseClock
+	nextToken             atomic.Uint64
+	reservations          map[uint64]struct{}
+	leases                map[string]*leaseRecord
+	closed                []LeaseSnapshotRow
+	closedOmitted         int
 }
 
 func NewLeaseManager(maxSessions int, idleTimeout time.Duration, clock LeaseClock) *LeaseManager {
@@ -107,32 +109,41 @@ func NewLeaseManagerWithDisconnectGrace(maxSessions int, idleTimeout, disconnect
 	if clock == nil {
 		clock = realLeaseClock{}
 	}
-	// A lease that never opened a stream is reclaimed using the shorter of the
-	// configured idle/grace-derived bounds, but the bound must never resolve to
-	// 0: that would make the rule-2 comparison trivially true and reap every
-	// never-streamed lease on sight. A non-positive bound disables the rule
-	// entirely.
-	neverStreamedBound := idleTimeout
+	// A lease that has not sent application activity is reclaimed using the
+	// shorter of the configured idle/grace-derived bounds, but the bound must
+	// never resolve to 0: that would make the rule-2 comparison trivially true
+	// and reap every never-active lease on sight. A non-positive bound disables
+	// the rule entirely.
+	neverActiveBound := idleTimeout
 	if disconnectGrace > 0 {
 		graceBound := 5 * disconnectGrace
-		if neverStreamedBound <= 0 || graceBound < neverStreamedBound {
-			neverStreamedBound = graceBound
+		if neverActiveBound <= 0 || graceBound < neverActiveBound {
+			neverActiveBound = graceBound
 		}
 	}
-	if neverStreamedBound > 0 && neverStreamedBound < neverStreamedHandshakeFloor {
+	if neverActiveBound > 0 && neverActiveBound < neverActiveHandshakeFloor {
 		// Do not cap this floor back to idleTimeout: the ordinary idle rule
 		// independently reaps idle leases, while this longer bound protects a
-		// never-streamed lease from being reclaimed during its handshake.
-		neverStreamedBound = neverStreamedHandshakeFloor
+		// never-active lease from being reclaimed during its handshake.
+		neverActiveBound = neverActiveHandshakeFloor
+	}
+	// An ambiguous cleanup quarantines the slot instead of guessing whether the
+	// backend disposed the session. The quarantine ends on the same derived
+	// bound as rule 2, floored at the handshake window so a fully disabled
+	// expiry configuration still cannot quarantine a slot forever.
+	cleanupUncertainBound := neverActiveBound
+	if cleanupUncertainBound <= 0 {
+		cleanupUncertainBound = neverActiveHandshakeFloor
 	}
 	return &LeaseManager{
-		maxSessions:        maxSessions,
-		idleTimeout:        idleTimeout,
-		disconnectGrace:    disconnectGrace,
-		neverStreamedBound: neverStreamedBound,
-		clock:              clock,
-		reservations:       make(map[uint64]struct{}),
-		leases:             make(map[string]*leaseRecord),
+		maxSessions:           maxSessions,
+		idleTimeout:           idleTimeout,
+		disconnectGrace:       disconnectGrace,
+		neverActiveBound:      neverActiveBound,
+		cleanupUncertainBound: cleanupUncertainBound,
+		clock:                 clock,
+		reservations:          make(map[uint64]struct{}),
+		leases:                make(map[string]*leaseRecord),
 	}
 }
 
@@ -197,6 +208,7 @@ func (m *LeaseManager) BeginRequest(sessionID string, applicationActivity bool) 
 	lease.inFlight++
 	if applicationActivity {
 		now := m.clock.Now()
+		lease.everActive = true
 		lease.lastActivity = now
 		if !lease.disconnectDeadline.IsZero() {
 			lease.disconnectDeadline = now.Add(m.disconnectGrace)
@@ -233,7 +245,6 @@ func (m *LeaseManager) BeginSSE(sessionID string) error {
 		return ErrLeaseNotActive
 	}
 	lease.sseCount++
-	lease.everStreamed = true
 	lease.disconnectDeadline = time.Time{}
 	return nil
 }
@@ -272,7 +283,10 @@ func (m *LeaseManager) ExpireEligible() []ExpiredLease {
 		reason := ""
 		if !lease.disconnectDeadline.IsZero() && !now.Before(lease.disconnectDeadline) {
 			reason = "client_disconnected"
-		} else if m.neverStreamedBound > 0 && !lease.everStreamed && now.Sub(lease.lastActivity) >= m.neverStreamedBound {
+		} else if m.neverActiveBound > 0 && !lease.everActive && now.Sub(lease.lastActivity) >= m.neverActiveBound {
+			// Reason label stays "never_streamed" for metrics continuity; the
+			// predicate is missing application activity, not stream
+			// establishment, so a handshake-only session is reclaimed here.
 			reason = "never_streamed"
 		} else if m.idleTimeout > 0 && now.Sub(lease.lastActivity) >= m.idleTimeout {
 			reason = "idle_timeout"
@@ -301,6 +315,9 @@ func (m *LeaseManager) TryBeginExpiry(sessionID, reason string) bool {
 	return true
 }
 
+// MarkCleanupUncertain quarantines a lease whose cleanup outcome is unknown.
+// The slot stays withheld for a bounded window; ExpireCleanupUncertain then
+// releases it without another cleanup attempt.
 func (m *LeaseManager) MarkCleanupUncertain(sessionID, reason string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -310,6 +327,7 @@ func (m *LeaseManager) MarkCleanupUncertain(sessionID, reason string) bool {
 	}
 	lease.state = LeaseStateCleanupUncertain
 	lease.reason = reason
+	lease.cleanupDeadline = m.clock.Now().Add(m.cleanupUncertainBound)
 	return true
 }
 
@@ -496,4 +514,32 @@ func classifyJSONRPCMessage(raw json.RawMessage) (bool, error) {
 		return false, nil
 	}
 	return false, errors.New("unrecognized JSON-RPC message")
+}
+
+// ExpireCleanupUncertain ends the quarantine of cleanup_uncertain leases whose
+// bounded window has elapsed, releasing their capacity. The original cleanup
+// request is at-most-once, so no retry is issued; the closed rows keep the
+// quarantine reason for inspection. It returns the closed leases so callers
+// can settle metrics.
+func (m *LeaseManager) ExpireCleanupUncertain() []ExpiredLease {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.clock.Now()
+	var closed []ExpiredLease
+	for id, lease := range m.leases {
+		if lease.state != LeaseStateCleanupUncertain {
+			continue
+		}
+		if !lease.cleanupDeadline.IsZero() && now.Before(lease.cleanupDeadline) {
+			continue
+		}
+		reason := lease.reason
+		m.recordClosedLocked(lease, reason)
+		delete(m.leases, id)
+		closed = append(closed, ExpiredLease{SessionID: id, Reason: reason})
+	}
+	sort.Slice(closed, func(i, j int) bool {
+		return closed[i].SessionID < closed[j].SessionID
+	})
+	return closed
 }

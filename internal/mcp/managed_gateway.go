@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 )
 
 const managedProbeInitialize = `{"jsonrpc":"2.0","id":"vision-readiness","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"vision-readiness","version":"1.0.0"}}}`
@@ -267,8 +269,10 @@ func (g *ManagedHTTPGateway) reserveWithPrune(ctx context.Context) (Reservation,
 
 // pruneIdle performs one at-most-once DELETE for each newly expiry-eligible
 // lease. Capacity is released only when the backend proves disposal with a
-// successful response or 404.
+// successful response or 404. Overdue cleanup-uncertain quarantines are
+// released first so capacity pressure is relieved without a retry.
 func (g *ManagedHTTPGateway) pruneIdle(ctx context.Context) {
+	g.closeExpiredQuarantines()
 	for _, expired := range g.leases.ExpireEligible() {
 		sessionID := expired.SessionID
 		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, g.target.String(), nil)
@@ -296,6 +300,22 @@ func (g *ManagedHTTPGateway) pruneIdle(ctx context.Context) {
 		}
 		g.leases.MarkCleanupUncertain(sessionID, "cleanup_rejected")
 		g.reportAmbiguousFailure(fmt.Errorf("idle cleanup for %s returned status %d", safeLeaseID(sessionID), resp.StatusCode))
+	}
+}
+
+// closeExpiredQuarantines releases slots held by cleanup_uncertain leases past
+// their bounded quarantine window. The original cleanup attempt stays
+// at-most-once; the closed rows keep the quarantine reason.
+func (g *ManagedHTTPGateway) closeExpiredQuarantines() {
+	g.lifecycleMu.Lock()
+	closed := g.leases.ExpireCleanupUncertain()
+	g.lifecycleMu.Unlock()
+	if g.metrics == nil {
+		return
+	}
+	for range closed {
+		g.metrics.DecActiveSessions()
+		g.metrics.IncReaped(metrics.ReapReasonCleanupUncertain)
 	}
 }
 

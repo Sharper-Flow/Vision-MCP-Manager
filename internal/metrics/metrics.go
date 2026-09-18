@@ -79,6 +79,7 @@ type ServerMetricsSnapshot struct {
 const (
 	ReapReasonClientDisconnected = "client_disconnected"
 	ReapReasonNeverStreamed      = "never_streamed"
+	ReapReasonCleanupUncertain   = "cleanup_uncertain"
 	ReapReasonIdleTimeout        = "idle_timeout"
 	ReapReasonUpstreamDelete     = "upstream_delete"
 	ReapReasonSessionRemoved     = "session_removed"
@@ -153,6 +154,8 @@ func NormalizeReapReason(reason string) string {
 		return ReapReasonClientDisconnected
 	case ReapReasonNeverStreamed:
 		return ReapReasonNeverStreamed
+	case ReapReasonCleanupUncertain:
+		return ReapReasonCleanupUncertain
 	case ReapReasonIdleTimeout, "idle timeout":
 		return ReapReasonIdleTimeout
 	case ReapReasonUpstreamDelete, "upstream delete":
