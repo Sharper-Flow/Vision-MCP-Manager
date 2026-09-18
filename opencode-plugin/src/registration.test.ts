@@ -21,9 +21,10 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
-const { checkHealthMock, visionInitMock } = vi.hoisted(() => ({
+const { checkHealthMock, visionInitMock, visionAddMock } = vi.hoisted(() => ({
   checkHealthMock: vi.fn(async () => ({ healthy: false })),
   visionInitMock: vi.fn(async () => "mocked vision_init"),
+  visionAddMock: vi.fn(async () => "mocked vision_add"),
 }))
 
 vi.mock("./health", async (importOriginal) => ({
@@ -34,9 +35,11 @@ vi.mock("./health", async (importOriginal) => ({
 vi.mock("./tools", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./tools")>()),
   visionInit: visionInitMock,
+  visionAdd: visionAddMock,
 }))
 
 import VisionPlugin from "./index"
+import { renderVisionContext } from "./context"
 import {
   OPENCODE_MCP_TOOL_NAMES,
   VISION_DAEMON_TOOL_NAMES,
@@ -78,8 +81,9 @@ async function loadHooks(directory = "/tmp/project", codeMode = false): Promise<
   // this host run with OPENCODE_EXPERIMENTAL_CODE_MODE=true, which would
   // otherwise unregister vision_init and friends out from under those tests.
   vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
+  // The dual entry carries the V1 factory on `server`; 1.18.x loads it there.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return await (VisionPlugin as any)(fakePluginInput(directory))
+  return await (VisionPlugin as any).server(fakePluginInput(directory))
 }
 
 async function tempProject(): Promise<string> {
@@ -321,5 +325,336 @@ describe("plugin tool registration", () => {
 
     expect(init.description).not.toContain(".opencode.json")
     expect(init.description).toContain("opencode.jsonc")
+  })
+})
+
+// =============================================================================
+// Dual entry (V1/V2 loader shape)
+// =============================================================================
+
+describe("dual entry loader shape", () => {
+  it("default export carries id, setup, and server", () => {
+    const entry = VisionPlugin as unknown as Record<string, unknown>
+
+    expect(typeof entry).toBe("object")
+    expect(entry).not.toBeNull()
+    expect(typeof entry.id, "V2 requires a string plugin id").toBe("string")
+    expect(typeof entry.setup, "V2 calls setup(context)").toBe("function")
+    expect(typeof entry.server, "1.18.x extracts and invokes the server member").toBe("function")
+  })
+
+  it("keeps the module at a single default export the V1 loader can consume", async () => {
+    // The 1.18.x loader path that iterates module values throws
+    // "Plugin export is not a function" for any value that is neither a
+    // function nor an object carrying `server`. A second named export would
+    // trip it; the default object carrying `server` does not.
+    const module = await import("./index")
+    const values = Object.values(module)
+
+    expect(values).toHaveLength(1)
+    const exported = values[0] as Record<string, unknown>
+    expect(typeof exported.server).toBe("function")
+  })
+})
+
+// =============================================================================
+// V2 setup registration
+// =============================================================================
+
+interface RecordedV2Tool {
+  name: string
+  description: string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  input: any
+  execute: (raw: unknown) => Promise<unknown>
+}
+
+interface FakeV2Mcp {
+  reload: ReturnType<typeof vi.fn>
+  updates: Array<{ name: string; disabled: boolean | undefined }>
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transform: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  list: any
+}
+
+/**
+ * Build a fake mcp domain for the ctx.mcp control tools. `configs` models the
+ * server config entries (absent name = not configured); `statusAfter` is what
+ * `list()` reports after reload.
+ */
+function fakeV2Mcp(
+  configs: Record<string, { disabled?: boolean }>,
+  statusAfter: string
+): FakeV2Mcp {
+  const updates: Array<{ name: string; disabled: boolean | undefined }> = []
+  const reload = vi.fn(async () => {})
+  return {
+    reload,
+    updates,
+    transform: async (callback: (editor: unknown) => void) => {
+      callback({
+        get: (name: string) => configs[name],
+        update: (name: string, apply: (config: { disabled?: boolean }) => void) => {
+          const config = { ...configs[name] }
+          apply(config)
+          updates.push({ name, disabled: config.disabled })
+        },
+      })
+      return { dispose: async () => {} }
+    },
+    list: async () => ({
+      location: { directory: "/tmp/project" },
+      data: Object.keys(configs).map((name) => ({ name, status: { status: statusAfter } })),
+    }),
+  }
+}
+
+interface V2SetupFixture {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  cleanup: any
+  added: Record<string, RecordedV2Tool>
+  hooks: Record<string, (input: unknown) => Promise<void> | void>
+  eventSubscribed: boolean
+}
+
+async function runV2Setup(
+  codeMode: boolean,
+  overrides?: { mcp?: FakeV2Mcp }
+): Promise<V2SetupFixture> {
+  vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
+
+  const added: Record<string, RecordedV2Tool> = {}
+  const hooks: Record<string, (input: unknown) => Promise<void> | void> = {}
+  let eventSubscribed = false
+
+  const editor = {
+    add: (tool: RecordedV2Tool) => {
+      added[tool.name] = tool
+    },
+  }
+
+  const context = {
+    location: { directory: "/tmp/project" },
+    event: {
+      subscribe: () => {
+        eventSubscribed = true
+        return (async function* () {})()
+      },
+    },
+    session: {
+      hook: async (name: string, callback: (input: unknown) => Promise<void> | void) => {
+        hooks[name] = callback
+        return { dispose: async () => {} }
+      },
+    },
+    tool: {
+      transform: async (callback: (input: unknown) => void) => {
+        callback(editor)
+        return { dispose: async () => {} }
+      },
+    },
+    mcp: overrides?.mcp ?? fakeV2Mcp({}, "connected"),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any
+
+  const cleanup = await (
+    VisionPlugin as unknown as { setup: (context: unknown) => Promise<unknown> }
+  ).setup(context)
+
+  return { cleanup, added, hooks, eventSubscribed }
+}
+
+describe("V2 setup registration", () => {
+  beforeEach(() => {
+    checkHealthMock.mockClear()
+    visionInitMock.mockClear()
+    visionAddMock.mockClear()
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it("subscribes to the event stream and registers the compaction hook", async () => {
+    const fixture = await runV2Setup(false)
+
+    expect(fixture.eventSubscribed).toBe(true)
+    expect(Object.keys(fixture.hooks)).toContain("compaction")
+  })
+
+  it("registers exactly the declared tool names with JSON Schema inputs (Code Mode OFF)", async () => {
+    const fixture = await runV2Setup(false)
+    const registered = Object.keys(fixture.added)
+
+    expect(new Set(registered)).toEqual(new Set(expectedNames))
+    expect(registered).toHaveLength(expectedNames.length)
+
+    for (const name of registered) {
+      const tool = fixture.added[name]
+      expect(typeof tool.description, `${name} description`).toBe("string")
+      expect(tool.description.length).toBeGreaterThan(0)
+      expect(typeof tool.execute, `${name} execute`).toBe("function")
+      expect(tool.input, `${name} input must be a JSON Schema object`).toBeDefined()
+      expect(tool.input.type).toBe("object")
+      expect(tool.input.properties).toBeDefined()
+    }
+  })
+
+  it("registers only the plugin-local tools under Code Mode ON (V2)", async () => {
+    const fixture = await runV2Setup(true)
+    const registered = Object.keys(fixture.added)
+
+    expect(new Set(registered)).toEqual(new Set(pluginLocalNames))
+    expect(
+      registered.filter((name) => daemonNames.includes(name)),
+      "daemon-proxy tools are reachable as tools.vision.* under Code Mode"
+    ).toEqual([])
+  })
+
+  it("derives vision_add JSON Schema from the zod schema", async () => {
+    const fixture = await runV2Setup(false)
+    const input = fixture.added[VISION_PLUGIN_TOOL_NAMES.add].input
+
+    expect(input.properties.name.type).toBe("string")
+    expect(input.properties.start.type).toBe("boolean")
+    expect(input.required).toContain("name")
+    // `.default(true)` is an optional INPUT under io: "input" — the caller may
+    // omit it and the zod parse applies the default.
+    expect(input.required ?? []).not.toContain("start")
+    expect(input.properties.name.description).toContain("registry")
+  })
+
+  it("keeps zod as the internal parse layer, applying schema defaults", async () => {
+    const fixture = await runV2Setup(false)
+    const tool = fixture.added[VISION_PLUGIN_TOOL_NAMES.add]
+
+    const result = (await tool.execute({ name: "linear" })) as { content: string }
+
+    // Raw input omitted `start`; the zod parse inside execute applied the
+    // default before the handler ran.
+    expect(visionAddMock).toHaveBeenCalledWith({ name: "linear", start: true })
+    expect(result).toEqual({ content: "mocked vision_add" })
+  })
+
+  it("injects the Vision context as a text system part on compaction", async () => {
+    const fixture = await runV2Setup(false)
+    const compaction = fixture.hooks["compaction"]
+
+    const input = { system: [] as Array<{ type: string; text: string }> }
+    await compaction?.(input)
+
+    expect(input.system).toHaveLength(1)
+    expect(input.system[0].type).toBe("text")
+    expect(input.system[0].text).toBe(renderVisionContext({ healthy: false, codeMode: false }))
+  })
+
+  it("checks daemon health on session.created events", async () => {
+    checkHealthMock.mockClear()
+
+    vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", "false")
+    const context = {
+      location: { directory: "/tmp/project" },
+      event: {
+        subscribe: () =>
+          (async function* () {
+            yield { type: "session.created", data: { sessionID: "sess-1" } }
+          })(),
+      },
+      session: {
+        hook: async () => ({ dispose: async () => {} }),
+      },
+      tool: {
+        transform: async () => ({ dispose: async () => {} }),
+      },
+      mcp: fakeV2Mcp({}, "connected"),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any
+
+    await (VisionPlugin as unknown as { setup: (context: unknown) => Promise<unknown> }).setup(
+      context
+    )
+
+    // One startup check + one per session.created event.
+    await vi.waitFor(() => expect(checkHealthMock).toHaveBeenCalledTimes(2))
+  })
+
+  it("connects a declared disabled server through the ctx.mcp domain", async () => {
+    const mcp = fakeV2Mcp({ linear: { disabled: true } }, "connected")
+    const fixture = await runV2Setup(false, { mcp })
+
+    const result = JSON.parse(
+      (
+        (await fixture.added[OPENCODE_MCP_TOOL_NAMES.mcpConnect].execute({
+          name: "linear",
+        })) as { content: string }
+      ).content
+    )
+
+    expect(result.success).toBe(true)
+    expect(result.status).toBe("connected")
+    expect(mcp.updates).toEqual([{ name: "linear", disabled: undefined }])
+    expect(mcp.reload).toHaveBeenCalledTimes(1)
+  })
+
+  it("disconnects a connected server by setting the disabled flag", async () => {
+    const mcp = fakeV2Mcp({ linear: {} }, "disabled")
+    const fixture = await runV2Setup(false, { mcp })
+
+    const result = JSON.parse(
+      (
+        (await fixture.added[OPENCODE_MCP_TOOL_NAMES.mcpDisconnect].execute({
+          name: "linear",
+        })) as { content: string }
+      ).content
+    )
+
+    expect(result.success).toBe(true)
+    expect(result.status).toBe("disabled")
+    expect(mcp.updates).toEqual([{ name: "linear", disabled: true }])
+    expect(mcp.reload).toHaveBeenCalledTimes(1)
+  })
+
+  it("refuses to connect a server that is not declared in the config", async () => {
+    const mcp = fakeV2Mcp({}, "connected")
+    const fixture = await runV2Setup(false, { mcp })
+
+    const result = JSON.parse(
+      (
+        (await fixture.added[OPENCODE_MCP_TOOL_NAMES.mcpConnect].execute({
+          name: "ghost",
+        })) as { content: string }
+      ).content
+    )
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain("not configured")
+    expect(result.suggestion).toContain('"mcp" block')
+    expect(mcp.reload).not.toHaveBeenCalled()
+  })
+
+  it("reports a failed attach with the upstream error verbatim", async () => {
+    const mcp = fakeV2Mcp(
+      { linear: { disabled: true } },
+      // The fake list() reports this status for every server after reload.
+      "failed"
+    )
+    // The failed variant carries an error message; patch the fake's list data.
+    mcp.list = async () => ({
+      location: { directory: "/tmp/project" },
+      data: [{ name: "linear", status: { status: "failed", error: "boom" } }],
+    })
+    const fixture = await runV2Setup(false, { mcp })
+
+    const result = JSON.parse(
+      (
+        (await fixture.added[OPENCODE_MCP_TOOL_NAMES.mcpConnect].execute({
+          name: "linear",
+        })) as { content: string }
+      ).content
+    )
+
+    expect(result.success).toBe(false)
+    expect(result.error).toBe("boom")
   })
 })

@@ -15,6 +15,7 @@
  */
 
 import { tool, type Plugin } from "@opencode-ai/plugin"
+import type { Plugin as V2Plugin } from "@opencode/plugin"
 import { access, stat } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 import { z } from "zod"
@@ -31,24 +32,30 @@ import {
   visionGuidance,
   visionSlotStatus,
   visionMetrics,
+  toolInputJsonSchema,
+  VisionListArgsSchema,
   VisionAddArgsSchema,
   VisionRemoveArgsSchema,
   VisionRestartArgsSchema,
   VisionSearchArgsSchema,
   VisionInitArgsSchema,
   VisionGuidanceArgsSchema,
+  VisionStatusArgsSchema,
+  VisionSlotStatusArgsSchema,
+  VisionMetricsArgsSchema,
 } from "./tools"
 import {
   connectMcpServer,
   disconnectMcpServer,
+  connectMcpServerV2,
+  disconnectMcpServerV2,
   McpConnectArgsSchema,
   McpDisconnectArgsSchema,
 } from "./mcp-control"
-// Tool-name constants live in a data-only sibling module so this ENTRY module
-// exports functions only. The OpenCode 1.18.4+ loader iterates
-// Object.values(entryModule) and throws "Plugin export is not a function" for
-// any non-function export (a plain object map trips it). Imported WITHOUT
-// re-export; consumers/tests import from "./tool-names" directly.
+// Tool-name constants live in a data-only sibling module so the ENTRY module
+// keeps the single loader-safe default export documented at the Dual Entry
+// section below. Imported WITHOUT re-export; consumers/tests import from
+// "./tool-names" directly.
 import { VISION_PLUGIN_TOOL_NAMES } from "./tool-names"
 
 // =============================================================================
@@ -75,7 +82,9 @@ interface PluginState {
 // Plugin Entry Point
 // =============================================================================
 
-const VisionPlugin: Plugin = async ({ client, directory }) => {
+// V1 plugin factory. OpenCode 1.18.x invokes the `server` member of the
+// default export object with the plugin input.
+const visionServer: Plugin = async ({ client, directory }) => {
   // Initialize state
   const state: PluginState = {
     daemonHealthy: false,
@@ -294,5 +303,212 @@ async function resolveInitPath(directory: string, explicitPath?: string): Promis
   }
   return resolve(directory, matches[0] ?? INIT_CONFIG_CANDIDATES[0])
 }
+
+// =============================================================================
+// V2 Setup
+// =============================================================================
+//
+// OpenCode V2 loads the default export object's `setup(context)` instead of
+// the V1 factory. The plugin context is itself the client: event injection
+// goes through ctx.event.subscribe(), the compaction health check through
+// ctx.session.hook("compaction"), tools through ctx.tool.transform with JSON
+// Schema inputs, and mcp control through the ctx.mcp domain.
+
+const VISION_PLUGIN_ID = "vision-plugin"
+
+const visionSetup = async (context: V2Plugin.Context): Promise<V2Plugin.Cleanup> => {
+  // Initialize state (mirrors the V1 factory startup)
+  const state: PluginState = {
+    daemonHealthy: false,
+    lastHealthCheck: 0,
+    healthCheckInProgress: false,
+  }
+
+  // Check daemon health on startup
+  const initialHealth = await checkHealth()
+  state.daemonHealthy = initialHealth.healthy
+  state.lastHealthCheck = Date.now()
+
+  // Code Mode is read once at setup time, matching the V1 factory-time read.
+  // The pairing invariant from the V1 registration applies unchanged: the
+  // `vision` mcp block entry is load-bearing for Code Mode sessions.
+  const codeMode = process.env.OPENCODE_EXPERIMENTAL_CODE_MODE === "true"
+
+  // Session-created daemon health check. The event stream runs for the
+  // lifetime of the host; the loop is detached so setup can return, and the
+  // cleanup flag stops it at the next event. A transport error ends the
+  // stream silently — context injection degrades, tools keep working.
+  const stream = { disposed: false }
+  void (async () => {
+    try {
+      for await (const event of context.event.subscribe()) {
+        if (stream.disposed) break
+        if (event.type !== "session.created") continue
+        const health = await checkHealth()
+        state.daemonHealthy = health.healthy
+        state.lastHealthCheck = Date.now()
+      }
+    } catch {
+      // Event stream ended; nothing to recover into.
+    }
+  })()
+
+  // Compaction hook: debounced daemon health check, then inject the Vision
+  // context as a system part (the V2 form of the V1 output.context push).
+  await context.session.hook("compaction", async (input) => {
+    const now = Date.now()
+    if (now - state.lastHealthCheck > 30000 && !state.healthCheckInProgress) {
+      state.healthCheckInProgress = true
+      try {
+        const health = await checkHealth()
+        state.daemonHealthy = health.healthy
+        state.lastHealthCheck = Date.now()
+      } finally {
+        state.healthCheckInProgress = false
+      }
+    }
+
+    // Read Code Mode at render time so long-lived plugin hosts can follow
+    // environment changes without reloading the module.
+    const injected = renderVisionContext({
+      healthy: state.daemonHealthy,
+      codeMode: process.env.OPENCODE_EXPERIMENTAL_CODE_MODE === "true",
+    })
+
+    input.system.push({ type: "text", text: injected })
+  })
+
+  // Tool registration. The zod schema stays the internal parse layer — the
+  // JSON Schema given to the host only advertises the input shape, and every
+  // execute parses its raw input through zod before running the handler.
+  await context.tool.transform((editor) => {
+    const register = <S extends z.ZodObject>(
+      name: string,
+      description: string,
+      schema: S,
+      run: (args: z.output<S>) => Promise<string>
+    ) => {
+      editor.add({
+        name,
+        description,
+        input: toolInputJsonSchema(schema),
+        execute: async (raw: unknown) => ({ content: await run(schema.parse(raw)) }),
+      })
+    }
+
+    // Daemon-proxy tools — registered ONLY when Code Mode is off. Same
+    // reasoning as the V1 registration: under Code Mode these ten are already
+    // reachable as `tools.vision.*` from the `vision` MCP server, and
+    // plugin-registered schemas get no Code Mode collapse.
+    if (!codeMode) {
+      register(
+        VISION_PLUGIN_TOOL_NAMES.list,
+        "List all registered MCP servers with their current effective status (running/starting/stopped/error)",
+        VisionListArgsSchema,
+        async () => await visionList()
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.add,
+        "Add and optionally start an MCP server from the Vision registry",
+        VisionAddArgsSchema,
+        async (args) => await visionAdd(args)
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.remove,
+        "Stop and remove an MCP server from the active configuration",
+        VisionRemoveArgsSchema,
+        async (args) => await visionRemove(args)
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.restart,
+        "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
+        VisionRestartArgsSchema,
+        async (args) => await visionRestart(args)
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.search,
+        "Search the Vision registry for MCP servers by name, capability tags, or description",
+        VisionSearchArgsSchema,
+        async (args) => await visionSearch(args)
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.init,
+        "Generate OpenCode MCP configuration (opencode.jsonc or another recognized config path) for currently running servers",
+        VisionInitArgsSchema,
+        async (args) => {
+          const path = await resolveInitPath(context.location.directory, args.path)
+          return await visionInit({ ...args, path })
+        }
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.status,
+        "Get Vision daemon status including uptime, memory usage, and server counts",
+        VisionStatusArgsSchema,
+        async () => await visionStatus()
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.guidance,
+        "Get ranked tool-selection guidance for a task or specific server",
+        VisionGuidanceArgsSchema,
+        async (args) => await visionGuidance(args)
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.slotStatus,
+        "Get slot-group routing status and per-slot session details",
+        VisionSlotStatusArgsSchema,
+        async () => await visionSlotStatus()
+      )
+      register(
+        VISION_PLUGIN_TOOL_NAMES.metrics,
+        "Get Vision daemon metrics for sessions, tool calls, errors, and subprocesses",
+        VisionMetricsArgsSchema,
+        async () => await visionMetrics()
+      )
+    }
+
+    // Plugin-local tools — registered in BOTH Code Mode states. They have no
+    // Code Mode catalog equivalent and are the in-band recovery path when the
+    // `vision` MCP server is declared but disconnected.
+    register(
+      VISION_PLUGIN_TOOL_NAMES.mcpConnect,
+      "Use this when you have determined you need an MCP server already declared in the OpenCode config `mcp` block but currently disabled or failed. This is a session-lifetime runtime connection: it edits no config file, does not persist, and ends when the opencode process ends. The registry change takes effect immediately, so tools resolved at call time are usable right away; the list of tools advertised for the current turn was fixed when the turn began, so a newly connected server may not appear there until your next turn. It cannot add or connect a server that is not declared in the `mcp` block.",
+      McpConnectArgsSchema,
+      async (args) => await connectMcpServerV2(context.mcp, args)
+    )
+    register(
+      VISION_PLUGIN_TOOL_NAMES.mcpDisconnect,
+      "Use this when you have determined you no longer need an MCP server that is already declared in the OpenCode config `mcp` block and currently connected. This is a session-lifetime runtime disconnection: it edits no config file, does not persist, and ends when the opencode process ends. The registry change takes effect immediately, so the server's tools stop being callable right away; the list of tools advertised for the current turn was fixed when the turn began, so it may still appear there until your next turn. It cannot remove or change a server declaration, and it cannot manage a server that is not declared in the `mcp` block.",
+      McpDisconnectArgsSchema,
+      async (args) => await disconnectMcpServerV2(context.mcp, args)
+    )
+  })
+
+  return () => {
+    stream.disposed = true
+  }
+}
+
+// =============================================================================
+// Dual Entry
+// =============================================================================
+//
+// One default-exported object serves both loaders:
+// - OpenCode 1.18.x readV1Plugin resolves this object's `server` member and
+//   invokes it with the plugin input (the loader accepts any module value
+//   that is a function or an object carrying `server`).
+// - OpenCode V2 calls `setup(context)` on the same object.
+//
+// This module must keep exactly ONE export (this default object). The V1
+// loader path that iterates module values throws "Plugin export is not a
+// function" for any value that is neither a function nor an object carrying
+// `server`.
+
+const VisionPlugin = {
+  id: VISION_PLUGIN_ID,
+  setup: visionSetup,
+  server: visionServer,
+  // Compile-time guard: the dual entry must satisfy the V2 Plugin contract
+  // while still carrying the V1 factory.
+} satisfies V2Plugin.Plugin & { server: Plugin }
 
 export default VisionPlugin

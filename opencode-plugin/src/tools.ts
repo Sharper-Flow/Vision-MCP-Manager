@@ -59,6 +59,23 @@ export const VisionSlotStatusArgsSchema = z.object({}).describe("Get slot-group 
 export const VisionMetricsArgsSchema = z.object({}).describe("Get Vision daemon metrics")
 
 // =============================================================================
+// V2 JSON Schema Conversion
+// =============================================================================
+
+/**
+ * Convert a tool's zod object schema to the JSON Schema form that V2 tool
+ * registration takes (`ToolEditor.add` accepts JSON Schema input directly).
+ *
+ * `io: "input"` renders `.default()` fields as optional inputs — the caller may
+ * omit them, and the zod parse inside the V2 execute applies the default. The
+ * zod schema stays the internal parse layer; this conversion only produces the
+ * schema the host advertises.
+ */
+export function toolInputJsonSchema(schema: z.ZodObject) {
+  return z.toJSONSchema(schema, { io: "input" })
+}
+
+// =============================================================================
 // Tool Implementations
 // =============================================================================
 

@@ -1,10 +1,10 @@
 // Vision plugin tool-name constants.
 //
 // Data-only sibling module. Kept out of the plugin ENTRY module (index.ts)
-// because the OpenCode 1.18.4+ plugin loader iterates
+// because the OpenCode 1.18.x plugin loader iterates
 // `Object.values(entryModule)` and throws "Plugin export is not a function"
-// for any export that is not a function or `{ server }` object. A plain object
-// export in index.ts trips that check. index.ts and tests import from here.
+// for any export that is neither a function nor an object carrying `server`.
+// index.ts and tests import from here.
 
 export const VISION_DAEMON_TOOL_NAMES = {
   list: "vision_list",

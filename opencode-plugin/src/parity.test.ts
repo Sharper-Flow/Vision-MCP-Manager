@@ -45,7 +45,10 @@ describe("Vision plugin ↔ daemon tool parity", () => {
       // Code Mode is read at factory time, so stub before constructing.
       vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
 
-      const plugin = await VisionPlugin({ client: {} } as Parameters<typeof VisionPlugin>[0])
+      // The dual entry carries the V1 factory on `server`.
+      const plugin = await VisionPlugin.server({
+        client: {},
+      } as unknown as Parameters<(typeof VisionPlugin)["server"]>[0])
       // Read the `tool` record OpenCode actually consumes. No `?? {}` fallback:
       // a missing registration must fail here rather than silently compare an
       // empty list against an empty list.
@@ -67,5 +70,93 @@ describe("Vision plugin ↔ daemon tool parity", () => {
     expect(Object.values(OPENCODE_MCP_TOOL_NAMES).some((name) => daemonTools.includes(name))).toBe(
       false
     )
+  })
+})
+
+// =============================================================================
+// V1 ↔ V2 registration parity
+// =============================================================================
+//
+// The dual entry registers the same surface twice — once as zod-args `tool`
+// hooks for 1.18.x, once as JSON Schema `editor.add` calls for V2. These tests
+// lock the two registrations together so a drift in names or descriptions on
+// either side fails instead of shipping.
+
+interface RecordedV2Tool {
+  name: string
+  description: string
+}
+
+async function registerV2Tools(codeMode: boolean): Promise<Record<string, RecordedV2Tool>> {
+  vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
+
+  const added: Record<string, RecordedV2Tool> = {}
+  const context = {
+    location: { directory: "/tmp/project" },
+    event: {
+      subscribe: () => (async function* () {})(),
+    },
+    session: {
+      hook: async () => ({ dispose: async () => {} }),
+    },
+    tool: {
+      transform: async (callback: (editor: unknown) => void) => {
+        callback({
+          add: (tool: RecordedV2Tool) => {
+            added[tool.name] = tool
+          },
+        })
+        return { dispose: async () => {} }
+      },
+    },
+    mcp: {
+      transform: async () => ({ dispose: async () => {} }),
+      reload: async () => {},
+      list: async () => ({ location: { directory: "/tmp/project" }, data: [] }),
+    },
+  }
+
+  await (VisionPlugin as unknown as { setup: (context: unknown) => Promise<unknown> }).setup(
+    context
+  )
+  return added
+}
+
+async function registerV1Tools(
+  codeMode: boolean
+): Promise<Record<string, { description: string }>> {
+  vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
+
+  const plugin = await VisionPlugin.server({
+    client: {},
+  } as unknown as Parameters<(typeof VisionPlugin)["server"]>[0])
+  return (plugin as unknown as { tool: Record<string, { description: string }> }).tool
+}
+
+describe("V1 ↔ V2 registration parity", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it.each([false, true])(
+    "registers the same tool names in both loaders (Code Mode %s)",
+    async (codeMode) => {
+      const v1 = await registerV1Tools(codeMode)
+      const v2 = await registerV2Tools(codeMode)
+
+      expect(Object.keys(v2).sort()).toEqual(Object.keys(v1).sort())
+    }
+  )
+
+  it("keeps V1 and V2 descriptions identical for every tool", async () => {
+    const v1 = await registerV1Tools(false)
+    const v2 = await registerV2Tools(false)
+
+    for (const [name, definition] of Object.entries(v1)) {
+      expect(v2[name], `${name} missing from V2 registration`).toBeDefined()
+      expect(v2[name].description, `${name} description drifted between loaders`).toBe(
+        definition.description
+      )
+    }
   })
 })
