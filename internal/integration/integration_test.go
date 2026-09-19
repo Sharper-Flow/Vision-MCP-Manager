@@ -45,7 +45,11 @@ func TestHotReload(t *testing.T) {
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "servers.yaml")
 
-	initialConfig := `
+	// Ports are picked at runtime from Vision's MCP range so the fixtures
+	// never collide with a live daemon on this host.
+	hotReloadPorts := freeVisionPorts(t, 3)
+
+	initialConfig := fmt.Sprintf(`
 supervision:
   shutdown_timeout: 5s
   restart_delay: 100ms
@@ -55,17 +59,17 @@ servers:
   server-a:
     command: node
     args: ["-e", "const rl=require('readline').createInterface({input:process.stdin});rl.on('line',l=>{const r=JSON.parse(l);console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'server-a',version:'1.0.0'}}}))});"]
-    port: 6290
+    port: %d
     autostart: true
-`
+`, hotReloadPorts[0])
 	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
 		t.Fatalf("failed to write initial config: %v", err)
 	}
 
-	// Create daemon (use port 16299 for management API to avoid conflicts with MCPM on 6275)
+	// Create daemon (management API on a test-only port, away from MCPM on 6275)
 	d, err := daemon.New(daemon.Config{
 		ConfigPath:     configPath,
-		ManagementPort: 16299, // Test-only port, outside Vision's 6276-6300 range
+		ManagementPort: 16299, // Test-only management port, outside Vision's MCP server range
 		Logger:         logger,
 	})
 	if err != nil {
@@ -99,7 +103,7 @@ servers:
 	}
 
 	// Modify config: remove server-a, add server-b and server-c
-	newConfig := `
+	newConfig := fmt.Sprintf(`
 supervision:
   shutdown_timeout: 5s
   restart_delay: 100ms
@@ -109,14 +113,14 @@ servers:
   server-b:
     command: node
     args: ["-e", "const rl=require('readline').createInterface({input:process.stdin});rl.on('line',l=>{const r=JSON.parse(l);console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'server-b',version:'1.0.0'}}}))});"]
-    port: 6291
+    port: %d
     autostart: true
   server-c:
     command: node
     args: ["-e", "const rl=require('readline').createInterface({input:process.stdin});rl.on('line',l=>{const r=JSON.parse(l);console.log(JSON.stringify({jsonrpc:'2.0',id:r.id,result:{protocolVersion:'2024-11-05',capabilities:{},serverInfo:{name:'server-c',version:'1.0.0'}}}))});"]
-    port: 6292
+    port: %d
     autostart: true
-`
+`, hotReloadPorts[1], hotReloadPorts[2])
 	if err := os.WriteFile(configPath, []byte(newConfig), 0644); err != nil {
 		t.Fatalf("failed to write new config: %v", err)
 	}
@@ -187,6 +191,10 @@ func TestDaemonLifecycle(t *testing.T) {
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "servers.yaml")
 
+	// Ports are picked at runtime from Vision's MCP range so the fixtures
+	// never collide with a live daemon on this host.
+	lifecyclePorts := freeVisionPorts(t, 2)
+
 	// Initial config: one echo server
 	initialConfig := fmt.Sprintf(`
 supervision:
@@ -198,10 +206,10 @@ servers:
   echo-a:
     command: node
     args: ["-e", %q]
-    port: 6293
+    port: %d
     autostart: true
     max_sessions: 10
-`, echoMCPServerInlineJS)
+`, echoMCPServerInlineJS, lifecyclePorts[0])
 
 	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -252,8 +260,9 @@ servers:
 		Version: "1.0.0",
 	}, nil)
 
+	echoAEndpoint := fmt.Sprintf("http://127.0.0.1:%d/mcp", lifecyclePorts[0])
 	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: "http://127.0.0.1:6293/mcp",
+		Endpoint: echoAEndpoint,
 	}, nil)
 	if err != nil {
 		t.Fatalf("client.Connect to echo-a proxy failed: %v", err)
@@ -298,16 +307,16 @@ servers:
   echo-a:
     command: node
     args: ["-e", %q]
-    port: 6293
+    port: %d
     autostart: true
     max_sessions: 10
   echo-b:
     command: node
     args: ["-e", %q]
-    port: 6294
+    port: %d
     autostart: true
     max_sessions: 10
-`, echoMCPServerInlineJS, echoMCPServerInlineJS)
+`, echoMCPServerInlineJS, lifecyclePorts[0], echoMCPServerInlineJS, lifecyclePorts[1])
 
 	if err := os.WriteFile(configPath, []byte(reloadConfig), 0644); err != nil {
 		t.Fatalf("failed to write reload config: %v", err)
@@ -322,7 +331,7 @@ servers:
 
 	// Verify echo-b is now accessible
 	sess2, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: "http://127.0.0.1:6294/mcp",
+		Endpoint: fmt.Sprintf("http://127.0.0.1:%d/mcp", lifecyclePorts[1]),
 	}, nil)
 	if err != nil {
 		t.Fatalf("client.Connect to echo-b proxy failed: %v", err)
@@ -345,7 +354,7 @@ servers:
 
 	// Verify echo-a proxy still works after reload
 	sess3, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint: "http://127.0.0.1:6293/mcp",
+		Endpoint: echoAEndpoint,
 	}, nil)
 	if err != nil {
 		t.Fatalf("client.Connect to echo-a after reload failed: %v", err)
@@ -377,9 +386,10 @@ servers:
 	t.Log("daemon lifecycle test passed!")
 }
 
-// TestBackwardCompatHealth verifies that the /health endpoint on per-server
-// proxy ports and the daemon Status() API remain backward-compatible after
-// the Streamable HTTP migration.
+// TestBackwardCompatHealth verifies the /health endpoint on per-server proxy
+// ports and the daemon Status() API. Per rq-mcpstr05.2, health is probe-backed:
+// without probe evidence the endpoint answers 503 unhealthy/no_probe_evidence
+// rather than a healthy 200.
 func TestBackwardCompatHealth(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -389,6 +399,10 @@ func TestBackwardCompatHealth(t *testing.T) {
 
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "servers.yaml")
+
+	// Ports are picked at runtime from Vision's MCP range so the fixtures
+	// never collide with a live daemon on this host.
+	healthPorts := freeVisionPorts(t, 1)
 
 	initialConfig := fmt.Sprintf(`
 supervision:
@@ -400,10 +414,10 @@ servers:
   health-check-server:
     command: node
     args: ["-e", %q]
-    port: 6295
+    port: %d
     autostart: true
     max_sessions: 5
-`, echoMCPServerInlineJS)
+`, echoMCPServerInlineJS, healthPorts[0])
 
 	if err := os.WriteFile(configPath, []byte(initialConfig), 0644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -446,15 +460,19 @@ servers:
 	}
 
 	// === Verify per-server /health endpoint ===
-	resp, err := http.Get("http://127.0.0.1:6295/health")
+	// rq-mcpstr05.2: health is probe-backed. The fixture never opens an MCP
+	// session, so no probe evidence exists and the endpoint must answer 503
+	// unhealthy/no_probe_evidence rather than a healthy 200.
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", healthPorts[0])
+	resp, err := http.Get(healthURL)
 	if err != nil {
 		t.Fatalf("GET /health on server port failed: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("GET /health: expected 200, got %d: %s", resp.StatusCode, body)
+		t.Fatalf("GET /health: expected 503 no_probe_evidence, got %d: %s", resp.StatusCode, body)
 	}
 
 	// Verify response is valid JSON with expected structure
@@ -468,9 +486,14 @@ servers:
 		t.Errorf("expected server=health-check-server, got %v", healthResp["server"])
 	}
 
-	// Check status
-	if st, ok := healthResp["status"].(string); !ok || st != "ok" {
-		t.Errorf("expected status=ok, got %v", healthResp["status"])
+	// Check status: absence of probe evidence is not health
+	if st, ok := healthResp["status"].(string); !ok || st != "unhealthy" {
+		t.Errorf("expected status=unhealthy, got %v", healthResp["status"])
+	}
+
+	// Check reason
+	if reason, ok := healthResp["reason"].(string); !ok || reason != "no_probe_evidence" {
+		t.Errorf("expected reason=no_probe_evidence, got %v", healthResp["reason"])
 	}
 
 	t.Logf("health response: %+v", healthResp)
@@ -490,7 +513,7 @@ servers:
 	}
 
 	// /health should no longer be reachable
-	_, err = http.Get("http://127.0.0.1:6295/health")
+	_, err = http.Get(healthURL)
 	if err == nil {
 		t.Error("expected connection refused after daemon stop")
 	}
@@ -513,6 +536,10 @@ func TestDaemon_NoGenerationGrowth(t *testing.T) {
 	configDir := t.TempDir()
 	configPath := filepath.Join(configDir, "servers.yaml")
 
+	// Ports are picked at runtime from Vision's MCP range so the fixtures
+	// never collide with a live daemon on this host.
+	genPorts := freeVisionPorts(t, 3)
+
 	// Config with two stdio servers (no HTTP/SSE)
 	configContent := fmt.Sprintf(`
 supervision:
@@ -524,16 +551,16 @@ servers:
   stdio-echo-a:
     command: node
     args: ["-e", %q]
-    port: 6297
+    port: %d
     autostart: true
     max_sessions: 5
   stdio-echo-b:
     command: node
     args: ["-e", %q]
-    port: 6298
+    port: %d
     autostart: true
     max_sessions: 5
-`, echoMCPServerInlineJS, echoMCPServerInlineJS)
+`, echoMCPServerInlineJS, genPorts[0], echoMCPServerInlineJS, genPorts[1])
 
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -578,22 +605,22 @@ servers:
   stdio-echo-a:
     command: node
     args: ["-e", %q]
-    port: 6297
+    port: %d
     autostart: true
     max_sessions: 5
   stdio-echo-b:
     command: node
     args: ["-e", %q]
-    port: 6298
+    port: %d
     autostart: true
     max_sessions: 5
   stdio-echo-c:
     command: node
     args: ["-e", %q]
-    port: 6299
+    port: %d
     autostart: true
     max_sessions: 5
-`, echoMCPServerInlineJS, echoMCPServerInlineJS, echoMCPServerInlineJS)
+`, echoMCPServerInlineJS, genPorts[0], echoMCPServerInlineJS, genPorts[1], echoMCPServerInlineJS, genPorts[2])
 
 	if err := os.WriteFile(configPath, []byte(reloadContent), 0644); err != nil {
 		t.Fatalf("failed to write reload config: %v", err)

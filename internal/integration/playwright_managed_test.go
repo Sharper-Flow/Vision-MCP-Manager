@@ -352,16 +352,34 @@ func readLifecycle(url string) (lifecycleDetail, error) {
 
 func freeVisionPort(t *testing.T) int {
 	t.Helper()
-	for port := 6276; port <= 6325; port++ {
+	return freeVisionPorts(t, 1)[0]
+}
+
+// freeVisionPorts returns n distinct free ports from Vision's MCP port range.
+// Each candidate stays bound while scanning so the returned ports never
+// collide; the listeners are released only after the full set is chosen, and
+// the test's daemon re-binds each port after the config names it.
+func freeVisionPorts(t *testing.T, n int) []int {
+	t.Helper()
+	ports := make([]int, 0, n)
+	held := make([]net.Listener, 0, n)
+	defer func() {
+		for _, listener := range held {
+			_ = listener.Close()
+		}
+	}()
+	for port := 6276; port <= 6325 && len(ports) < n; port++ {
 		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			continue
 		}
-		_ = listener.Close()
-		return port
+		ports = append(ports, listener.Addr().(*net.TCPAddr).Port)
+		held = append(held, listener)
 	}
-	t.Fatal("no free Vision MCP port in 6276-6325")
-	return 0
+	if len(ports) < n {
+		t.Fatalf("only %d free Vision MCP ports in 6276-6325, need %d", len(ports), n)
+	}
+	return ports
 }
 
 func freeTCPPort(t *testing.T) int {

@@ -40,7 +40,7 @@ func (p *ListenerProbe) Probe(ctx context.Context, target reachability.Target) (
 	if err != nil {
 		return false, fmt.Errorf("listener probe request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("listener probe returned HTTP %d", resp.StatusCode)
