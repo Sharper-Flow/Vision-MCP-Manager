@@ -1,3 +1,9 @@
+## 2026-09-19 (v1.5.1)
+
+### Changed
+
+- assert the vision_status round-trip, not a health verdict (test: plugin)
+
 ## 2026-09-19 (v1.5.0)
 
 ### Added
