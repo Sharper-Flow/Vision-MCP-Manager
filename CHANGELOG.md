@@ -1,3 +1,9 @@
+## 2026-09-19 (v1.5.3)
+
+### Changed
+
+- run the plugin daemon-integration tests instead of skipping them (ci)
+
 ## 2026-09-19 (v1.5.2)
 
 ### Changed
