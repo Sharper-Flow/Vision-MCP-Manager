@@ -70,7 +70,7 @@ func (p *EndToEndProbe) Probe(ctx context.Context, target reachability.Target) (
 		// client error. A redirect/transport error can still leave a session
 		// created upstream, so the defensive DELETE must not be skipped.
 		sessionID = strings.TrimSpace(resp.Header.Get("Mcp-Session-Id"))
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		_, _ = io.Copy(io.Discard, resp.Body)
 	}
 	if requestErr != nil {
@@ -109,7 +109,7 @@ func deleteProbeSession(client *http.Client, endpoint, bearerToken, sessionID st
 	if err != nil {
 		return fmt.Errorf("end-to-end cleanup: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusNotFound && (resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
 		return fmt.Errorf("end-to-end cleanup returned HTTP %d", resp.StatusCode)
