@@ -1,3 +1,48 @@
+## 2026-09-19 (v1.5.0)
+
+### Added
+
+- serve OpenCode 1.18 and V2 loaders from one dual entry
+### Fixed
+
+- check probe close errors and stop fixtures binding live ports
+- reclaim never-active managed-http leases and bound cleanup_uncertain quarantine
+- report the daemon memory figure the README documents
+- omit uptime line under version skew rather than print <nil>
+- truthful uptime after rebase onto effective-status trunk
+- never render Uptime: <nil>; JSON status carries health payload
+- correct http/sse capability semantics found in acceptance review
+- remediate acceptance-review findings
+### Changed
+
+- bootstrap Vision domain registry (docs)
+- checkpoint tk-2e30f5700d26 (chore: adv)
+- checkpoint tk-c58017a690cc (chore: adv)
+- checkpoint tk-c5b272c353db (chore: adv)
+- state stdio requirement in slot-group defaults example (docs: config)
+- checkpoint tk-30b42837a259 (chore: adv)
+- checkpoint tk-c1f930afe208 (chore: adv)
+- checkpoint tk-66fa5c66f801 (chore: adv)
+- checkpoint tk-ebedbd8b4e17 (chore: adv)
+- pin save round-trip and deferred-setting defaults from acceptance review (test: config)
+- checkpoint tk-12faed1da524 (chore: adv)
+- checkpoint tk-4cd093379bc7 (chore: adv)
+- checkpoint tk-e6c20fb72918 (chore: adv)
+- checkpoint tk-10fe193f2338 (chore: adv)
+- checkpoint tk-9c7da108896a (chore: adv)
+- narrow rq-mcpstr04.1 to the admin surface and response shape (docs: spec)
+- remove dead surface, align failure semantics, fix docs (chore: harden)
+- checkpoint tk-5d8c9c0fcd51 (chore: adv)
+- checkpoint tk-e757366c66db (chore: adv)
+- checkpoint tk-8ec70bd6a74a (chore: adv)
+- checkpoint tk-957cce3095a6 (chore: adv)
+- checkpoint tk-63de3121ceb9 (chore: adv)
+- checkpoint tk-c1e5cd330847 (chore: adv)
+- checkpoint tk-426278609c41 (chore: adv)
+- checkpoint tk-cb7b9fb81d18 (chore: adv)
+- checkpoint tk-724dfdf277d0 (chore: adv)
+- checkpoint tk-80a52db41271 (chore: adv)
+
 ## 2026-08-17 (v1.4.7)
 
 ### Changed
