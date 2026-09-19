@@ -52,9 +52,16 @@ jobs:
           cache: npm
           cache-dependency-path: opencode-plugin/package-lock.json
 
+      - name: Start Vision daemon for plugin tests
+        run: bash scripts/ci-daemon.sh start
+
       - name: Check OpenCode plugin
         working-directory: opencode-plugin
         run: npm ci && npm run check
+
+      - name: Stop Vision daemon
+        if: always()
+        run: bash scripts/ci-daemon.sh stop
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5

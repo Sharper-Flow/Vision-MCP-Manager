@@ -6,14 +6,11 @@ import {
   VISION_PLUGIN_TOOL_NAMES,
 } from "./tool-names"
 import { listTools } from "./mcp-client"
+import { daemonReachable } from "./daemon-gate"
 
 vi.mock("./health", () => ({
   checkHealth: vi.fn().mockResolvedValue({ healthy: false }),
 }))
-
-const daemonReachable = await fetch("http://localhost:6275/health")
-  .then((response) => response.ok)
-  .catch(() => false)
 
 describe("Vision plugin ↔ daemon tool parity", () => {
   afterEach(() => {

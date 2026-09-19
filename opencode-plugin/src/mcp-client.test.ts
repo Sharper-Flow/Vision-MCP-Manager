@@ -3,14 +3,12 @@
  *
  * Integration coverage for callTool: it must perform the MCP initialize
  * handshake, then round-trip a tools/call and return the tool's payload.
- * Requires a live daemon on localhost:6275, and is skipped without one.
+ * Requires a live daemon on localhost:6275. Skipped without one locally;
+ * in CI the shared gate in ./daemon-gate refuses instead of skipping.
  */
 import { describe, it, expect } from "vitest"
 import { callTool } from "./mcp-client"
-
-const daemonReachable = await fetch("http://localhost:6275/health")
-  .then((response) => response.ok)
-  .catch(() => false)
+import { daemonReachable } from "./daemon-gate"
 
 describe("MCP client session lifecycle (integration, live daemon required)", () => {
   it.runIf(daemonReachable)(
