@@ -1,0 +1,24 @@
+{
+  "date": "2026-09-19T00:00:00Z",
+  "id": "lesson-gh-delete-branch-strands-concord-worktree",
+  "kind": "lesson",
+  "path": "docs/lessons/2026-09-19-never-pass-delete-branch-to-gh-pr-merge-while-a.md",
+  "scopes": {
+    "domain_ids": [],
+    "mode": "explicit",
+    "product_ids": [
+      "vision"
+    ],
+    "project_ids": [],
+    "tag_ids": []
+  },
+  "sha256": "sha256:b58cd4840aa8e8811320e23e42960c095a5daa92319aa4df8614bb92c6846c58",
+  "status": "published",
+  "summary": "gh pr merge --delete-branch removes the local branch and the git worktree checked out on it. When that is the Concord-managed worktree, every later Concord call fails with 'signed directory/worktree is not a git repository', and work_start cannot bootstrap because its own project-resolve runs from the dead path.",
+  "tags": [
+    "concord",
+    "git",
+    "worktree"
+  ],
+  "title": "Never pass --delete-branch to gh pr merge while a Concord worktree holds that branch"
+}
