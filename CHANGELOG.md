@@ -1,3 +1,9 @@
+## 2026-09-19 (v1.5.2)
+
+### Changed
+
+- publish Concord lesson lesson-gh-delete-branch-strands-concord-worktree (docs)
+
 ## 2026-09-19 (v1.5.1)
 
 ### Changed
