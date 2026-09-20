@@ -1,3 +1,9 @@
+## 2026-09-20 (v1.5.4)
+
+### Changed
+
+- hide the build agent from Concord sessions (#20) (chore: config)
+
 ## 2026-09-19 (v1.5.3)
 
 ### Changed
