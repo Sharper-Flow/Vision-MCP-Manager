@@ -169,7 +169,7 @@ var ungovernedSettings = map[SettingKey]string{
 	"stateful":       "process-per-session toggle; managed-http rejects it explicitly at validation",
 
 	// Session lifecycle read by every transport's session or lease manager.
-	"session_timeout": "honored everywhere; on managed-http it is the setting that supersedes idle_reap_timeout",
+	"session_timeout": "honored by every session manager; on managed-http it governs lease inactivity and supersedes idle_reap_timeout",
 	"max_sessions":    "honored everywhere, including the managed-http lease admission limit",
 
 	// Descriptive metadata, never interpreted.

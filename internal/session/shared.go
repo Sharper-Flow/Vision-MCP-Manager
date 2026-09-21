@@ -33,6 +33,14 @@ type SharedSessionManager struct {
 	refMu            sync.Mutex
 	refCount         int
 	upstreamSessions map[string]struct{}
+	sessions         map[string]*sharedSession
+	onSessionExpired func(sessionID string)
+	reaperCancel     context.CancelFunc
+
+	// sessionTimeout expires an upstream session after application inactivity.
+	// It is separate from idleTimeout, which reaps the shared subprocess after
+	// the last upstream session has been removed.
+	sessionTimeout time.Duration
 
 	// Idle reap: when refCount drops to 0, start idleTimer. On expiry,
 	// tear down the downstream subprocess. Cancelled by GetOrCreateSession.
@@ -54,6 +62,12 @@ type SharedSessionManager struct {
 	subscribers map[string]func(*mcp.ClientSession)
 }
 
+type sharedSession struct {
+	lastActivity time.Time
+	inFlight     int
+	expiring     bool
+}
+
 // NewSharedSessionManager creates a new shared session manager.
 // idleTimeout controls the idle reap behavior: when refCount drops to 0, the
 // downstream subprocess is torn down after this duration. 0 disables idle reaping.
@@ -66,8 +80,10 @@ func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger
 		config:           cfg,
 		logger:           logger.With(slog.String("server", serverName)),
 		upstreamSessions: make(map[string]struct{}),
+		sessions:         make(map[string]*sharedSession),
 		subscribers:      make(map[string]func(*mcp.ClientSession)),
 		idleTimeout:      idleTimeout,
+		sessionTimeout:   time.Duration(cfg.SessionTimeout),
 		metrics:          m,
 	}
 }
@@ -100,6 +116,7 @@ func (sm *SharedSessionManager) GetOrCreateSession(ctx context.Context, sessionI
 			return nil, fmt.Errorf("%w: limit %d", ErrMaxSessions, sm.config.MaxSessions)
 		}
 		sm.upstreamSessions[sessionID] = struct{}{}
+		sm.sessions[sessionID] = &sharedSession{lastActivity: time.Now()}
 		sm.refCount++
 		newSession = true
 	}
@@ -121,6 +138,7 @@ func (sm *SharedSessionManager) GetOrCreateSession(ctx context.Context, sessionI
 		// Undo refcount increment on spawn failure to prevent leak
 		sm.refMu.Lock()
 		delete(sm.upstreamSessions, sessionID)
+		delete(sm.sessions, sessionID)
 		sm.refCount--
 		sm.refMu.Unlock()
 	}
@@ -260,6 +278,7 @@ func (sm *SharedSessionManager) RemoveSession(sessionID string) error {
 	}
 
 	delete(sm.upstreamSessions, sessionID)
+	delete(sm.sessions, sessionID)
 	sm.refCount--
 
 	// Start idle reap timer when refCount reaches 0
@@ -276,6 +295,116 @@ func (sm *SharedSessionManager) RemoveSession(sessionID string) error {
 	}
 
 	return nil
+}
+
+// SetOnSessionExpired registers the callback used when a shared upstream
+// session exceeds session_timeout. The callback owns proxy-session cleanup.
+func (sm *SharedSessionManager) SetOnSessionExpired(fn func(sessionID string)) {
+	sm.refMu.Lock()
+	sm.onSessionExpired = fn
+	sm.refMu.Unlock()
+}
+
+// TouchSession records valid application activity for one upstream session.
+// Protocol pings, notifications, responses, and GET/SSE requests do not call
+// this method.
+func (sm *SharedSessionManager) TouchSession(sessionID string) {
+	sm.refMu.Lock()
+	defer sm.refMu.Unlock()
+	if tracked := sm.sessions[sessionID]; tracked != nil && !tracked.expiring {
+		tracked.lastActivity = time.Now()
+	}
+}
+
+// BeginRequest marks an application request as in flight until the returned
+// release function runs. Idle reaping never removes such a session.
+func (sm *SharedSessionManager) BeginRequest(sessionID string) func() {
+	sm.refMu.Lock()
+	tracked := sm.sessions[sessionID]
+	if tracked == nil || tracked.expiring {
+		sm.refMu.Unlock()
+		return func() {}
+	}
+	tracked.inFlight++
+	sm.refMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			sm.refMu.Lock()
+			if tracked := sm.sessions[sessionID]; tracked != nil && tracked.inFlight > 0 {
+				tracked.inFlight--
+			}
+			sm.refMu.Unlock()
+		})
+	}
+}
+
+// StartReaper starts the shared upstream-session idle reaper.
+func (sm *SharedSessionManager) StartReaper(ctx context.Context, checkInterval time.Duration) {
+	if sm.sessionTimeout <= 0 {
+		return
+	}
+	derivedInterval := checkInterval <= 0
+	if checkInterval <= 0 {
+		checkInterval = sm.sessionTimeout / 2
+	}
+	if derivedInterval && checkInterval < time.Second {
+		checkInterval = time.Second
+	}
+	if checkInterval > 30*time.Second {
+		checkInterval = 30 * time.Second
+	}
+
+	reaperCtx, cancel := context.WithCancel(ctx)
+	sm.refMu.Lock()
+	if sm.reaperCancel != nil {
+		sm.reaperCancel()
+	}
+	sm.reaperCancel = cancel
+	sm.refMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(checkInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reaperCtx.Done():
+				return
+			case <-ticker.C:
+				sm.reapExpiredSessions()
+			}
+		}
+	}()
+}
+
+func (sm *SharedSessionManager) reapExpiredSessions() {
+	now := time.Now()
+	var expired []string
+
+	sm.refMu.Lock()
+	for sessionID, tracked := range sm.sessions {
+		if tracked == nil || tracked.expiring {
+			continue
+		}
+		if tracked.inFlight != 0 {
+			continue
+		}
+		if now.Sub(tracked.lastActivity) > sm.sessionTimeout {
+			tracked.expiring = true
+			expired = append(expired, sessionID)
+		}
+	}
+	callback := sm.onSessionExpired
+	sm.refMu.Unlock()
+
+	for _, sessionID := range expired {
+		if callback != nil {
+			callback(sessionID)
+			continue
+		}
+		_ = sm.RemoveSession(sessionID)
+	}
 }
 
 // isClosedUnsafe reports whether the manager is closed. Must be called with refMu held.
@@ -360,11 +489,16 @@ func (sm *SharedSessionManager) CloseAll() {
 
 	// Cancel idle timer and clear upstream sessions
 	sm.refMu.Lock()
+	if sm.reaperCancel != nil {
+		sm.reaperCancel()
+		sm.reaperCancel = nil
+	}
 	if sm.idleTimer != nil {
 		sm.idleTimer.Stop()
 		sm.idleTimer = nil
 	}
 	sm.upstreamSessions = make(map[string]struct{})
+	sm.sessions = make(map[string]*sharedSession)
 	sm.refCount = 0
 	sm.refMu.Unlock()
 

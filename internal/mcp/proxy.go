@@ -299,10 +299,8 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 		)
 	}
 
-	// Register a callback so that any removal path (reaper, RemoveSession,
-	// CloseAll) triggers closeDownstream on the proxy session, setting the
-	// closed flag before the SDK connection is torn down.
-	// SharedManager handles its own lifecycle; no callback needed.
+	// Register callbacks so that manager removals set the proxy closed flag
+	// before the SDK connection is torn down.
 	if cfg.SessionManager != nil {
 		cfg.SessionManager.SetOnSessionRemoved(func(sessionID string) {
 			idx.mu.RLock()
@@ -319,6 +317,20 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			idx.mu.RUnlock()
 			if ps != nil {
 				ps.closeDownstream("session removed by manager")
+			}
+		})
+	}
+	if cfg.SharedManager != nil {
+		cfg.SharedManager.SetOnSessionExpired(func(sessionID string) {
+			idx.mu.RLock()
+			ps := idx.byDownstream[sessionID]
+			idx.mu.RUnlock()
+			if ps != nil {
+				ps.closeDownstream("idle_timeout")
+			} else {
+				// The upstream initialization callback can race with the reaper.
+				// Release the manager lease even when no proxy session is indexed.
+				_ = cfg.SharedManager.RemoveSession(sessionID)
 			}
 		})
 	}
@@ -343,11 +355,16 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 					ps.SetReachabilityStore(getReachabilityStore())
 					idx.mu.Lock()
 					idx.byUpstream[upstreamSessionID] = ps
+					idx.byDownstream[ps.sessionID] = ps
 					idx.mu.Unlock()
 				},
 				func(upstreamSessionID string) {
 					idx.mu.Lock()
+					ps := idx.byUpstream[upstreamSessionID]
 					delete(idx.byUpstream, upstreamSessionID)
+					if ps != nil {
+						delete(idx.byDownstream, ps.sessionID)
+					}
 					idx.mu.Unlock()
 				},
 			)
@@ -478,11 +495,16 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 		sessionHeader := r.Header.Get("Mcp-Session-Id")
 
 		if sessionHeader != "" {
+			applicationActivity := isApplicationActivityRequest(r)
 			idx.mu.RLock()
 			ps := idx.byUpstream[sessionHeader]
 			idx.mu.RUnlock()
-			if ps != nil {
+			if ps != nil && applicationActivity {
 				ps.touch()
+				if ps.shared && ps.sharedMgr != nil {
+					release := ps.sharedMgr.BeginRequest(ps.sessionID)
+					defer release()
+				}
 			}
 		}
 
@@ -548,6 +570,18 @@ func isInitializeRequest(r *http.Request) bool {
 		return false
 	}
 	return payload.Method == "initialize"
+}
+
+func isApplicationActivityRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost || r.Body == nil {
+		return false
+	}
+	body, err := readAndRestoreRequestBody(r)
+	if err != nil {
+		return false
+	}
+	active, err := ClassifyApplicationActivity(body)
+	return err == nil && active
 }
 
 // proxySession holds the state for a single proxied session, used to relay
@@ -1051,7 +1085,6 @@ func (ps *proxySession) handleProgress(ctx context.Context, params *mcp.Progress
 // If the downstream is unavailable (reaped, crashed), it attempts a single respawn before failing.
 func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		ps.touch()
 		ps.logger.Debug("proxying tool call",
 			slog.String("tool", toolName),
 		)
@@ -1415,8 +1448,11 @@ func (ps *proxySession) touch() {
 	if ps == nil {
 		return
 	}
-	// In shared mode, there is no per-session timeout to touch.
+	// Shared mode tracks activity on the upstream session record.
 	if ps.shared {
+		if ps.sharedMgr != nil {
+			ps.sharedMgr.TouchSession(ps.sessionID)
+		}
 		return
 	}
 	if ps.mgr == nil {

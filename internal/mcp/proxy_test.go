@@ -240,6 +240,51 @@ func TestNewProxyHandler_PanicsWhenSelectorAndSessionManagerBothNil(t *testing.T
 	_ = NewProxyHandler(ProxyConfig{ServerName: "both-nil", Logger: testLogger(t)})
 }
 
+func TestIsApplicationActivityRequestGatesProtocolTraffic(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		body   string
+		want   bool
+	}{
+		{
+			name:   "application request",
+			method: http.MethodPost,
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+			want:   true,
+		},
+		{
+			name:   "ping",
+			method: http.MethodPost,
+			body:   `{"jsonrpc":"2.0","id":1,"method":"ping"}`,
+		},
+		{
+			name:   "notification",
+			method: http.MethodPost,
+			body:   `{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		},
+		{
+			name:   "get stream",
+			method: http.MethodGet,
+			body:   `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		},
+		{
+			name:   "invalid envelope",
+			method: http.MethodPost,
+			body:   `not-json`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, "/mcp", strings.NewReader(tt.body))
+			if got := isApplicationActivityRequest(req); got != tt.want {
+				t.Fatalf("isApplicationActivityRequest() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProxyHandler_UsesSelectorAdmissionStatusForInitialize(t *testing.T) {
 	selector := &testSelector{atCapacity: true, current: 4, max: 4}
 	handler := NewProxyHandler(ProxyConfig{

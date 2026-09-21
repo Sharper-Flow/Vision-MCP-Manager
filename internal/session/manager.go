@@ -225,8 +225,8 @@ func (m *Manager) Sessions() []string {
 	return ids
 }
 
-// TouchSession updates the LastActivity timestamp for the given session.
-// This should be called on each tool call or notification to keep the session alive.
+// TouchSession updates the LastActivity timestamp for valid application
+// activity on the given session.
 func (m *Manager) TouchSession(sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
