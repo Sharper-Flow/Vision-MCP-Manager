@@ -430,6 +430,49 @@ func TestSharedManager_AdmissionControl(t *testing.T) {
 	}
 }
 
+func TestSharedManager_ApplicationIdleReaperHonorsActivityAndInflight(t *testing.T) {
+	cfg := &config.ServerConfig{SessionTimeout: config.Duration(100 * time.Millisecond)}
+	sm := NewSharedSessionManager("activity-reaper", cfg, testLogger(t), 0, nil)
+	defer sm.CloseAll()
+
+	expired := make(chan string, 1)
+	sm.SetOnSessionExpired(func(sessionID string) { expired <- sessionID })
+	sm.refMu.Lock()
+	sm.upstreamSessions["session-1"] = struct{}{}
+	sm.sessions["session-1"] = &sharedSession{lastActivity: time.Now().Add(-time.Second)}
+	sm.refCount = 1
+	sm.refMu.Unlock()
+
+	sm.TouchSession("session-1")
+	sm.reapExpiredSessions()
+	select {
+	case sessionID := <-expired:
+		t.Fatalf("activity caused session %q to expire", sessionID)
+	default:
+	}
+
+	sm.refMu.Lock()
+	sm.sessions["session-1"].lastActivity = time.Now().Add(-time.Second)
+	sm.refMu.Unlock()
+	release := sm.BeginRequest("session-1")
+	sm.reapExpiredSessions()
+	select {
+	case sessionID := <-expired:
+		t.Fatalf("in-flight session %q expired", sessionID)
+	default:
+	}
+	release()
+	sm.reapExpiredSessions()
+	select {
+	case sessionID := <-expired:
+		if sessionID != "session-1" {
+			t.Fatalf("expired session = %q, want session-1", sessionID)
+		}
+	default:
+		t.Fatal("idle session did not expire after in-flight request completed")
+	}
+}
+
 // TestSharedManager_CloseAll terminates the shared subprocess and clears state.
 func TestSharedManager_CloseAll(t *testing.T) {
 	skipIfNoNode(t)

@@ -142,7 +142,7 @@ servers:
     env:
       CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
     autostart: true
-    session_timeout: 30m   # How long idle sessions live (default: 5m)
+    session_timeout: 30m   # How long idle sessions live (default: 30m)
 
   # Kagi - Web search and summarization
   kagi:
@@ -161,7 +161,7 @@ servers:
     autostart: true
 ```
 
-> **Session lifecycle:** Idle sessions are reaped after `session_timeout` (default 5m). If a tool call arrives after the session is reaped, Vision automatically respawns a fresh subprocess — no error is returned to the agent.
+> **Session lifecycle:** Idle sessions are reaped after `session_timeout` (default 30m). For shared-mode stdio, only structurally valid, non-`ping` JSON-RPC requests refresh activity, and an expired upstream session requires a new initialize request. Stateful sessions respawn a fresh subprocess on the next tool call.
 
 > **Availability profiles:** Set `availability_profile: networked` for servers backed by upstream web/API providers. Vision applies stronger timeout, retry, circuit-breaker, cache, and in-flight limit defaults while still keeping per-session downstream isolation by default.
 

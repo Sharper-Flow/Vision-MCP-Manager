@@ -54,11 +54,11 @@ servers:
     # Set 0 to disable automatic restarts while keeping the chosen policy.
     max_restarts: 5
     
-    # Idle session timeout (default: 5m).
-    # When a session is reaped, the next tool call automatically
-    # respawns a fresh subprocess — no error is returned to the agent.
-    # Increase for servers where agents pause between calls (e.g. 30m).
-    session_timeout: 5m
+    # Idle session timeout (default: 30m).
+    # Stateful sessions respawn a fresh subprocess on the next tool call.
+    # Shared-mode sessions require a new initialize request after expiry.
+    # Increase for servers where agents pause between calls.
+    session_timeout: 30m
     
     # Absolute session TTL (default: 0, no limit)
     session_ttl: 1h
@@ -189,12 +189,9 @@ fails closed before publishing the backend as running.
 
 ### Multi-agent / ADV workloads
 
-The default `session_timeout` is five minutes. That is appropriate for short,
-interactive calls, but code-intelligence agents often pause while they plan,
-delegate work, run tests, or wait for another sub-agent. If an idle session is
-reaped during that pause, the next tool call transparently spawns a fresh
-downstream process. No error reaches the agent, but startup and tool discovery
-add latency.
+The default `session_timeout` is 30 minutes. This gives code-intelligence agents
+time to plan, delegate work, run tests, or wait for another sub-agent before an
+idle session is reaped.
 
 When several ADV sub-agents resume together, a short timeout can also create a
 burst of simultaneous respawns. Use a longer timeout for MCP servers that are

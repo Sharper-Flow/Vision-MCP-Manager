@@ -110,7 +110,7 @@ type ServerConfig struct {
 	// AvailabilityProfile selects opinionated resilience defaults for the server.
 	AvailabilityProfile AvailabilityProfile `yaml:"availability_profile,omitempty"`
 
-	// SessionTimeout is how long an idle session lives (for stateful servers).
+	// SessionTimeout is how long an upstream session can remain inactive.
 	SessionTimeout Duration `yaml:"session_timeout,omitempty"`
 
 	// MaxSessions limits concurrent sessions (for stateful servers, 0 = unlimited).
@@ -656,7 +656,7 @@ func (s *ServerConfig) ApplyDefaults() {
 		s.MaxRestarts = &maxRestarts
 	}
 	if s.SessionTimeout == 0 {
-		s.SessionTimeout = Duration(5 * time.Minute)
+		s.SessionTimeout = Duration(30 * time.Minute)
 	}
 	if s.transportHonors(SettingHealthCheckInterval) && s.HealthCheckInterval == 0 {
 		s.HealthCheckInterval = Duration(30 * time.Second)
@@ -706,9 +706,6 @@ func (s *ServerConfig) MaxRestartCount() int {
 func (s *ServerConfig) applyAvailabilityProfileDefaults() {
 	switch s.AvailabilityProfile {
 	case AvailabilityProfileNetworked:
-		if s.SessionTimeout == 0 {
-			s.SessionTimeout = Duration(30 * time.Minute)
-		}
 		if s.transportHonors(SettingHealthCheckInterval) && s.HealthCheckInterval == 0 {
 			s.HealthCheckInterval = Duration(60 * time.Second)
 		}

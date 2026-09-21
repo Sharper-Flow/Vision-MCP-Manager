@@ -887,6 +887,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	proxyCfg.Metrics = srvMetrics
 
 	var closer mcp.SessionCloser
+	var sharedMgr *session.SharedSessionManager
 
 	if srv.Config.Stateful {
 		// Stateful mode: per-session subprocess isolation (existing behavior)
@@ -944,7 +945,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 	} else {
 		// Shared mode: single subprocess shared across all upstream sessions
 		idleTimeout := srv.Config.ResolvedIdleReapTimeout()
-		sharedMgr := session.NewSharedSessionManager(srv.Name, srv.Config, d.logger, idleTimeout, srvMetrics)
+		sharedMgr = session.NewSharedSessionManager(srv.Name, srv.Config, d.logger, idleTimeout, srvMetrics)
 		sharedMgr.StartHealthProbe(d.ctx)
 
 		proxyCfg.SharedManager = sharedMgr
@@ -975,6 +976,9 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		setupErr := fmt.Errorf("failed to add streamable proxy: %w", err)
 		d.recordListenerSetupFailure(srv.Name, setupErr)
 		return setupErr
+	}
+	if sharedMgr != nil {
+		sharedMgr.StartReaper(d.ctx, srv.Config.SessionTimeout.Duration()/2)
 	}
 	d.serverMetricsMu.Lock()
 	d.serverMetrics[srv.Name] = srvMetrics
