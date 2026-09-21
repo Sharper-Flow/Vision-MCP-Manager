@@ -1,3 +1,9 @@
+## 2026-09-21 (v1.5.5)
+
+### Fixed
+
+- enforce session_timeout per upstream session on shared-mode stdio (#21)
+
 ## 2026-09-20 (v1.5.4)
 
 ### Changed
