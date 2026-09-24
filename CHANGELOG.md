@@ -1,3 +1,9 @@
+## 2026-09-24 (v1.5.6)
+
+### Fixed
+
+- close the upstream session when a shared-mode session is reaped (#22)
+
 ## 2026-09-21 (v1.5.5)
 
 ### Fixed
