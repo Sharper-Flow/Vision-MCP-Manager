@@ -1512,10 +1512,28 @@ func (ps *proxySession) closeDownstream(reason string) {
 		// Clean up index maps via the onClosed callback.
 		ps.mu.Lock()
 		upstreamID := ps.upstreamSessionID
+		upstream := ps.upstreamSession
 		onClosed := ps.onClosed
 		ps.mu.Unlock()
 		if onClosed != nil && upstreamID != "" {
 			onClosed(upstreamID)
+		}
+
+		// A shared-mode proxy session never reacquires its lease, so the
+		// upstream session must end with it. Closing the upstream session
+		// removes it from the streamable HTTP handler, which then answers the
+		// session ID with HTTP 404; the MCP transport requires the client to
+		// initialize a new session on 404. Close waits for in-flight upstream
+		// requests, so it runs outside closeMu.
+		if ps.shared && upstream != nil {
+			go func() {
+				if err := upstream.Close(); err != nil {
+					ps.logger.Debug("upstream session close returned error",
+						slog.String("upstream_session_id", upstreamID),
+						slog.String("error", err.Error()),
+					)
+				}
+			}()
 		}
 	})
 }

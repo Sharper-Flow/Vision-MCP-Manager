@@ -197,6 +197,76 @@ func TestSharedSessionTimeout_EndToEndInflightApplicationCallDelaysReap(t *testi
 	}
 }
 
+// postSessionStatus sends one POST on sessionID and returns the HTTP status and body.
+func postSessionStatus(t *testing.T, client *http.Client, endpoint, sessionID, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("create POST request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("session POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read session POST response: %v", err)
+	}
+	return resp.StatusCode, string(data)
+}
+
+// A reaped shared-mode session must be terminated upstream. The MCP
+// streamable HTTP transport requires HTTP 404 for a terminated session ID,
+// which tells the client to initialize a new session. An in-band tool error
+// on a session that can never recover leaves the client stuck.
+func TestSharedSessionTimeout_ReapedSessionReturnsNotFound(t *testing.T) {
+	skipIfNoNode(t)
+	sm, server := newSharedTimeoutTestServer(t, echoMCPServerJS, 300*time.Millisecond)
+	client := server.Client()
+	sessionID := initializeRawSession(t, client, server.URL)
+	sendSessionPost(t, client, server.URL, sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	// Refresh activity after initialization so the reap cannot precede the
+	// proxy session's registration, even when the subprocess spawn is slow.
+	sendSessionPost(t, client, server.URL, sessionID, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for sm.SessionCount() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("shared session was not reaped, count = %d", sm.SessionCount())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	var status int
+	var body string
+	for {
+		status, body = postSessionStatus(t, client, server.URL, sessionID,
+			`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"message":"after-reap"}}}`)
+		if status == http.StatusNotFound || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if status != http.StatusNotFound {
+		t.Fatalf("call on reaped session: status = %d, body = %q; want %d", status, body, http.StatusNotFound)
+	}
+
+	newID := initializeRawSession(t, client, server.URL)
+	if newID == sessionID {
+		t.Fatal("re-initialize reused the terminated session ID")
+	}
+	sendSessionPost(t, client, server.URL, newID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	status, body = postSessionStatus(t, client, server.URL, newID,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"message":"fresh"}}}`)
+	if status != http.StatusOK || !strings.Contains(body, "fresh") {
+		t.Fatalf("call on re-initialized session: status = %d, body = %q", status, body)
+	}
+}
+
 func TestStatefulSessionTimeout_EndToEndPingDoesNotRefresh(t *testing.T) {
 	skipIfNoNode(t)
 	cfg := testServerConfig()

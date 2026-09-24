@@ -105,7 +105,7 @@ Stateful servers (`stateful: true`) give every upstream MCP session a **dedicate
    - Each tool is registered on the upstream `mcp.Server` via `Server.AddTool(tool, handler)` with a proxy handler that forwards `CallTool` to the downstream `ClientSession`
 4. The upstream client sees all downstream tools in its initialize response
 5. Subsequent `tools/call` requests are proxied to the downstream subprocess
-6. On `DELETE /mcp`, disconnect cleanup, or session timeout, Vision removes the upstream session. Stateful cleanup terminates that session's subprocess. Shared-mode cleanup decrements the shared refcount and leaves the downstream subprocess healthy for other sessions. Shared sessions expire after `session_timeout` without valid application activity, and expiry waits for zero in-flight calls.
+6. On `DELETE /mcp`, disconnect cleanup, or session timeout, Vision removes the upstream session. Stateful cleanup terminates that session's subprocess. Shared-mode cleanup decrements the shared refcount, closes the upstream session so later requests on its ID receive `404`, and leaves the downstream subprocess healthy for other sessions. Shared sessions expire after `session_timeout` without valid application activity, and expiry waits for zero in-flight calls.
 
 Shared-mode activity follows the same rule as managed HTTP: only structurally valid, non-`ping` JSON-RPC requests in POST bodies refresh the session. Notifications, responses, GET/SSE requests, and pings do not. The default `session_timeout` is 30 minutes.
 
