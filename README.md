@@ -350,7 +350,7 @@ Admin MCP callers must provide an absolute path.
 | Server keeps crashing | Check logs: `journalctl --user -u vision -f` |
 | Config changes not applied | Run `vision daemon reload` |
 | Port already in use | Check for conflicts: `lsof -i :6276` |
-| "downstream session unavailable" | Session was reaped after idle timeout. Vision auto-respawns on next call. If persistent, increase `session_timeout` in `servers.yaml` |
+| "downstream session unavailable" | The downstream subprocess closed and could not be replaced. A reaped shared-mode session answers `404` instead, and the client initializes a new session. If persistent, check `journalctl --user -u vision` for respawn errors |
 
 ## Documentation
 
