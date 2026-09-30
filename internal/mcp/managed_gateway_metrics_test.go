@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/supervisor"
 )
 
 // failAfterInitTransport succeeds until armed, then fails every RoundTrip.
@@ -60,9 +61,9 @@ func newToolsListRequest(sessionID string) *http.Request {
 	return req
 }
 
-// TestManagedGatewayToolCallIncrementsDaemonToolCalls proves a forwarded
+// TestManagedGatewayToolCallIncrementsDaemonMetrics proves a forwarded
 // tools/call counts once and a successful 2xx forwarding is not an error.
-func TestManagedGatewayToolCallIncrementsDaemonToolCalls(t *testing.T) {
+func TestManagedGatewayToolCallIncrementsDaemonMetrics(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Header.Get("Mcp-Session-Id") == "" {
@@ -189,6 +190,39 @@ func TestManagedGatewayProxyFailureCountsError(t *testing.T) {
 	}
 	if snap.ErrorsTotal != 1 {
 		t.Errorf("errors_total = %d, want 1 for one proxy dispatch failure", snap.ErrorsTotal)
+	}
+}
+
+// TestManagedBackendUnavailableCountsForwardingFailure proves a tools/call
+// refused at backend admission counts one forwarding failure even though no
+// reverse-proxy callback observed it.
+func TestManagedBackendUnavailableCountsForwardingFailure(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Mcp-Session-Id", "metrics-refused")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer backend.Close()
+	dm := metrics.NewDaemonMetrics()
+	gateway := newManagedGatewayWithDaemonMetrics(t, backend.URL+"/mcp", dm, backend.Client().Transport)
+	coordinator := supervisor.NewBackendCoordinator()
+	coordinator.MarkReady()
+	gateway.backend = coordinator
+	sessionID := initializeManagedSession(t, gateway)
+	coordinator.MarkProcessLost()
+
+	resp := httptest.NewRecorder()
+	gateway.ServeHTTP(resp, newToolsCallRequest(sessionID))
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("tools/call after process loss status = %d, want 503", resp.Code)
+	}
+
+	snap := dm.Snapshot()
+	if snap.ToolCallsTotal != 1 {
+		t.Errorf("tool_calls_total = %d, want 1 for the refused tools/call", snap.ToolCallsTotal)
+	}
+	if snap.ErrorsTotal != 1 {
+		t.Errorf("errors_total = %d, want 1 for the backend admission refusal", snap.ErrorsTotal)
 	}
 }
 

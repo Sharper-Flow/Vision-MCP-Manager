@@ -240,6 +240,12 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if state.kind == managedRequestDelete {
 			g.leases.RestoreActive(state.sessionID)
 		}
+		// A tools/call refused at backend admission is a forwarding failure
+		// even though no reverse-proxy callback observed it. Count it once,
+		// matching the stdio path's pre-dispatch unavailable failures.
+		if state.toolsCalls > 0 && g.daemonMetrics != nil {
+			g.daemonMetrics.IncErrors()
+		}
 		writeManagedError(w, http.StatusServiceUnavailable, -32002, "managed MCP backend unavailable")
 		return
 	}

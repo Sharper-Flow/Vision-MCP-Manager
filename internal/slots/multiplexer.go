@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 )
 
@@ -15,14 +16,20 @@ type Entry struct {
 	Index    int
 	Manager  *session.Manager
 	Healthy  func() bool
+
+	// Reporter owns the member server's session gauge. Sessions the group
+	// routes to this member increment this reporter so read-time daemon
+	// derivation counts them.
+	Reporter metrics.ServerMetricsReporter
 }
 
 type slotEntry struct {
-	slotName string
-	index    int
-	mgr      *session.Manager
-	pending  int
-	healthy  func() bool
+	slotName         string
+	index            int
+	mgr              *session.Manager
+	reporter         metrics.ServerMetricsReporter
+	pending          int
+	healthy          func() bool
 	quarantinedUntil time.Time
 }
 
@@ -40,7 +47,7 @@ func NewMultiplexer(groupName string, logger *slog.Logger, entries []Entry) *Mul
 	}
 	slots := make([]*slotEntry, 0, len(entries))
 	for _, entry := range entries {
-		slots = append(slots, &slotEntry{slotName: entry.SlotName, index: entry.Index, mgr: entry.Manager, healthy: entry.Healthy})
+		slots = append(slots, &slotEntry{slotName: entry.SlotName, index: entry.Index, mgr: entry.Manager, reporter: entry.Reporter, healthy: entry.Healthy})
 	}
 	sort.Slice(slots, func(i, j int) bool {
 		return slots[i].index < slots[j].index
@@ -69,14 +76,29 @@ func (m *Multiplexer) ReplaceEntries(entries []Entry) {
 		if existing != nil {
 			existing.index = entry.Index
 			existing.mgr = entry.Manager
+			existing.reporter = entry.Reporter
 			existing.healthy = entry.Healthy
 			updated = append(updated, existing)
 			continue
 		}
-		updated = append(updated, &slotEntry{slotName: entry.SlotName, index: entry.Index, mgr: entry.Manager, healthy: entry.Healthy})
+		updated = append(updated, &slotEntry{slotName: entry.SlotName, index: entry.Index, mgr: entry.Manager, reporter: entry.Reporter, healthy: entry.Healthy})
 	}
 	sort.Slice(updated, func(i, j int) bool { return updated[i].index < updated[j].index })
 	m.slots = updated
+}
+
+// ReporterFor resolves the per-server metrics reporter owning the given
+// member manager's sessions, so the proxy can feed group-created sessions
+// into their existing owner.
+func (m *Multiplexer) ReporterFor(mgr *session.Manager) metrics.ServerMetricsReporter {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, slot := range m.slots {
+		if slot != nil && slot.mgr == mgr {
+			return slot.reporter
+		}
+	}
+	return nil
 }
 
 func (m *Multiplexer) SelectForNewSession(_ context.Context, upstreamSessionID string) (*session.Manager, error) {

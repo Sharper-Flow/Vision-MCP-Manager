@@ -384,6 +384,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 
 		// --- Stateful mode (fixed manager or selector) ---
 		mgr := cfg.SessionManager
+		srvMetrics := cfg.Metrics
 		pendingKey := ""
 		if cfg.Selector != nil {
 			pendingKey = fmt.Sprintf("selector-%s-%d", cfg.ServerName, nextSessionID())
@@ -395,6 +396,13 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				return nil
 			}
 			mgr = selectedMgr
+			// Feed the group-created session into its member server's metrics
+			// owner so read-time session derivation sees group sessions.
+			if resolver, ok := cfg.Selector.(SlotMetricsResolver); ok {
+				if reporter := resolver.ReporterFor(mgr); reporter != nil {
+					srvMetrics = reporter
+				}
+			}
 		}
 
 		srv, err := newPerSessionServer(
@@ -409,7 +417,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			cfg.RequestTimeout,
 			cfg.RetryConfig,
 			cfg.CircuitBreakerConfig,
-			cfg.Metrics,
+			srvMetrics,
 			cfg.DaemonMetrics,
 			getReachabilityStore,
 			func(upstreamSessionID string, ps *proxySession) {
@@ -744,7 +752,10 @@ func newPerSessionServer(
 		Name:    fmt.Sprintf("vision-proxy-%s", serverName),
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{
-		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}},
+		// Logging preserves the SDK default that a non-nil Capabilities value
+		// otherwise suppresses (go-sdk capabilities() clones user values
+		// without defaults).
+		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}, Logging: &mcp.LoggingCapabilities{}},
 		// Capture the ServerSession when the upstream client completes initialization.
 		InitializedHandler: func(_ context.Context, req *mcp.InitializedRequest) {
 			ps.mu.Lock()
@@ -879,7 +890,10 @@ func newSharedModeServer(
 		Name:    fmt.Sprintf("vision-proxy-%s", serverName),
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{
-		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}},
+		// Logging preserves the SDK default that a non-nil Capabilities value
+		// otherwise suppresses (go-sdk capabilities() clones user values
+		// without defaults).
+		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}, Logging: &mcp.LoggingCapabilities{}},
 		InitializedHandler: func(_ context.Context, req *mcp.InitializedRequest) {
 			ps.mu.Lock()
 			ps.upstreamSession = req.Session
@@ -1099,6 +1113,11 @@ func (ps *proxySession) handleProgress(ctx context.Context, params *mcp.Progress
 // If the downstream is unavailable (reaped, crashed), it attempts a single respawn before failing.
 func makeProxyToolHandler(ps *proxySession, toolName string) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		// Count at handler entry so every upstream tools/call reports once,
+		// including cache hits and coalesced joins that never dispatch.
+		if ps.daemonMetrics != nil {
+			ps.daemonMetrics.IncToolCalls()
+		}
 		ps.logger.Debug("proxying tool call",
 			slog.String("tool", toolName),
 		)
@@ -1175,10 +1194,6 @@ func (ps *proxySession) getDownstream(ctx context.Context) (*mcp.ClientSession, 
 }
 
 func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToolRequest, toolName string) (*mcp.CallToolResult, error) {
-	if ps.daemonMetrics != nil {
-		ps.daemonMetrics.IncToolCalls()
-	}
-
 	if ps.circuitBreaker != nil && !ps.circuitBreaker.allow() {
 		err := &CircuitOpenError{Server: ps.serverName, RetryIn: ps.circuitBreaker.retryIn()}
 		ps.logger.Warn("circuit breaker open, failing fast",
