@@ -47,6 +47,7 @@ type ManagedHTTPGatewayConfig struct {
 	Backend               ManagedBackendGate
 	OnAmbiguousFailure    func(error)
 	Metrics               ManagedGatewayMetrics
+	DaemonMetrics         *metrics.DaemonMetrics
 	Logger                *slog.Logger
 }
 
@@ -62,6 +63,7 @@ type ManagedHTTPGateway struct {
 	leases             *LeaseManager
 	logger             *slog.Logger
 	metrics            ManagedGatewayMetrics
+	daemonMetrics      *metrics.DaemonMetrics
 	lifecycleMu        sync.Mutex
 }
 
@@ -96,6 +98,7 @@ func NewManagedHTTPGateway(cfg ManagedHTTPGatewayConfig) (*ManagedHTTPGateway, e
 		leases:             NewLeaseManagerWithDisconnectGrace(cfg.MaxSessions, cfg.IdleTimeout, cfg.DisconnectGracePeriod, cfg.Clock),
 		logger:             logger,
 		metrics:            cfg.Metrics,
+		daemonMetrics:      cfg.DaemonMetrics,
 	}, nil
 }
 
@@ -182,10 +185,16 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			state.reservation = reservation
 			state.hasReservation = true
 		} else {
-			activity, err := classifyManagedRequestBody(r)
+			activity, toolsCalls, err := classifyManagedRequestBody(r)
 			if err != nil {
 				writeManagedError(w, http.StatusBadRequest, -32600, "invalid JSON-RPC request")
 				return
+			}
+			state.toolsCalls = toolsCalls
+			if toolsCalls > 0 && g.daemonMetrics != nil {
+				for i := 0; i < toolsCalls; i++ {
+					g.daemonMetrics.IncToolCalls()
+				}
 			}
 			complete, err := g.leases.BeginRequest(sessionID, activity)
 			if err != nil {
@@ -356,6 +365,11 @@ func (g *ManagedHTTPGateway) proxy(state *managedProxyRequest) *httputil.Reverse
 }
 
 func (g *ManagedHTTPGateway) observeResponse(state *managedProxyRequest, resp *http.Response) error {
+	// A non-2xx response to a tools/call is one forwarding failure.
+	// A 200 carrying an application-level tool error (isError result) is not.
+	if state.toolsCalls > 0 && !isSuccessfulStatus(resp.StatusCode) && g.daemonMetrics != nil {
+		g.daemonMetrics.IncErrors()
+	}
 	switch state.kind {
 	case managedRequestInitialize:
 		if !isSuccessfulStatus(resp.StatusCode) {
@@ -390,6 +404,10 @@ func (g *ManagedHTTPGateway) observeResponse(state *managedProxyRequest, resp *h
 }
 
 func (g *ManagedHTTPGateway) observeProxyError(state *managedProxyRequest, err error) {
+	// A proxy-level dispatch failure on tools/call is one forwarding failure.
+	if state.toolsCalls > 0 && g.daemonMetrics != nil {
+		g.daemonMetrics.IncErrors()
+	}
 	switch state.kind {
 	case managedRequestInitialize:
 		// Once RoundTrip begins, Vision cannot prove whether initialize executed.
@@ -475,17 +493,74 @@ type managedProxyRequest struct {
 	sessionID      string
 	reservation    Reservation
 	hasReservation bool
+	toolsCalls     int // number of tools/call requests in this JSON-RPC payload
 }
 
-func classifyManagedRequestBody(r *http.Request) (bool, error) {
+// classifyManagedRequestBody reads and restores the JSON-RPC body once and
+// reports whether it carries application activity plus how many tools/call
+// requests it contains, so daemon-wide tool call counting sees each call.
+func classifyManagedRequestBody(r *http.Request) (bool, int, error) {
 	if r.Body == nil {
-		return false, errors.New("missing JSON-RPC body")
+		return false, 0, errors.New("missing JSON-RPC body")
 	}
 	body, err := readAndRestoreRequestBody(r)
 	if err != nil {
-		return false, err
+		return false, 0, err
 	}
-	return ClassifyApplicationActivity(body)
+	activity, err := ClassifyApplicationActivity(body)
+	if err != nil {
+		return false, 0, err
+	}
+	toolsCalls, err := countManagedToolsCalls(body)
+	if err != nil {
+		return activity, 0, nil
+	}
+	return activity, toolsCalls, nil
+}
+
+// countManagedToolsCalls returns the number of tools/call requests in a
+// JSON-RPC envelope or batch. Malformed members count as zero.
+func countManagedToolsCalls(body []byte) (int, error) {
+	var raw json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return 0, fmt.Errorf("decode JSON-RPC envelope: %w", err)
+	}
+	if len(raw) == 0 {
+		return 0, nil
+	}
+	if raw[0] == '[' {
+		var batch []json.RawMessage
+		if err := json.Unmarshal(raw, &batch); err != nil {
+			return 0, fmt.Errorf("decode JSON-RPC batch: %w", err)
+		}
+		count := 0
+		for _, member := range batch {
+			if isToolsCallMember(member) {
+				count++
+			}
+		}
+		return count, nil
+	}
+	if isToolsCallMember(raw) {
+		return 1, nil
+	}
+	return 0, nil
+}
+
+func isToolsCallMember(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return false
+	}
+	methodRaw, hasMethod := fields["method"]
+	if !hasMethod {
+		return false
+	}
+	var method string
+	if err := json.Unmarshal(methodRaw, &method); err != nil {
+		return false
+	}
+	return method == "tools/call"
 }
 
 func isManagedInitializeRequest(r *http.Request) (bool, error) {

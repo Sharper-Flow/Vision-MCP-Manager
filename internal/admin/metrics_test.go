@@ -12,15 +12,17 @@ import (
 )
 
 // TestToolMetrics_ReturnsCounters verifies vision_metrics returns JSON
-// with sessions_active, tool_calls_total, errors_total, subprocesses_active.
+// with sessions_active, tool_calls_total, errors_total, subprocesses_active,
+// deriving the gauges at read time from the wired providers.
 func TestToolMetrics_ReturnsCounters(t *testing.T) {
 	m := metrics.NewDaemonMetrics()
 	m.IncToolCalls()
 	m.IncToolCalls()
 	m.IncErrors()
-	m.IncSessionsActive()
-	m.IncSubprocessesActive()
-	m.IncSubprocessesActive()
+	m.SetGaugeProviders(
+		func() int64 { return 1 },
+		func() int64 { return 2 },
+	)
 
 	s := &Server{Metrics: m}
 	result, err := s.toolMetrics(context.TODO(), json.RawMessage(`{}`))
@@ -77,17 +79,56 @@ func TestToolMetrics_NilMetrics(t *testing.T) {
 	}
 }
 
+// TestToolMetrics_DerivesGaugesFromServerMetricsOwners mirrors the daemon
+// wiring: sessions_active derives at read time from per-server
+// ServerMetrics owners, so vision_metrics tracks live sessions.
+func TestToolMetrics_DerivesGaugesFromServerMetricsOwners(t *testing.T) {
+	owner := metrics.NewServerMetrics()
+	owner.IncActiveSessions()
+	m := metrics.NewDaemonMetrics()
+	m.SetGaugeProviders(
+		func() int64 { return owner.Snapshot().ActiveSessions },
+		func() int64 { return 0 },
+	)
+	s := &Server{Metrics: m}
+
+	result, err := s.toolMetrics(context.TODO(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("toolMetrics error: %v", err)
+	}
+	var resp MetricsResponse
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.SessionsActive != 1 {
+		t.Errorf("sessions_active = %d, want 1 from the owner snapshot", resp.SessionsActive)
+	}
+
+	owner.IncActiveSessions()
+	result, err = s.toolMetrics(context.TODO(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("toolMetrics error after owner change: %v", err)
+	}
+	if err := json.Unmarshal([]byte(result.Content[0].Text), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.SessionsActive != 2 {
+		t.Errorf("sessions_active after owner increment = %d, want 2 (read-time derivation)", resp.SessionsActive)
+	}
+}
+
 // TestHandleMetrics_ReturnsPrometheusText verifies GET /metrics returns
-// Prometheus text format with correct counter values.
+// Prometheus text format with correct counter values and derived gauges.
 func TestHandleMetrics_ReturnsPrometheusText(t *testing.T) {
 	m := metrics.NewDaemonMetrics()
 	m.IncToolCalls()
 	m.IncToolCalls()
 	m.IncToolCalls()
 	m.IncErrors()
-	m.IncSessionsActive()
-	m.IncSessionsActive()
-	m.IncSubprocessesActive()
+	m.SetGaugeProviders(
+		func() int64 { return 2 },
+		func() int64 { return 1 },
+	)
 
 	s := &Server{Metrics: m, running: true}
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)

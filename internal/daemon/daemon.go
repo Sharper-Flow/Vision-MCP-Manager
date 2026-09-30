@@ -63,6 +63,9 @@ type Daemon struct {
 	serverMetrics   map[string]*metrics.ServerMetrics
 	serverMetricsMu sync.RWMutex
 
+	// Daemon-wide forwarding counters shared with the admin server.
+	daemonMetrics *metrics.DaemonMetrics
+
 	managedGateways                  map[string]*mcp.ManagedHTTPGateway
 	managedBackends                  map[string]*supervisor.BackendCoordinator
 	managedCancels                   map[string]context.CancelFunc
@@ -152,6 +155,10 @@ func New(cfg Config) (*Daemon, error) {
 	cat := catalog.Default()
 	suggestionProvider := newCatalogSuggestionProvider(cat, reg)
 
+	// Create daemon-wide metrics and hand the same instance to the admin
+	// server so vision_metrics and GET /metrics read real counters.
+	daemonMetrics := metrics.NewDaemonMetrics()
+
 	// Create Admin MCP server (primary management interface)
 	adminSrv := admin.NewServer(admin.Config{
 		Registry:     reg,
@@ -161,6 +168,7 @@ func New(cfg Config) (*Daemon, error) {
 		ConfigPath:   cfg.ConfigPath,
 		Port:         cfg.ManagementPort,
 		Logger:       cfg.Logger,
+		Metrics:      daemonMetrics,
 	})
 
 	d := &Daemon{
@@ -176,6 +184,7 @@ func New(cfg Config) (*Daemon, error) {
 		ctx:                              ctx,
 		cancel:                           cancel,
 		serverMetrics:                    make(map[string]*metrics.ServerMetrics),
+		daemonMetrics:                    daemonMetrics,
 		managedGateways:                  make(map[string]*mcp.ManagedHTTPGateway),
 		managedBackends:                  make(map[string]*supervisor.BackendCoordinator),
 		managedCancels:                   make(map[string]context.CancelFunc),
@@ -199,6 +208,11 @@ func New(cfg Config) (*Daemon, error) {
 	adminSrv.SetServerMetricsAccessor(d)
 	adminSrv.SetSessionLifecycleAccessor(d)
 	adminSrv.SetReachabilityStore(d.reachabilityStore)
+
+	// Derive the daemon gauges at read time from their existing owners:
+	// per-server ServerMetrics for sessions, session managers and the
+	// supervisor for processes.
+	daemonMetrics.SetGaugeProviders(d.activeSessions, d.activeSubprocesses)
 
 	return d, nil
 }
@@ -713,6 +727,7 @@ func (d *Daemon) setupSlotGroupProxies() error {
 			MaxInFlightRequests:   representative.MaxInFlightRequests,
 			RetryConfig:           retryCfg,
 			CircuitBreakerConfig:  cbCfg,
+			DaemonMetrics:         d.daemonMetrics,
 		})
 
 		secCfg := mcp.SecurityConfig{ListenerExposure: mcp.ListenerLoopback}
@@ -880,6 +895,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 			FailureThreshold: srv.Config.CircuitBreaker.FailureThreshold,
 			RecoveryTimeout:  srv.Config.CircuitBreaker.RecoveryTimeout.Duration(),
 		},
+		DaemonMetrics: d.daemonMetrics,
 	}
 
 	// Per-server metrics for session observability.
@@ -1054,8 +1070,9 @@ func (d *Daemon) setupManagedHTTPProxy(srv *server.ManagedServer) error {
 		OnAmbiguousFailure: func(cause error) {
 			go d.recycleManagedHTTPBackend(monitorCtx, srv.Name, process, coordinator, cause)
 		},
-		Metrics: srvMetrics,
-		Logger:  d.logger.With(slog.String("server", srv.Name)),
+		Metrics:       srvMetrics,
+		Logger:        d.logger.With(slog.String("server", srv.Name)),
+		DaemonMetrics: d.daemonMetrics,
 	})
 	if err != nil {
 		setupErr := fmt.Errorf("create managed HTTP gateway: %w", err)
@@ -1266,6 +1283,49 @@ func (d *Daemon) Config() *config.Config {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.cfg
+}
+
+// activeSessions derives the daemon-wide active session gauge at read time by
+// summing the per-server ServerMetrics owners.
+func (d *Daemon) activeSessions() int64 {
+	d.serverMetricsMu.RLock()
+	defer d.serverMetricsMu.RUnlock()
+	var total int64
+	for _, m := range d.serverMetrics {
+		if m != nil {
+			total += m.Snapshot().ActiveSessions
+		}
+	}
+	return total
+}
+
+// activeSubprocesses derives the daemon-wide active subprocess gauge at read
+// time from its owners: stdio session managers (one subprocess per tracked
+// session, one for a live shared downstream) and supervised backend processes
+// in a live state.
+func (d *Daemon) activeSubprocesses() int64 {
+	var total int64
+	for _, listener := range d.portManager.List() {
+		switch mgr := listener.SessionManager.(type) {
+		case *session.Manager:
+			total += int64(mgr.SessionCount())
+		case *session.SharedSessionManager:
+			if mgr.HasDownstream() {
+				total++
+			}
+		}
+	}
+	for _, name := range d.supervisor.Servers() {
+		proc := d.supervisor.GetServer(name)
+		if proc == nil {
+			continue
+		}
+		switch proc.State() {
+		case supervisor.StateRunning, supervisor.StateStarting:
+			total++
+		}
+	}
+	return total
 }
 
 // ServerMetricsSnapshot returns per-server session metrics for the named server.
