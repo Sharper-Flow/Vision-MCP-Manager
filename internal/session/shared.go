@@ -30,6 +30,10 @@ type SharedSessionManager struct {
 	closed     bool
 	cmd        *exec.Cmd // stored at spawn for PID capture in reap events
 
+	// healthCheckFailures counts consecutive timed-out health probes against
+	// the current downstream for the respawn gate in healthCheck. Guarded by mu.
+	healthCheckFailures int
+
 	refMu            sync.Mutex
 	refCount         int
 	upstreamSessions map[string]struct{}
@@ -194,6 +198,9 @@ func (sm *SharedSessionManager) getOrCreateDownstream(ctx context.Context) (*mcp
 	if sm.downstream != nil {
 		_ = sm.downstream.Close()
 	}
+	// The consecutive-timeout count belongs to the session being replaced;
+	// the replacement starts with a clean gate.
+	sm.healthCheckFailures = 0
 
 	// Spawn new downstream
 	sm.downstream, sm.client, sm.spawnErr = sm.spawn(ctx)
@@ -587,6 +594,10 @@ func (sm *SharedSessionManager) StartHealthProbe(ctx context.Context) {
 	}()
 }
 
+// maxConsecutiveHealthCheckTimeouts is the number of consecutive timed-out
+// probes that must fail before a timed-out probe respawns the downstream.
+const maxConsecutiveHealthCheckTimeouts = 3
+
 func (sm *SharedSessionManager) healthCheck() {
 	sm.mu.RLock()
 	ds := sm.downstream
@@ -614,10 +625,44 @@ func (sm *SharedSessionManager) healthCheck() {
 				Error:       err.Error(),
 			})
 		}
+
+		// A probe deadline against a live subprocess is usually transient host
+		// pressure, not a dead downstream. Respawning on the first timeout
+		// would kill in-flight calls across all upstream sessions, so a
+		// timeout respawns only after maxConsecutiveHealthCheckTimeouts
+		// consecutive timed-out probes.
+		if errors.Is(err, context.DeadlineExceeded) {
+			sm.mu.Lock()
+			sm.healthCheckFailures++
+			failures := sm.healthCheckFailures
+			sm.mu.Unlock()
+			if failures < maxConsecutiveHealthCheckTimeouts {
+				sm.logger.Warn("health check timed out, respawn deferred",
+					slog.String("event", "shared_session.health_check_failed"),
+					slog.Int("consecutive_failures", failures),
+					slog.Int("respawn_after", maxConsecutiveHealthCheckTimeouts),
+					slog.String("error", err.Error()),
+				)
+				return
+			}
+		}
+
 		sm.logger.Warn("health check failed, triggering respawn",
 			slog.String("event", "shared_session.health_check_failed"),
 			slog.String("error", err.Error()),
 		)
+
+		// Close the invalidated downstream outside sm.mu: Close drains stdin,
+		// waits, then escalates SIGTERM to SIGKILL and can block ~10s against
+		// a wedged subprocess, and holding mu through it would stall every
+		// session. A Close error does not skip the respawn: the session is
+		// unusable either way.
+		if closeErr := ds.Close(); closeErr != nil {
+			sm.logger.Warn("closing invalidated downstream failed, respawning anyway",
+				slog.String("event", "shared_session.health_check_close_failed"),
+				slog.String("error", closeErr.Error()),
+			)
+		}
 
 		// Invalidate downstream to force respawn
 		sm.mu.Lock()
@@ -633,6 +678,11 @@ func (sm *SharedSessionManager) healthCheck() {
 		_, _ = sm.getOrCreateDownstream(spawnCtx)
 		return
 	}
+
+	sm.mu.Lock()
+	sm.healthCheckFailures = 0
+	sm.mu.Unlock()
+
 	if store != nil {
 		store.RecordProbe(sm.serverName, reachability.ProbeResult{
 			Depth:       reachability.DepthSession,
