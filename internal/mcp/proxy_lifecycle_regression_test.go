@@ -540,9 +540,12 @@ func TestExpiredSharedStartupTerminalCloseInvalidatesUpstream(t *testing.T) {
 	// A request is the initialization-processing barrier. tools/list answers
 	// from the upstream-registered tools and dispatches nowhere. The terminal
 	// close of the expired generation may retire the upstream session before
-	// the barrier is served; either outcome proves initialization processing
-	// settled, and the expired session id must answer 404 afterward.
-	if _, err := cs.ListTools(ctx, nil); err != nil && !strings.Contains(err.Error(), "session not found") {
+	// the barrier is served, and the async close can also cut the barrier
+	// request's connection mid-flight; either outcome proves initialization
+	// processing settled, and the expired session id must answer 404 afterward.
+	if _, err := cs.ListTools(ctx, nil); err != nil &&
+		!strings.Contains(err.Error(), "session not found") &&
+		!strings.Contains(err.Error(), "request terminated without response") {
 		t.Fatal(err)
 	}
 	if n := sm.SessionCount(); n != 0 {
