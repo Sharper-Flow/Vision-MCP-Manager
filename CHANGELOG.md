@@ -1,3 +1,9 @@
+## 2026-09-30 (v1.5.11)
+
+### Fixed
+
+- repair five review defects in the daemon metrics wiring (#26)
+
 ## 2026-09-30 (v1.5.10)
 
 ### Fixed
