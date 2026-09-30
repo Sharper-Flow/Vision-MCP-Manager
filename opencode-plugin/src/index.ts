@@ -4,14 +4,12 @@
  * Provides AI agents with the ability to discover and configure MCP servers
  * through the Vision daemon. This plugin:
  *
- * 1. Injects context at session start explaining how to use Vision
- * 2. Exposes Vision MCP tools for server management
- * 3. Handles daemon-not-running errors gracefully
+ * 1. Exposes Vision MCP tools for server management
+ * 2. Handles daemon-not-running errors gracefully
  *
  * Architecture:
  * - All server management goes through the Admin MCP on port 6275
  * - The plugin is a thin wrapper that calls the MCP tools
- * - Context injection solves the "bootstrap problem"
  */
 
 import { tool, type Plugin } from "@opencode-ai/plugin"
@@ -19,8 +17,6 @@ import type { Plugin as V2Plugin } from "@opencode/plugin"
 import { access, stat } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 import { z } from "zod"
-import { renderVisionContext } from "./context"
-import { checkHealth } from "./health"
 import {
   visionList,
   visionAdd,
@@ -59,44 +55,12 @@ import {
 import { VISION_PLUGIN_TOOL_NAMES } from "./tool-names"
 
 // =============================================================================
-// Event Schemas
-// =============================================================================
-
-const SessionCreatedPropsSchema = z.object({
-  session: z.object({
-    id: z.string(),
-  }),
-})
-
-// =============================================================================
-// Plugin State
-// =============================================================================
-
-interface PluginState {
-  daemonHealthy: boolean
-  lastHealthCheck: number
-  healthCheckInProgress: boolean
-}
-
-// =============================================================================
 // Plugin Entry Point
 // =============================================================================
 
 // V1 plugin factory. OpenCode 1.18.x invokes the `server` member of the
 // default export object with the plugin input.
 const visionServer: Plugin = async ({ client, directory }) => {
-  // Initialize state
-  const state: PluginState = {
-    daemonHealthy: false,
-    lastHealthCheck: 0,
-    healthCheckInProgress: false,
-  }
-
-  // Check daemon health on startup
-  const initialHealth = await checkHealth()
-  state.daemonHealthy = initialHealth.healthy
-  state.lastHealthCheck = Date.now()
-
   // Read once, here, at factory time — this decides which tools get registered
   // below, and registration is a one-shot event. OpenCode runs this factory
   // exactly once per server instance and caches the returned hooks; the tool
@@ -110,53 +74,6 @@ const visionServer: Plugin = async ({ client, directory }) => {
   const codeMode = process.env.OPENCODE_EXPERIMENTAL_CODE_MODE === "true"
 
   return {
-    // ===========================================================================
-    // Event Hooks
-    // ===========================================================================
-
-    event: async (input) => {
-      const { event } = input
-      // Handle session.created to check daemon health
-      if (event.type === "session.created") {
-        const parsed = SessionCreatedPropsSchema.safeParse(event.properties)
-        if (parsed.success) {
-          // Check daemon health when session starts
-          const health = await checkHealth()
-          state.daemonHealthy = health.healthy
-          state.lastHealthCheck = Date.now()
-        }
-      }
-    },
-
-    // ===========================================================================
-    // Context Injection (Compaction Hook)
-    // ===========================================================================
-
-    "experimental.session.compacting": async (_input, output) => {
-      // Check daemon health if we haven't recently (with debounce to prevent concurrent checks)
-      const now = Date.now()
-      if (now - state.lastHealthCheck > 30000 && !state.healthCheckInProgress) {
-        state.healthCheckInProgress = true
-        try {
-          const health = await checkHealth()
-          state.daemonHealthy = health.healthy
-          state.lastHealthCheck = Date.now()
-        } finally {
-          state.healthCheckInProgress = false
-        }
-      }
-
-      // Read Code Mode at render time so long-lived plugin hosts can follow
-      // environment changes without reloading the module.
-      const context = renderVisionContext({
-        healthy: state.daemonHealthy,
-        codeMode: process.env.OPENCODE_EXPERIMENTAL_CODE_MODE === "true",
-      })
-
-      // Push context into compaction output
-      output.context.push(context)
-    },
-
     // ===========================================================================
     // Tool Definitions
     // ===========================================================================
@@ -309,74 +226,18 @@ async function resolveInitPath(directory: string, explicitPath?: string): Promis
 // =============================================================================
 //
 // OpenCode V2 loads the default export object's `setup(context)` instead of
-// the V1 factory. The plugin context is itself the client: event injection
-// goes through ctx.event.subscribe(), the compaction health check through
-// ctx.session.hook("compaction"), tools through ctx.tool.transform with JSON
-// Schema inputs, and mcp control through the ctx.mcp domain.
+// the V1 factory. The plugin context is itself the client: tools register
+// through ctx.tool.transform with JSON Schema inputs, and mcp control goes
+// through the ctx.mcp domain. No session hooks are registered — the plugin
+// injects no compaction context and subscribes to no events.
 
 const VISION_PLUGIN_ID = "vision-plugin"
 
-const visionSetup = async (context: V2Plugin.Context): Promise<V2Plugin.Cleanup> => {
-  // Initialize state (mirrors the V1 factory startup)
-  const state: PluginState = {
-    daemonHealthy: false,
-    lastHealthCheck: 0,
-    healthCheckInProgress: false,
-  }
-
-  // Check daemon health on startup
-  const initialHealth = await checkHealth()
-  state.daemonHealthy = initialHealth.healthy
-  state.lastHealthCheck = Date.now()
-
+const visionSetup = async (context: V2Plugin.Context) => {
   // Code Mode is read once at setup time, matching the V1 factory-time read.
   // The pairing invariant from the V1 registration applies unchanged: the
   // `vision` mcp block entry is load-bearing for Code Mode sessions.
   const codeMode = process.env.OPENCODE_EXPERIMENTAL_CODE_MODE === "true"
-
-  // Session-created daemon health check. The event stream runs for the
-  // lifetime of the host; the loop is detached so setup can return, and the
-  // cleanup flag stops it at the next event. A transport error ends the
-  // stream silently — context injection degrades, tools keep working.
-  const stream = { disposed: false }
-  void (async () => {
-    try {
-      for await (const event of context.event.subscribe()) {
-        if (stream.disposed) break
-        if (event.type !== "session.created") continue
-        const health = await checkHealth()
-        state.daemonHealthy = health.healthy
-        state.lastHealthCheck = Date.now()
-      }
-    } catch {
-      // Event stream ended; nothing to recover into.
-    }
-  })()
-
-  // Compaction hook: debounced daemon health check, then inject the Vision
-  // context as a system part (the V2 form of the V1 output.context push).
-  await context.session.hook("compaction", async (input) => {
-    const now = Date.now()
-    if (now - state.lastHealthCheck > 30000 && !state.healthCheckInProgress) {
-      state.healthCheckInProgress = true
-      try {
-        const health = await checkHealth()
-        state.daemonHealthy = health.healthy
-        state.lastHealthCheck = Date.now()
-      } finally {
-        state.healthCheckInProgress = false
-      }
-    }
-
-    // Read Code Mode at render time so long-lived plugin hosts can follow
-    // environment changes without reloading the module.
-    const injected = renderVisionContext({
-      healthy: state.daemonHealthy,
-      codeMode: process.env.OPENCODE_EXPERIMENTAL_CODE_MODE === "true",
-    })
-
-    input.system.push({ type: "text", text: injected })
-  })
 
   // Tool registration. The zod schema stays the internal parse layer — the
   // JSON Schema given to the host only advertises the input shape, and every
@@ -482,10 +343,6 @@ const visionSetup = async (context: V2Plugin.Context): Promise<V2Plugin.Cleanup>
       async (args) => await disconnectMcpServerV2(context.mcp, args)
     )
   })
-
-  return () => {
-    stream.disposed = true
-  }
 }
 
 // =============================================================================
