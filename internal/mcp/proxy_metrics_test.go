@@ -590,7 +590,7 @@ func TestStatefulRemovalDuringPublicationReleasesCredit(t *testing.T) {
 			if err := mgr.RemoveSession(ps.sessionID); err != nil {
 				t.Errorf("removal during publication: %v", err)
 			}
-		}, nil, nil)
+		}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

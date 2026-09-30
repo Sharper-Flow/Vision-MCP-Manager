@@ -308,9 +308,12 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	// (idx.byDownstream) is populated at spawn time through the onSpawned
 	// callback, before the manager-owned downstream can be removed, so a
 	// removal that lands before upstream initialization still reaches the
-	// proxy session that owns the downstream. The lookup deletes the entry:
-	// the manager removed the ID, so the mapping is dead even when the
-	// session was never published upstream.
+	// proxy session that owns the downstream. A removal that lands inside
+	// the spawn-to-registration window finds no owner; the downstream-keyed
+	// onDownstreamClosed cleanup then removes the late registration when
+	// discovery fails, so no owner outlives a rejected initialization. The
+	// lookup deletes the entry: the manager removed the ID, so the mapping
+	// is dead even when the session was never published upstream.
 	if cfg.SessionManager != nil {
 		cfg.SessionManager.SetOnSessionRemoved(func(sessionID string) {
 			idx.mu.Lock()
@@ -488,6 +491,11 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				if upstreamID != "" {
 					idx.byUpstream[upstreamID] = ps
 				}
+				idx.mu.Unlock()
+			},
+			func(sessionID string) {
+				idx.mu.Lock()
+				delete(idx.byDownstream, sessionID)
 				idx.mu.Unlock()
 			},
 		)
@@ -840,6 +848,7 @@ func newPerSessionServer(
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
 	onRespawn func(oldSessionID, newSessionID string, ps *proxySession),
+	onDownstreamClosed func(sessionID string),
 ) (*mcp.Server, error) {
 	sessionID := fmt.Sprintf("proxy-%s-%d", serverName, nextSessionID())
 	logger = logger.With(slog.String("session_id", sessionID))
@@ -853,6 +862,7 @@ func newPerSessionServer(
 		logger:              logger,
 		onClosed:            onClosed,
 		onRespawn:           onRespawn,
+		onDownstreamClosed:  onDownstreamClosed,
 		sharedTools:         sharedTools,
 		inFlightLimiter:     inFlightLimiter,
 		suggestionProvider:  suggestionProvider,
@@ -1590,36 +1600,57 @@ func (ps *proxySession) respawnDownstream(ctx context.Context, trigger string) (
 		ps.server.AddTool(tool, makeProxyToolHandler(ps, tool.Name))
 	}
 
-	// Atomically swap the downstream pointer and reset the closed flag.
-	// Reset closeOnce so that the new downstream can be closed cleanly later.
-	ps.downstreamMu.Lock()
-	ps.downstream = downstream
-	ps.downstreamClosed = false
-	ps.downstreamMu.Unlock()
-	ps.closeMu.Lock()
-	// A manager removal of the new generation between the spawn and this
+	// Run the survival check, the closeOnce reset, the credit reacquisition,
+	// and the pointer publication inside one closeMu critical section. A
+	// manager removal of the new generation between the spawn and this
 	// critical section either completed (the callback closed this proxy
-	// through the rekeyed owner) or is blocked on closeMu right now. Both
-	// leave the manager holding no session for this generation, so the
-	// respawn must not publish or take credit for it.
+	// through the rekeyed owner) or is blocked on closeMu right now; both
+	// leave the manager holding no session for this generation, because
+	// RemoveSession deletes the tracked session before it fires callbacks.
+	ps.closeMu.Lock()
 	if ps.mgr.GetSession(newSessionID) == nil {
 		ps.closeMu.Unlock()
+		// The generation was removed under us and the manager has closed its
+		// SDK connection. The proxy must stay detached (downstreamClosed set,
+		// no live pointer): publishing here would leave a closed SDK session
+		// marked live with a consumed closeOnce, and every later call would
+		// fail against it instead of respawning. The next tool call respawns.
 		ps.logger.Warn("respawned session removed during setup, abandoning respawn",
 			slog.String("event", "session.respawn_abandoned"),
 			slog.String("new_session_id", newSessionID),
 		)
+		// Best-effort cleanup of the previous generation's manager entry, the
+		// same as the success path: after a health-check trigger the manager
+		// still holds the dead session, and abandonment must not extend its
+		// slot occupancy. The rekey above dropped the old byDownstream key, so
+		// the removal callback is a no-op for this proxy.
+		if err := ps.mgr.RemoveSession(oldSessionID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+			ps.logger.Warn("failed to remove old session after abandoned respawn",
+				slog.String("old_session", oldSessionID),
+				slog.String("error", err.Error()),
+			)
+		}
 		return nil, fmt.Errorf("respawn abandoned: manager removed session %s during setup", newSessionID)
 	}
 	ps.closeOnce = sync.Once{}
 	// The reap released this session's active-session credit, but the
 	// initialized upstream session continues on the respawned downstream.
-	// Reacquire the credit inside the same closeMu window as the closeOnce
-	// reset: a concurrent closeDownstream either runs entirely before (a
-	// no-op against the old closeOnce) or entirely after (a balanced
-	// release), never between the two.
+	// Reacquire the credit in the same closeMu window as the publication: a
+	// concurrent closeDownstream either runs entirely before this critical
+	// section (a no-op against the old closeOnce) or entirely after it (a
+	// balanced release against the published, live generation), never
+	// between the credit and the pointer it belongs to.
 	if ps.hasInitializedUpstreamSession() {
 		ps.acquireActiveSession()
 	}
+	// Only now publish: the generation is proven live in the manager, its
+	// close path is armed through the fresh closeOnce, and the credit is
+	// held. A removal that lands after closeMu is released sees exactly this
+	// published generation and tears it down in a balanced way.
+	ps.downstreamMu.Lock()
+	ps.downstream = downstream
+	ps.downstreamClosed = false
+	ps.downstreamMu.Unlock()
 	ps.closeMu.Unlock()
 
 	// Update the session ID so that touch/close operate on the new session.
