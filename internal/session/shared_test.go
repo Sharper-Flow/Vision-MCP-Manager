@@ -2,8 +2,10 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -771,5 +773,63 @@ func TestSharedManager_RefcountLifecycle_WithIdleReap(t *testing.T) {
 
 	if sm.HasDownstream() {
 		t.Error("expected downstream to be reaped after idle timeout")
+	}
+}
+
+// hangingListToolsServerJS completes the MCP handshake and then never answers
+// tools/list. It models a live downstream whose remote is too slow for the
+// health-check deadline.
+const hangingListToolsServerJS = `
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({
+      jsonrpc: '2.0',
+      id: msg.id,
+      result: {
+        protocolVersion: '2025-03-26',
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: 'hang-test', version: '1.0.0' }
+      }
+    }) + '\n');
+  }
+});
+`
+
+// TestSharedManager_HealthCheckFailureClosesLiveDownstream verifies that a
+// health check which times out against a live subprocess stops that
+// subprocess before it spawns the replacement.
+func TestSharedManager_HealthCheckFailureClosesLiveDownstream(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cfg := testSharedServerConfig()
+	cfg.Args = []string{"-e", hangingListToolsServerJS}
+
+	sm := NewSharedSessionManager("test-health-leak", cfg, testLogger(t), 0, nil)
+	defer sm.CloseAll()
+	sm.healthCtx = ctx
+
+	if _, err := sm.GetOrCreateSession(ctx, "sess-leak"); err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+	sm.mu.RLock()
+	oldPID := sm.cmd.Process.Pid
+	sm.mu.RUnlock()
+	t.Cleanup(func() { _ = syscall.Kill(oldPID, syscall.SIGKILL) })
+
+	sm.healthCheck()
+
+	sm.mu.RLock()
+	newPID := sm.cmd.Process.Pid
+	sm.mu.RUnlock()
+	if newPID == oldPID {
+		t.Fatalf("health-check failure did not respawn: pid %d unchanged", oldPID)
+	}
+	if err := syscall.Kill(oldPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("old downstream pid %d still exists after health-check respawn (kill 0 err=%v)", oldPID, err)
 	}
 }
