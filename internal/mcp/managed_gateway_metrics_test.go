@@ -440,6 +440,11 @@ func TestManagedGatewayEnvelopeClassificationCountsGenuineRequestsOnly(t *testin
 		{name: "error response", body: `{"jsonrpc":"2.0","id":9,"error":{"code":-32603,"message":"boom"}}`, want: 0},
 		{name: "null-id response", body: `{"jsonrpc":"2.0","id":null,"result":{}}`, want: 0},
 		{name: "non-string method", body: `{"jsonrpc":"2.0","id":1,"method":5}`, want: 0},
+		{name: "boolean params", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":true}`, want: 0},
+		{name: "number params", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":42}`, want: 0},
+		{name: "string params", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"not structured"}`, want: 0},
+		{name: "array params", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":[]}`, want: 0},
+		{name: "null params", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":null}`, want: 0},
 		{name: "scalar body", body: `42`, want: 0},
 	}
 	for _, tc := range cases {
@@ -588,5 +593,50 @@ func TestManagedGatewayFractionalRequestIDsDoNotCount(t *testing.T) {
 		if count != 1 {
 			t.Errorf("integral id %s not counted as a genuine request: got %d, want 1", id, count)
 		}
+	}
+}
+
+// TestManagedGatewayInvalidParamsDoNotCountAsRequestEnvelope proves the
+// missing-session rejection path counts only genuine MCP envelopes: the
+// basic Messages schema types params as an optional object, so a member
+// carrying boolean, number, string, array, or null params is malformed and
+// never counts, while the same envelope with object params counts exactly
+// once on the same rejection path.
+func TestManagedGatewayInvalidParamsDoNotCountAsRequestEnvelope(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer backend.Close()
+
+	for _, params := range []string{`true`, `42`, `"not structured"`, `[]`, `null`} {
+		t.Run(params, func(t *testing.T) {
+			dm := metrics.NewDaemonMetrics()
+			gateway := newManagedGatewayWithDaemonMetrics(t, backend.URL+"/mcp", dm, backend.Client().Transport)
+			body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":` + params + `}`
+			w := httptest.NewRecorder()
+			gateway.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body)))
+			if w.Code == http.StatusOK {
+				t.Fatalf("malformed envelope params=%s answered 200, want a rejection status", params)
+			}
+			if got := dm.Snapshot().ToolCallsTotal; got != 0 {
+				t.Errorf("malformed envelope params=%s counted: tool_calls_total=%d, status=%d; want 0", params, got, w.Code)
+			}
+			if got := dm.Snapshot().ErrorsTotal; got != 0 {
+				t.Errorf("errors_total = %d after a pre-session rejection, want 0", got)
+			}
+		})
+	}
+
+	dm := metrics.NewDaemonMetrics()
+	gateway := newManagedGatewayWithDaemonMetrics(t, backend.URL+"/mcp", dm, backend.Client().Transport)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}`
+	w := httptest.NewRecorder()
+	gateway.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body)))
+	if w.Code == http.StatusOK {
+		t.Fatalf("genuine request answered 200, want a rejection status")
+	}
+	if got := dm.Snapshot().ToolCallsTotal; got != 1 {
+		t.Errorf("genuine request counted %d on the missing-session path, want 1", got)
 	}
 }

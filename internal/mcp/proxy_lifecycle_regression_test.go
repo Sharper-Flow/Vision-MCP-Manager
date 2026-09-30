@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -319,8 +320,11 @@ func TestSharedReaperDuringSpawnDoesNotCreditSession(t *testing.T) {
 	}
 	defer cs.Close()
 	// A request is the initialization-processing barrier. tools/list answers
-	// from the upstream-registered tools and dispatches nowhere.
-	if _, err := cs.ListTools(ctx, nil); err != nil {
+	// from the upstream-registered tools and dispatches nowhere. The terminal
+	// close of the expired generation may retire the upstream session before
+	// the barrier is served; either outcome proves initialization processing
+	// settled, and the expired session id must answer 404 afterward.
+	if _, err := cs.ListTools(ctx, nil); err != nil && !strings.Contains(err.Error(), "session not found") {
 		t.Fatal(err)
 	}
 	if n := sm.SessionCount(); n != 0 {
@@ -478,5 +482,112 @@ func TestAbandonedRespawnDetachesAndNextCallRespawns(t *testing.T) {
 	}
 	if got := idx.count(); got != 0 {
 		t.Errorf("removal-owner index after DELETE retains %d owner(s), want 0", got)
+	}
+}
+
+// TestExpiredSharedStartupTerminalCloseInvalidatesUpstream proves the
+// terminal finalization of a shared proxy whose downstream expired during
+// startup: late initialization must not publish the dead owner back into the
+// indexes, and the late-initialized upstream session is closed through the
+// re-armed close path, so a raw tools/call reusing the expired session id is
+// answered 404 instead of dispatching into the dead generation. Publishing
+// the dead owner used to leave the expired upstream usable, answering 200
+// with an isError result on every attempt.
+func TestExpiredSharedStartupTerminalCloseInvalidatesUpstream(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cfg := testServerConfig()
+	cfg.SessionTimeout = config.Duration(time.Nanosecond)
+	owner := metrics.NewServerMetrics()
+	var sm *session.SharedSessionManager
+	// The shared manager holds sm.mu while it spawns, but the reaper retires
+	// the fresh lease under refMu independently. Hold the spawn inside the
+	// hook until the lease is gone, so the expiry provably lands inside the
+	// startup window.
+	logger := slog.New(&spawnWindowHookHandler{
+		base: slog.NewTextHandler(io.Discard, nil),
+		hook: func(r slog.Record) {
+			if r.Message != "spawning shared downstream subprocess" {
+				return
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for sm.SessionCount() != 0 {
+				if time.Now().After(deadline) {
+					t.Error("real reaper did not remove the pending lease")
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		},
+	})
+	sm = session.NewSharedSessionManager("expired-startup-terminal", cfg, logger, 0, owner)
+	defer sm.CloseAll()
+	ts := httptest.NewServer(NewProxyHandler(ProxyConfig{
+		ServerName:    "expired-startup-terminal",
+		SharedManager: sm,
+		Metrics:       owner,
+		Logger:        logger,
+	}))
+	defer ts.Close()
+	sm.StartReaper(ctx, time.Millisecond)
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "probe", Version: "1"}, nil)
+	cs, err := client.Connect(ctx, &sdkmcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	// A request is the initialization-processing barrier. tools/list answers
+	// from the upstream-registered tools and dispatches nowhere. The terminal
+	// close of the expired generation may retire the upstream session before
+	// the barrier is served; either outcome proves initialization processing
+	// settled, and the expired session id must answer 404 afterward.
+	if _, err := cs.ListTools(ctx, nil); err != nil && !strings.Contains(err.Error(), "session not found") {
+		t.Fatal(err)
+	}
+	if n := sm.SessionCount(); n != 0 {
+		t.Fatalf("manager population = %d, want 0", n)
+	}
+	if got := owner.Snapshot().ActiveSessions; got != 0 {
+		t.Fatalf("active sessions = %d, want 0 before the raw call", got)
+	}
+
+	// The terminal close removes the session from the streamable handler a
+	// moment after initialization completes, so the raw call is answered 404.
+	// Retry across that close goroutine's scheduling window; a 200 means the
+	// dead generation still dispatches, which the unfixed proxy returned on
+	// every attempt until the deadline.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL,
+			strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"echo","arguments":{}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Mcp-Session-Id", cs.ID())
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			break
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("raw tools/call on the expired shared session returned status %d, want 404", resp.StatusCode)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expired shared upstream remains reusable: status 200 persisted until the deadline, want 404")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := sm.SessionCount(); n != 0 {
+		t.Errorf("manager population after the terminal close = %d, want 0", n)
+	}
+	if got := owner.Snapshot().ActiveSessions; got != 0 {
+		t.Errorf("active sessions after the terminal close = %d, want 0", got)
 	}
 }

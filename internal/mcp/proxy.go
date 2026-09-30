@@ -808,6 +808,14 @@ func (ps *proxySession) hasInitializedUpstreamSession() bool {
 // initialization must not credit it. The next tool call respawns a live
 // generation and reacquires the credit there, inside the same closeMu
 // window.
+//
+// A shared generation closed before initialization is terminal: shared
+// proxies never respawn a lease, so the dead owner must not reenter the
+// indexes through the publication callback. The startup close consumed
+// closeOnce before any upstream session existed, so the terminal close
+// re-arms it and tears the late-initialized upstream down through the normal
+// close path — index cleanup and upstream close included — which leaves the
+// expired session id answered with 404.
 func (ps *proxySession) publishInitialized(publish func(string, *proxySession)) {
 	if ps == nil {
 		return
@@ -818,8 +826,17 @@ func (ps *proxySession) publishInitialized(publish func(string, *proxySession)) 
 	ps.downstreamMu.RUnlock()
 	if live {
 		ps.acquireActiveSession()
+		ps.closeMu.Unlock()
+	} else if ps.shared {
+		ps.closeOnce = sync.Once{}
+		ps.closeMu.Unlock()
+		ps.closeDownstream("idle_timeout")
+		return
+	} else {
+		// A dead stateful generation still publishes: the next tool call
+		// respawns it and reacquires the credit there.
+		ps.closeMu.Unlock()
 	}
-	ps.closeMu.Unlock()
 	if publish == nil {
 		return
 	}
@@ -1792,7 +1809,10 @@ func (ps *proxySession) closeDownstream(reason string) {
 		// In shared mode: decrement refcount and unsubscribe, but do NOT close
 		// the actual ClientSession (it's shared across upstream sessions).
 		if ps.shared && ps.sharedMgr != nil {
-			if err := ps.sharedMgr.RemoveSession(ps.sessionID); err != nil {
+			// The terminal close of a startup-expired generation finds the
+			// lease already removed by the expiry callback; ErrSessionNotFound
+			// is the expected outcome there, not a leak.
+			if err := ps.sharedMgr.RemoveSession(ps.sessionID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
 				ps.logger.Warn("failed to remove shared session",
 					slog.String("error", err.Error()),
 				)
