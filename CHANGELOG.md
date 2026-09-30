@@ -1,3 +1,9 @@
+## 2026-09-30 (v1.5.10)
+
+### Fixed
+
+- drop compaction context injection and systemd-only daemon advice (#28)
+
 ## 2026-09-30 (v1.5.9)
 
 ### Fixed
