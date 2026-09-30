@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -193,15 +193,18 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			state.hasReservation = true
 		} else {
 			activity, toolsCalls, err := classifyManagedRequestBody(r)
-			if err != nil {
-				writeManagedError(w, http.StatusBadRequest, -32600, "invalid JSON-RPC request")
-				return
-			}
 			state.toolsCalls = toolsCalls
 			if toolsCalls > 0 && g.daemonMetrics != nil {
 				for i := 0; i < toolsCalls; i++ {
 					g.daemonMetrics.IncToolCalls()
 				}
+			}
+			if err != nil {
+				// Genuine members still count when whole-body admission
+				// rejects the envelope: the member classifier owns call
+				// counting, the admission gate owns rejection.
+				writeManagedError(w, http.StatusBadRequest, -32600, "invalid JSON-RPC request")
+				return
 			}
 			complete, err := g.leases.BeginRequest(sessionID, activity)
 			if err != nil {
@@ -510,8 +513,12 @@ type managedProxyRequest struct {
 }
 
 // classifyManagedRequestBody reads and restores the JSON-RPC body once and
-// reports whether it carries application activity plus how many tools/call
-// requests it contains, so daemon-wide tool call counting sees each call.
+// reports whether it carries application activity plus how many genuine
+// tools/call requests it contains, so daemon-wide tool call counting sees each
+// call. Counting is independent of whole-envelope admission: a body whose
+// activity classification fails (for example a batch holding one genuine
+// request beside an invalid member) still reports its genuine members, and the
+// caller counts them before writing the admission rejection.
 func classifyManagedRequestBody(r *http.Request) (bool, int, error) {
 	if r.Body == nil {
 		return false, 0, errors.New("missing JSON-RPC body")
@@ -520,15 +527,9 @@ func classifyManagedRequestBody(r *http.Request) (bool, int, error) {
 	if err != nil {
 		return false, 0, err
 	}
-	activity, err := ClassifyApplicationActivity(body)
-	if err != nil {
-		return false, 0, err
-	}
-	toolsCalls, err := countManagedToolsCalls(body)
-	if err != nil {
-		return activity, 0, nil
-	}
-	return activity, toolsCalls, nil
+	activity, activityErr := ClassifyApplicationActivity(body)
+	toolsCalls, _ := countManagedToolsCalls(body)
+	return activity, toolsCalls, activityErr
 }
 
 // countManagedToolsCalls returns the number of tools/call requests in a
@@ -645,9 +646,14 @@ func isMCPRequestID(raw json.RawMessage) bool {
 		return true
 	}
 	// JSON Schema "integer" also matches values such as 1.0 or 1e2 whose
-	// value carries no fractional part.
-	value, err := strconv.ParseFloat(literal, 64)
-	return err == nil && value == math.Trunc(value)
+	// value carries no fractional part. Decide from the exact literal: a
+	// float64 conversion accepts 1.0000000000000001 and
+	// 9007199254740992.5 by rounding, and underflows 1e-999 to zero.
+	var value big.Rat
+	if _, ok := value.SetString(literal); !ok {
+		return false
+	}
+	return value.IsInt()
 }
 
 // isToolsCallMember reports whether one JSON-RPC envelope member is a genuine
@@ -693,8 +699,11 @@ func (g *ManagedHTTPGateway) countToolsCallsInBody(r *http.Request) {
 	if g.daemonMetrics == nil {
 		return
 	}
-	_, toolsCalls, err := classifyManagedRequestBody(r)
-	if err != nil || toolsCalls == 0 {
+	// Counting is independent of whole-body admission: the classification
+	// error marks a body the gate will reject, and genuine members still
+	// count through that rejection.
+	_, toolsCalls, _ := classifyManagedRequestBody(r)
+	if toolsCalls == 0 {
 		return
 	}
 	for i := 0; i < toolsCalls; i++ {

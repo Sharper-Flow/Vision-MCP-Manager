@@ -812,3 +812,154 @@ func TestPublishInitializedSkipsCreditForClosedDownstream(t *testing.T) {
 		t.Fatalf("late initialization credited a removed downstream generation: sessions_active = %d, want 0", got)
 	}
 }
+
+// respawnCreditHookReporter wires a deterministic hook into the session-credit
+// acquisition so a test can make a manager removal land exactly inside the
+// respawn's credit window, on a goroutine production actually uses for
+// removals (the reaper and admin removals never run on the respawning
+// goroutine).
+type respawnCreditHookReporter struct {
+	*metrics.ServerMetrics
+	onAcquire func()
+}
+
+func (r *respawnCreditHookReporter) IncActiveSessions() {
+	r.ServerMetrics.IncActiveSessions()
+	if r.onAcquire != nil {
+		r.onAcquire()
+	}
+}
+
+// TestRespawnedGenerationRemovedDuringCreditWindowStaysBalanced proves the
+// respawn owns its generation coherently: the removal-owner index carries the
+// respawned session before the respawn can take credit for it, so a manager
+// removal inside the credit window closes the new generation and releases the
+// credit. Registering the owner only after the credit left a window where the
+// removal missed the proxy and stranded sessions_active at 1 with a manager
+// population of 0.
+func TestRespawnedGenerationRemovedDuringCreditWindowStaysBalanced(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	logger := testLogger(t)
+	mgr := session.NewManager("metrics-credit-window", testServerConfig(), logger)
+	defer mgr.CloseAll()
+	owner := &respawnCreditHookReporter{ServerMetrics: metrics.NewServerMetrics()}
+	dm := metrics.NewDaemonMetrics()
+	dm.SetGaugeProviders(func() int64 { return owner.Snapshot().ActiveSessions }, nil)
+	// The initial acquisition has no respawned generation, so the hook is a
+	// no-op there. Inside the respawn's credit window it removes the
+	// respawned session from a second goroutine — the goroutine production
+	// actually uses for removals — and waits until the manager has dropped
+	// it. The manager deletes the session from its map before its removal
+	// callback runs, so the wait never waits on the callback, which blocks
+	// on the credit window's own closeMu.
+	owner.onAcquire = func() {
+		var respawned []string
+		for _, id := range mgr.Sessions() {
+			if strings.Contains(id, "-respawn-") {
+				respawned = append(respawned, id)
+			}
+		}
+		if len(respawned) == 0 {
+			return
+		}
+		go func() {
+			for _, id := range respawned {
+				if err := mgr.RemoveSession(id); err != nil {
+					t.Errorf("RemoveSession(respawned): %v", err)
+				}
+			}
+		}()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			gone := true
+			for _, id := range mgr.Sessions() {
+				if strings.Contains(id, "-respawn-") {
+					gone = false
+				}
+			}
+			if gone {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("manager never dropped the respawned session")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	ts := httptest.NewServer(NewProxyHandler(ProxyConfig{
+		ServerName:     "metrics-credit-window",
+		SessionManager: mgr,
+		Logger:         logger,
+		Metrics:        owner,
+		DaemonMetrics:  dm,
+	}))
+	defer ts.Close()
+
+	client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "metrics-client", Version: "1.0.0"}, nil)
+	s, err := client.Connect(ctx, &sdkmcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("client.Connect failed: %v", err)
+	}
+	defer s.Close()
+	if _, err := s.CallTool(ctx, &sdkmcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "initial"}}); err != nil {
+		t.Fatalf("initial CallTool failed: %v", err)
+	}
+	ids := mgr.Sessions()
+	if len(ids) != 1 {
+		t.Fatalf("initial manager population = %v, want one session", ids)
+	}
+	if err := mgr.RemoveSession(ids[0]); err != nil {
+		t.Fatalf("RemoveSession(initial): %v", err)
+	}
+
+	// The removal hook fires inside the respawn's credit window. The call
+	// itself may succeed or fail; the invariant is the settled state.
+	_, _ = s.CallTool(ctx, &sdkmcp.CallToolParams{Name: "echo", Arguments: map[string]any{"message": "respawn"}})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for dm.Snapshot().SessionsActive != 0 || mgr.SessionCount() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("settled unbalanced: sessions_active = %d, manager sessions = %d; want 0/0",
+				dm.Snapshot().SessionsActive, mgr.SessionCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestFailedSharedDiscoveryReleasesRemovalOwner proves a shared-mode proxy
+// session whose initial tools/list fails removes its spawn-time removal-owner
+// registration. The index cleanup used to run only through the upstream-keyed
+// onClosed callback, which never fires before upstream initialization, and
+// SharedSessionManager.RemoveSession does not invoke the expiry callback, so
+// repeated rejected initializations accumulated unreachable owners.
+func TestFailedSharedDiscoveryReleasesRemovalOwner(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cfg := testServerConfigWithScript(discoveryFailureMCPServerJS)
+	cfg.ApplyDefaults()
+	logger := testLogger(t)
+	owner := metrics.NewServerMetrics()
+	sm := session.NewSharedSessionManager("shared-owner-release", cfg, logger, time.Minute, owner)
+	defer sm.CloseAll()
+	byDownstream := make(map[string]*proxySession)
+	byUpstream := make(map[string]*proxySession)
+	_, err := newSharedModeServer(ctx, "shared-owner-release", sm, logger,
+		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, owner, nil, nil,
+		func(ps *proxySession) { byDownstream[ps.sessionID] = ps },
+		func(id string, ps *proxySession) { byUpstream[id] = ps; byDownstream[ps.sessionID] = ps },
+		func(id string) { ps := byUpstream[id]; delete(byUpstream, id); if ps != nil { delete(byDownstream, ps.sessionID) } },
+		func(sessionID string) { delete(byDownstream, sessionID) },
+	)
+	if err == nil {
+		t.Fatal("fixture did not fail tools/list")
+	}
+	if got := len(byDownstream); got != 0 {
+		t.Errorf("failed shared initialize retained %d removal owner(s), want 0", got)
+	}
+	if got := len(byUpstream); got != 0 {
+		t.Errorf("failed shared initialize retained %d upstream registration(s), want 0", got)
+	}
+}

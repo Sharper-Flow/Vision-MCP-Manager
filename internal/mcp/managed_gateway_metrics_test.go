@@ -533,3 +533,60 @@ func TestManagedGatewayMixedBatchCountsOnlyGenuineRequestsMembers(t *testing.T) 
 		t.Errorf("errors_total = %d, want 0 for a pre-session batch rejection", got)
 	}
 }
+
+// TestManagedGatewayBatchCountsGenuineMemberBesideInvalidSibling proves call
+// counting is independent of whole-body admission: a batch holding one genuine
+// tools/call request beside an invalid member is rejected with 400, and the
+// genuine member still counts. Counting used to depend on the whole-envelope
+// activity classification, which the invalid member failed, so the rejected
+// batch reported tool_calls_total 0.
+func TestManagedGatewayBatchCountsGenuineMemberBesideInvalidSibling(t *testing.T) {
+	dm := metrics.NewDaemonMetrics()
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`))
+	}))
+	defer backend.Close()
+	gateway := newManagedGatewayWithDaemonMetrics(t, backend.URL+"/mcp", dm, backend.Client().Transport)
+	body := `[{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}},42]`
+	w := httptest.NewRecorder()
+	gateway.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("mixed batch status = %d, want 400", w.Code)
+	}
+	if got := dm.Snapshot().ToolCallsTotal; got != 1 {
+		t.Errorf("genuine batch member omitted due to invalid sibling: tool_calls_total = %d, want 1", got)
+	}
+	if got := dm.Snapshot().ErrorsTotal; got != 0 {
+		t.Errorf("errors_total = %d, want 0 for a client-side admission rejection", got)
+	}
+}
+
+// TestManagedGatewayFractionalRequestIDsDoNotCount proves request-ID
+// integrality is decided from the exact JSON number, not a float64
+// conversion: 1.0000000000000001 and 9007199254740992.5 round to integers in
+// float64, and 1e-999 underflows to zero, so all three used to count as
+// genuine requests.
+func TestManagedGatewayFractionalRequestIDsDoNotCount(t *testing.T) {
+	for _, id := range []string{"1.0000000000000001", "9007199254740992.5", "1e-999"} {
+		body := `{"jsonrpc":"2.0","id":` + id + `,"method":"tools/call"}`
+		count, err := countManagedToolsCalls([]byte(body))
+		if err != nil {
+			t.Fatalf("countManagedToolsCalls(%s): %v", id, err)
+		}
+		if count != 0 {
+			t.Errorf("fractional id %s counted as a genuine request: got %d, want 0", id, count)
+		}
+	}
+	// Integral spellings outside ParseInt's fast path still count.
+	for _, id := range []string{"1.0", "1e3", "-2E2", "9007199254740993"} {
+		body := `{"jsonrpc":"2.0","id":` + id + `,"method":"tools/call"}`
+		count, err := countManagedToolsCalls([]byte(body))
+		if err != nil {
+			t.Fatalf("countManagedToolsCalls(%s): %v", id, err)
+		}
+		if count != 1 {
+			t.Errorf("integral id %s not counted as a genuine request: got %d, want 1", id, count)
+		}
+	}
+}
