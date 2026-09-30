@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -8,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -530,30 +533,233 @@ func TestManagedProcessRecordBlocksRunningPublication(t *testing.T) {
 	<-done
 }
 
+// signalCall records one process-group signal observation.
+type signalCall struct {
+	pgid   int
+	signal os.Signal
+}
+
+// recordingSignaler delegates every group signal to the real platform signaler
+// and records the call so a test can prove which group received which signal.
+// Unlike fakeSignaler it performs the actual OS kill through the delegate.
+type recordingSignaler struct {
+	mu    sync.Mutex
+	calls []signalCall
+	real  ownership.Signaler
+}
+
+func (r *recordingSignaler) Supported() bool { return r.real.Supported() }
+
+func (r *recordingSignaler) GroupSignal(pgid int, signal os.Signal) error {
+	r.mu.Lock()
+	r.calls = append(r.calls, signalCall{pgid: pgid, signal: signal})
+	r.mu.Unlock()
+	return r.real.GroupSignal(pgid, signal)
+}
+
+func (r *recordingSignaler) recorded() []signalCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]signalCall(nil), r.calls...)
+}
+
+// awaitFixtureLine reads one line from the fixture channel. The read is a
+// blocking event handshake: it completes when the fixture writes or closes,
+// never on a polling schedule, and is bounded by the deadline.
+func awaitFixtureLine(t *testing.T, r *bufio.Reader, deadline time.Duration) (string, error) {
+	t.Helper()
+	type readResult struct {
+		line string
+		err  error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		line, err := r.ReadString('\n')
+		done <- readResult{line: line, err: err}
+	}()
+	select {
+	case res := <-done:
+		return strings.TrimSpace(res.line), res.err
+	case <-time.After(deadline):
+		t.Fatal("fixture handshake did not complete within deadline")
+		return "", nil
+	}
+}
+
+// openFixtureFIFO opens the fixture FIFO read end. The open blocks until the
+// fixture child opens its write end, so completion is an event, not a poll.
+func openFixtureFIFO(t *testing.T, path string, deadline time.Duration) *os.File {
+	t.Helper()
+	opened := make(chan *os.File, 1)
+	go func() {
+		f, err := os.OpenFile(path, os.O_RDONLY, 0)
+		if err != nil {
+			f = nil
+		}
+		opened <- f
+	}()
+	select {
+	case f := <-opened:
+		if f == nil {
+			t.Fatal("fixture FIFO read end could not be opened")
+		}
+		return f
+	case <-time.After(deadline):
+		t.Fatal("fixture FIFO was never opened by the child")
+		return nil
+	}
+}
+
+// readFixturePGID reads a process-group id the fixture child recorded for
+// itself through ps at runtime.
+func readFixturePGID(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("fixture pgid file %s: %v", path, err)
+	}
+	pgid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pgid <= 0 {
+		t.Fatalf("fixture pgid file %s holds %q: %v", path, string(b), err)
+	}
+	return pgid
+}
+
 func TestManagedProcessRecordFailureKillsGroupAndNeverRuns(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "marker")
-	store := &fakeLeaseStore{recordErr: errors.New("record failed")}
+	psPath, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatalf("ps required for fixture group evidence: %v", err)
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "marker")
+	leaderPGIDFile := filepath.Join(dir, "leader_pgid")
+	descMarker := filepath.Join(dir, "descendant_marker")
+	descPGIDFile := filepath.Join(dir, "descendant_pgid")
+	fifo := filepath.Join(dir, "ready.fifo")
+	if out, err := exec.Command("mkfifo", fifo).CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %v: %s", err, out)
+	}
+
+	// Fixture lifecycle: the leader records its own pgid, opens the FIFO write
+	// end, then spawns a descendant that inherits both the write end and the
+	// process group. The descendant announces readiness only after recording
+	// its own pgid, then blocks in sleep. The leader stays alive in wait.
+	// Every group member therefore holds the FIFO write end, so a read EOF on
+	// the test-owned read end proves the whole group is dead; a surviving
+	// descendant keeps the write end open and the read blocks.
+	script := `touch "$MARKER"; "$PS" -o pgid= -p $$ > "$LEADER_PGID"; exec 3>"$FIFO"; sh -c 'touch "$DESC_MARKER"; "$PS" -o pgid= -p $$ > "$DESC_PGID"; echo ready >&3; exec sleep 60' & wait`
+	serverCfg := &config.ServerConfig{
+		Command:   "/bin/sh",
+		Transport: config.TransportManagedHTTP,
+		Args:      []string{"-c", script},
+		Env: map[string]string{
+			"MARKER":      marker,
+			"LEADER_PGID": leaderPGIDFile,
+			"DESC_MARKER": descMarker,
+			"DESC_PGID":   descPGIDFile,
+			"FIFO":        fifo,
+			"PS":          psPath,
+		},
+	}
+	recordStarted := make(chan struct{})
+	releaseRecord := make(chan struct{})
+	store := &fakeLeaseStore{
+		recordStarted: recordStarted,
+		recordRelease: releaseRecord,
+		recordErr:     errors.New("lease store rejected record"),
+	}
+	signaler := &recordingSignaler{real: ownership.NewSignaler()}
 	cfg := config.SupervisionConfig{}
 	cfg.ApplyDefaults()
 	cfg.ShutdownTimeout = config.Duration(100 * time.Millisecond)
-	serverCfg := &config.ServerConfig{Command: "/bin/sh", Transport: config.TransportManagedHTTP, Args: []string{"-c", "touch " + marker + "; sleep 1"}}
-	p := NewManagedProcessWithOwnership("failure", serverCfg, cfg, slog.Default(), store, "daemon", WithProcReader(&fakeProcReader{}))
-	err := p.Serve(context.Background())
-	if err == nil || strings.Contains(err.Error(), ownership.OwnerTokenEnvKey) {
-		t.Fatalf("bad error: %v", err)
+	p := NewManagedProcessWithOwnership("failure", serverCfg, cfg, slog.Default(), store, "daemon",
+		WithProcReader(&fakeProcReader{}),
+		WithSignaler(signaler),
+		WithTokenGenerator(func() (string, error) { return "vsn27-owner-token", nil }),
+	)
+
+	// Bounded leak-safe cleanup on every path: kill the fixture group and
+	// release the FIFO read end even when an assertion fails mid-handshake.
+	fixtureGroup := new(int)
+	t.Cleanup(func() {
+		if *fixtureGroup > 0 {
+			_ = signaler.GroupSignal(*fixtureGroup, syscall.SIGKILL)
+		}
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- p.Serve(context.Background()) }()
+	<-recordStarted
+
+	if state, generation := p.LifecycleSnapshot(); state != StateStarting || generation != 0 {
+		t.Fatalf("lifecycle while record blocked = %s/%d, want %s/0", state, generation, StateStarting)
 	}
-	if p.State() != StateCrashed {
-		t.Fatalf("state=%s", p.State())
+
+	fifoRead := openFixtureFIFO(t, fifo, 5*time.Second)
+	defer fifoRead.Close()
+	reader := bufio.NewReader(fifoRead)
+	if ready, err := awaitFixtureLine(t, reader, 5*time.Second); err != nil || ready != "ready" {
+		t.Fatalf("fixture readiness = %q, err %v; want ready", ready, err)
 	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("marker exists after record failure cleanup")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker missing at readiness; child execution not evidenced before failed record: %v", err)
 	}
+	leaderPGID := readFixturePGID(t, leaderPGIDFile)
+	descPGID := readFixturePGID(t, descPGIDFile)
+	if leaderPGID != p.PID() {
+		t.Fatalf("leader pgid %d does not match spawned pid %d", leaderPGID, p.PID())
+	}
+	if descPGID != leaderPGID {
+		t.Fatalf("descendant pgid %d != leader pgid %d: descendant not in the child process group", descPGID, leaderPGID)
+	}
+	*fixtureGroup = leaderPGID
+
+	close(releaseRecord)
+	var serveErr error
+	select {
+	case serveErr = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after failed lease record")
+	}
+	if serveErr == nil {
+		t.Fatal("Serve returned nil for failed lease record")
+	}
+	if strings.Contains(serveErr.Error(), ownership.OwnerTokenEnvKey) || strings.Contains(serveErr.Error(), "vsn27-owner-token") {
+		t.Fatalf("returned error exposes ownership secret: %v", serveErr)
+	}
+
+	calls := signaler.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("group signal calls = %d (%v), want exactly 1 delegated call", len(calls), calls)
+	}
+	if calls[0].pgid != leaderPGID {
+		t.Fatalf("kill targeted pgid %d, want the child's actual process group %d", calls[0].pgid, leaderPGID)
+	}
+	if calls[0].signal != syscall.SIGKILL {
+		t.Fatalf("recorded signal = %v, want SIGKILL", calls[0].signal)
+	}
+
 	p.mu.RLock()
-	active := p.leaseActive
 	processState := p.cmd.ProcessState
+	leaseActive := p.leaseActive
 	p.mu.RUnlock()
-	if active || processState == nil {
-		t.Fatalf("cleanup state active=%v processState=%v", active, processState)
+	if processState == nil {
+		t.Fatal("leader not reaped before Serve returned: ProcessState missing")
+	}
+	if processState.Success() {
+		t.Fatal("leader exit status reports success; expected signal death")
+	}
+	if leaseActive {
+		t.Fatal("lease still active after failed record")
+	}
+	if state, generation := p.LifecycleSnapshot(); state != StateCrashed || generation != 0 {
+		t.Fatalf("lifecycle after failure = %s/%d, want %s/0", state, generation, StateCrashed)
+	}
+
+	// Group-kill discrimination: the descendant holds the FIFO write end, so
+	// a leader-only kill leaves the channel open and this read blocks out.
+	if _, err := awaitFixtureLine(t, reader, 5*time.Second); err != io.EOF {
+		t.Fatalf("fixture channel not closed after kill (err %v): descendant survived, kill was not group-wide", err)
 	}
 }
 
