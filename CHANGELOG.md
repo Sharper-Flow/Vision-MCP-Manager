@@ -1,3 +1,9 @@
+## 2026-09-30 (v1.5.9)
+
+### Fixed
+
+- stop spawn and proxy logs writing resolved credentials (#27)
+
 ## 2026-09-30 (v1.5.8)
 
 ### Fixed
