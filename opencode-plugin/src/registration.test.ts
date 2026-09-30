@@ -21,15 +21,9 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
-const { checkHealthMock, visionInitMock, visionAddMock } = vi.hoisted(() => ({
-  checkHealthMock: vi.fn(async () => ({ healthy: false })),
+const { visionInitMock, visionAddMock } = vi.hoisted(() => ({
   visionInitMock: vi.fn(async () => "mocked vision_init"),
   visionAddMock: vi.fn(async () => "mocked vision_add"),
-}))
-
-vi.mock("./health", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./health")>()),
-  checkHealth: checkHealthMock,
 }))
 
 vi.mock("./tools", async (importOriginal) => ({
@@ -39,7 +33,6 @@ vi.mock("./tools", async (importOriginal) => ({
 }))
 
 import VisionPlugin from "./index"
-import { renderVisionContext } from "./context"
 import {
   OPENCODE_MCP_TOOL_NAMES,
   VISION_DAEMON_TOOL_NAMES,
@@ -109,7 +102,6 @@ function expectedFor(codeMode: boolean): string[] {
 
 describe("plugin tool registration", () => {
   beforeEach(() => {
-    checkHealthMock.mockClear()
     visionInitMock.mockClear()
   })
 
@@ -414,8 +406,7 @@ interface V2SetupFixture {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   cleanup: any
   added: Record<string, RecordedV2Tool>
-  hooks: Record<string, (input: unknown) => Promise<void> | void>
-  eventSubscribed: boolean
+  sessionHook: ReturnType<typeof vi.fn>
 }
 
 async function runV2Setup(
@@ -425,8 +416,6 @@ async function runV2Setup(
   vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
 
   const added: Record<string, RecordedV2Tool> = {}
-  const hooks: Record<string, (input: unknown) => Promise<void> | void> = {}
-  let eventSubscribed = false
 
   const editor = {
     add: (tool: RecordedV2Tool) => {
@@ -434,19 +423,12 @@ async function runV2Setup(
     },
   }
 
+  const sessionHook = vi.fn(async () => ({ dispose: async () => {} }))
+
   const context = {
     location: { directory: "/tmp/project" },
-    event: {
-      subscribe: () => {
-        eventSubscribed = true
-        return (async function* () {})()
-      },
-    },
     session: {
-      hook: async (name: string, callback: (input: unknown) => Promise<void> | void) => {
-        hooks[name] = callback
-        return { dispose: async () => {} }
-      },
+      hook: sessionHook,
     },
     tool: {
       transform: async (callback: (input: unknown) => void) => {
@@ -462,12 +444,11 @@ async function runV2Setup(
     VisionPlugin as unknown as { setup: (context: unknown) => Promise<unknown> }
   ).setup(context)
 
-  return { cleanup, added, hooks, eventSubscribed }
+  return { cleanup, added, sessionHook }
 }
 
 describe("V2 setup registration", () => {
   beforeEach(() => {
-    checkHealthMock.mockClear()
     visionInitMock.mockClear()
     visionAddMock.mockClear()
   })
@@ -476,11 +457,14 @@ describe("V2 setup registration", () => {
     vi.unstubAllEnvs()
   })
 
-  it("subscribes to the event stream and registers the compaction hook", async () => {
-    const fixture = await runV2Setup(false)
+  it("registers no compaction hook in either loader", async () => {
+    // Compaction context stays out of the plugin: agents get daemon guidance
+    // only through tool results, never as unsolicited session context.
+    const v1 = await loadHooks()
+    expect(v1["experimental.session.compacting"]).toBeUndefined()
 
-    expect(fixture.eventSubscribed).toBe(true)
-    expect(Object.keys(fixture.hooks)).toContain("compaction")
+    const fixture = await runV2Setup(false)
+    expect(fixture.sessionHook).not.toHaveBeenCalled()
   })
 
   it("registers exactly the declared tool names with JSON Schema inputs (Code Mode OFF)", async () => {
@@ -535,48 +519,6 @@ describe("V2 setup registration", () => {
     // default before the handler ran.
     expect(visionAddMock).toHaveBeenCalledWith({ name: "linear", start: true })
     expect(result).toEqual({ content: "mocked vision_add" })
-  })
-
-  it("injects the Vision context as a text system part on compaction", async () => {
-    const fixture = await runV2Setup(false)
-    const compaction = fixture.hooks["compaction"]
-
-    const input = { system: [] as Array<{ type: string; text: string }> }
-    await compaction?.(input)
-
-    expect(input.system).toHaveLength(1)
-    expect(input.system[0].type).toBe("text")
-    expect(input.system[0].text).toBe(renderVisionContext({ healthy: false, codeMode: false }))
-  })
-
-  it("checks daemon health on session.created events", async () => {
-    checkHealthMock.mockClear()
-
-    vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", "false")
-    const context = {
-      location: { directory: "/tmp/project" },
-      event: {
-        subscribe: () =>
-          (async function* () {
-            yield { type: "session.created", data: { sessionID: "sess-1" } }
-          })(),
-      },
-      session: {
-        hook: async () => ({ dispose: async () => {} }),
-      },
-      tool: {
-        transform: async () => ({ dispose: async () => {} }),
-      },
-      mcp: fakeV2Mcp({}, "connected"),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any
-
-    await (VisionPlugin as unknown as { setup: (context: unknown) => Promise<unknown> }).setup(
-      context
-    )
-
-    // One startup check + one per session.created event.
-    await vi.waitFor(() => expect(checkHealthMock).toHaveBeenCalledTimes(2))
   })
 
   it("connects a declared disabled server through the ctx.mcp domain", async () => {
