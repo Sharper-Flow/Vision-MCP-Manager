@@ -1,3 +1,9 @@
+## 2026-09-30 (v1.5.7)
+
+### Fixed
+
+- stop health-check respawn orphaning the shared stdio subprocess (#24)
+
 ## 2026-09-24 (v1.5.6)
 
 ### Fixed
