@@ -798,9 +798,9 @@ rl.on('line', (line) => {
 });
 `
 
-// TestSharedManager_HealthCheckFailureClosesLiveDownstream verifies that a
-// health check which times out against a live subprocess stops that
-// subprocess before it spawns the replacement.
+// TestSharedManager_HealthCheckFailureClosesLiveDownstream verifies that
+// health-check timeouts against a live subprocess stop that subprocess before
+// the replacement spawns, once the consecutive-timeout respawn gate opens.
 func TestSharedManager_HealthCheckFailureClosesLiveDownstream(t *testing.T) {
 	skipIfNoNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -821,7 +821,11 @@ func TestSharedManager_HealthCheckFailureClosesLiveDownstream(t *testing.T) {
 	sm.mu.RUnlock()
 	t.Cleanup(func() { _ = syscall.Kill(oldPID, syscall.SIGKILL) })
 
-	sm.healthCheck()
+	// Timed-out probes defer the respawn until maxConsecutiveHealthCheckTimeouts
+	// consecutive failures; drive the gate open before asserting the close.
+	for i := 0; i < maxConsecutiveHealthCheckTimeouts; i++ {
+		sm.healthCheck()
+	}
 
 	sm.mu.RLock()
 	newPID := sm.cmd.Process.Pid
@@ -831,5 +835,96 @@ func TestSharedManager_HealthCheckFailureClosesLiveDownstream(t *testing.T) {
 	}
 	if err := syscall.Kill(oldPID, 0); !errors.Is(err, syscall.ESRCH) {
 		t.Fatalf("old downstream pid %d still exists after health-check respawn (kill 0 err=%v)", oldPID, err)
+	}
+}
+
+// TestSharedManager_HealthCheckTimeoutRequiresConsecutiveFailures verifies the
+// timeout respawn gate: a timed-out probe against a live subprocess leaves it
+// running so in-flight calls survive, the respawn fires only after
+// maxConsecutiveHealthCheckTimeouts consecutive timed-out probes, and the
+// failure count resets after the respawn.
+func TestSharedManager_HealthCheckTimeoutRequiresConsecutiveFailures(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cfg := testSharedServerConfig()
+	cfg.Args = []string{"-e", hangingListToolsServerJS}
+
+	sm := NewSharedSessionManager("test-health-gate", cfg, testLogger(t), 0, nil)
+	defer sm.CloseAll()
+	sm.healthCtx = ctx
+
+	if _, err := sm.GetOrCreateSession(ctx, "sess-gate"); err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+	sm.mu.RLock()
+	oldPID := sm.cmd.Process.Pid
+	sm.mu.RUnlock()
+	t.Cleanup(func() { _ = syscall.Kill(oldPID, syscall.SIGKILL) })
+
+	for i := 1; i < maxConsecutiveHealthCheckTimeouts; i++ {
+		sm.healthCheck()
+
+		sm.mu.RLock()
+		pid := sm.cmd.Process.Pid
+		failures := sm.healthCheckFailures
+		sm.mu.RUnlock()
+		if pid != oldPID {
+			t.Fatalf("timeout %d/%d respawned the downstream: pid %d -> %d", i, maxConsecutiveHealthCheckTimeouts, oldPID, pid)
+		}
+		if failures != i {
+			t.Fatalf("after %d consecutive timeouts the failure count = %d, want %d", i, failures, i)
+		}
+		if err := syscall.Kill(oldPID, 0); err != nil {
+			t.Fatalf("deferred respawn killed the live downstream pid %d (kill 0 err=%v)", oldPID, err)
+		}
+	}
+
+	sm.healthCheck()
+
+	sm.mu.RLock()
+	newPID := sm.cmd.Process.Pid
+	failures := sm.healthCheckFailures
+	sm.mu.RUnlock()
+	if newPID == oldPID {
+		t.Fatalf("%d consecutive timeouts did not respawn: pid %d unchanged", maxConsecutiveHealthCheckTimeouts, oldPID)
+	}
+	if failures != 0 {
+		t.Fatalf("failure count = %d after respawn, want 0", failures)
+	}
+	if err := syscall.Kill(oldPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("old downstream pid %d still exists after gated respawn (kill 0 err=%v)", oldPID, err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(newPID, syscall.SIGKILL) })
+}
+
+// TestSharedManager_HealthCheckSuccessResetsTimeoutCounter verifies that a
+// successful probe clears the consecutive-timeout count, so a later timeout
+// starts the gate from zero.
+func TestSharedManager_HealthCheckSuccessResetsTimeoutCounter(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	sm := NewSharedSessionManager("test-health-reset", testSharedServerConfig(), testLogger(t), 0, nil)
+	defer sm.CloseAll()
+	sm.healthCtx = ctx
+
+	if _, err := sm.GetOrCreateSession(ctx, "sess-reset"); err != nil {
+		t.Fatalf("GetOrCreateSession failed: %v", err)
+	}
+
+	sm.mu.Lock()
+	sm.healthCheckFailures = maxConsecutiveHealthCheckTimeouts - 1
+	sm.mu.Unlock()
+
+	sm.healthCheck()
+
+	sm.mu.RLock()
+	failures := sm.healthCheckFailures
+	sm.mu.RUnlock()
+	if failures != 0 {
+		t.Fatalf("successful probe left the failure count = %d, want 0", failures)
 	}
 }
