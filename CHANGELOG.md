@@ -1,3 +1,9 @@
+## 2026-09-30 (v1.5.8)
+
+### Fixed
+
+- wire daemon metrics and count proxied tool calls (#25)
+
 ## 2026-09-30 (v1.5.7)
 
 ### Fixed
