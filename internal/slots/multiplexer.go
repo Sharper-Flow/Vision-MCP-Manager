@@ -39,6 +39,14 @@ type Multiplexer struct {
 	byUpstream map[string]*slotEntry
 	logger     *slog.Logger
 	mu         sync.RWMutex
+
+	// onSessionRemoved is the group proxy's removal observer. It is added to
+	// each member manager as an extra observer so the member endpoint's own
+	// removal callback survives, and it is re-applied to replacement member
+	// managers in ReplaceEntries. hooked records which managers already carry
+	// it so re-registration never stacks duplicates.
+	onSessionRemoved func(sessionID string)
+	hooked           map[*session.Manager]bool
 }
 
 func NewMultiplexer(groupName string, logger *slog.Logger, entries []Entry) *Multiplexer {
@@ -62,8 +70,6 @@ func NewMultiplexer(groupName string, logger *slog.Logger, entries []Entry) *Mul
 
 func (m *Multiplexer) ReplaceEntries(entries []Entry) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	updated := make([]*slotEntry, 0, len(entries))
 	for _, entry := range entries {
 		var existing *slotEntry
@@ -85,6 +91,13 @@ func (m *Multiplexer) ReplaceEntries(entries []Entry) {
 	}
 	sort.Slice(updated, func(i, j int) bool { return updated[i].index < updated[j].index })
 	m.slots = updated
+	m.mu.Unlock()
+
+	// Replacement member managers must observe group-session removals too,
+	// or a reap on a restarted member strands the session gauge.
+	for _, entry := range updated {
+		m.applyRemovalHook(entry)
+	}
 }
 
 // ReporterFor resolves the per-server metrics reporter owning the given
@@ -197,16 +210,40 @@ func (m *Multiplexer) ReportSpawnResult(sessionKey string, err error) {
 	entry.quarantinedUntil = time.Now().Add(2 * time.Second)
 }
 
+// SetOnSessionRemoved stores the group proxy's removal observer and adds it
+// to every current member manager. Member managers keep their own endpoint's
+// callback: sessions created through either endpoint must reach their owning
+// proxy's closeDownstream.
 func (m *Multiplexer) SetOnSessionRemoved(fn func(sessionID string)) {
-	m.mu.RLock()
+	m.mu.Lock()
+	m.onSessionRemoved = fn
 	entries := make([]*slotEntry, 0, len(m.slots))
 	entries = append(entries, m.slots...)
-	m.mu.RUnlock()
+	m.mu.Unlock()
 
 	for _, entry := range entries {
-		if entry != nil && entry.mgr != nil {
-			entry.mgr.SetOnSessionRemoved(fn)
+		m.applyRemovalHook(entry)
+	}
+}
+
+// applyRemovalHook adds the group's removal observer to one member manager at
+// most once, so repeated entry replacement never stacks duplicate callbacks.
+func (m *Multiplexer) applyRemovalHook(entry *slotEntry) {
+	if entry == nil || entry.mgr == nil {
+		return
+	}
+	m.mu.Lock()
+	fn := m.onSessionRemoved
+	alreadyHooked := m.hooked[entry.mgr]
+	if fn != nil && !alreadyHooked {
+		if m.hooked == nil {
+			m.hooked = make(map[*session.Manager]bool)
 		}
+		m.hooked[entry.mgr] = true
+	}
+	m.mu.Unlock()
+	if fn != nil && !alreadyHooked {
+		entry.mgr.AddOnSessionRemoved(fn)
 	}
 }
 

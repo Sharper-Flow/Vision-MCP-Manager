@@ -43,9 +43,18 @@ type Manager struct {
 	config     *config.ServerConfig
 	logger     *slog.Logger
 
-	mu               sync.RWMutex
-	sessions         map[string]*TrackedSession
-	onSessionRemoved func(sessionID string) // optional callback, fired before session IO teardown
+	mu       sync.RWMutex
+	sessions map[string]*TrackedSession
+
+	// onSessionRemoved is the primary removal callback registered with
+	// SetOnSessionRemoved by the proxy surface that owns this manager's
+	// endpoint. onSessionRemovedExtra holds observers registered with
+	// AddOnSessionRemoved by surfaces that share the same manager, such as a
+	// slot-group multiplexer routed over a member endpoint's manager. Every
+	// registered callback fires before session IO teardown, so a session
+	// created through either endpoint reaches its owning proxy.
+	onSessionRemoved      func(sessionID string)
+	onSessionRemovedExtra []func(sessionID string)
 }
 
 // NewManager creates a new session Manager for the given server.
@@ -61,15 +70,44 @@ func NewManager(serverName string, cfg *config.ServerConfig, logger *slog.Logger
 	}
 }
 
-// SetOnSessionRemoved registers a callback that fires before any session's
-// downstream connection is closed. This is called from all removal paths:
-// RemoveSession, reaper, and CloseAll. The callback receives the session ID
-// and runs outside any Manager lock, allowing the proxy layer to gate further
-// dispatches before the SDK connection is torn down.
+// SetOnSessionRemoved registers the primary callback that fires before any
+// session's downstream connection is closed. This is called from all removal
+// paths: RemoveSession, reaper, and CloseAll. The callback receives the
+// session ID and runs outside any Manager lock, allowing the proxy layer to
+// gate further dispatches before the SDK connection is torn down. A second
+// registration replaces the first: each proxy surface owns one primary
+// callback for its endpoint.
 func (m *Manager) SetOnSessionRemoved(fn func(sessionID string)) {
 	m.mu.Lock()
 	m.onSessionRemoved = fn
 	m.mu.Unlock()
+}
+
+// AddOnSessionRemoved registers an additional removal observer that fires
+// after the primary callback, before session IO teardown. Shared surfaces —
+// a slot-group multiplexer routed over a member endpoint's manager — use this
+// to observe removals without displacing the member endpoint's own callback.
+func (m *Manager) AddOnSessionRemoved(fn func(sessionID string)) {
+	if fn == nil {
+		return
+	}
+	m.mu.Lock()
+	m.onSessionRemovedExtra = append(m.onSessionRemovedExtra, fn)
+	m.mu.Unlock()
+}
+
+// sessionRemovedCallbacks snapshots every registered removal callback,
+// primary first. The snapshot runs outside the manager lock so a callback may
+// call back into the manager.
+func (m *Manager) sessionRemovedCallbacks() []func(sessionID string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var callbacks []func(sessionID string)
+	if m.onSessionRemoved != nil {
+		callbacks = append(callbacks, m.onSessionRemoved)
+	}
+	callbacks = append(callbacks, m.onSessionRemovedExtra...)
+	return callbacks
 }
 
 // SpawnSession creates a new downstream subprocess for the given session ID.
@@ -347,10 +385,7 @@ func (m *Manager) closeTrackedSession(tracked *TrackedSession) error {
 
 	// Notify the proxy layer before IO teardown so it can set its closed flag
 	// and stop dispatching calls to the about-to-close connection.
-	m.mu.RLock()
-	cb := m.onSessionRemoved
-	m.mu.RUnlock()
-	if cb != nil {
+	for _, cb := range m.sessionRemovedCallbacks() {
 		cb(tracked.SessionID)
 	}
 

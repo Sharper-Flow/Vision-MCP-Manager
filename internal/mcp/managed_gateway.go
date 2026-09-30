@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -165,10 +167,15 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if sessionID == "" {
 			initialize, err := isManagedInitializeRequest(r)
 			if err != nil {
+				g.countToolsCallsInBody(r)
 				writeManagedError(w, http.StatusBadRequest, -32600, "invalid JSON-RPC request")
 				return
 			}
 			if !initialize {
+				// Count every JSON-RPC tools/call request even when the
+				// session header is missing; the session-header branch owns
+				// rejection, not call accounting.
+				g.countToolsCallsInBody(r)
 				writeManagedError(w, http.StatusNotFound, -32001, "MCP session not found")
 				return
 			}
@@ -553,20 +560,103 @@ func countManagedToolsCalls(body []byte) (int, error) {
 	return 0, nil
 }
 
-func isToolsCallMember(raw json.RawMessage) bool {
+// mcpMemberKind classifies one JSON-RPC envelope member against the MCP
+// basic Messages schema (2025-11-25): a request carries jsonrpc "2.0", a
+// string-or-integer id, and a method; a notification omits the id; a response
+// carries an id with result or error and no method.
+type mcpMemberKind uint8
+
+const (
+	mcpMemberMalformed mcpMemberKind = iota
+	mcpMemberNotification
+	mcpMemberRequest
+	mcpMemberResponse
+)
+
+// mcpMember is one envelope member's classification plus its method name.
+type mcpMember struct {
+	kind   mcpMemberKind
+	method string
+}
+
+// classifyMCPMember is the single envelope-classification owner for managed
+// gateway counting: request, notification, response, or malformed. It
+// validates the envelope only and never reads method params. The go-sdk
+// jsonrpc.DecodeMessage is not used here because it accepts a fractional id
+// (1.5) as a call by truncating it, while the MCP schema restricts request
+// ids to strings and integers.
+func classifyMCPMember(raw json.RawMessage) mcpMember {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return false
+		return mcpMember{kind: mcpMemberMalformed}
 	}
+	versionRaw, hasVersion := fields["jsonrpc"]
+	if !hasVersion {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
+	var version string
+	if err := json.Unmarshal(versionRaw, &version); err != nil || version != "2.0" {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
+	idRaw, hasID := fields["id"]
+	_, hasResult := fields["result"]
+	_, hasError := fields["error"]
 	methodRaw, hasMethod := fields["method"]
 	if !hasMethod {
-		return false
+		// No method: only a response shape (id with result or error) is
+		// recognizable; anything else is malformed.
+		if hasID && (hasResult || hasError) {
+			return mcpMember{kind: mcpMemberResponse}
+		}
+		return mcpMember{kind: mcpMemberMalformed}
 	}
 	var method string
-	if err := json.Unmarshal(methodRaw, &method); err != nil {
+	if err := json.Unmarshal(methodRaw, &method); err != nil || method == "" {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
+	if !hasID {
+		return mcpMember{kind: mcpMemberNotification, method: method}
+	}
+	if hasResult || hasError || !isMCPRequestID(idRaw) {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
+	return mcpMember{kind: mcpMemberRequest, method: method}
+}
+
+// isMCPRequestID reports whether the raw JSON value is a valid MCP request
+// id: a JSON string, or a JSON number with no fractional part. null,
+// booleans, objects, arrays, and fractional numbers are rejected.
+func isMCPRequestID(raw json.RawMessage) bool {
+	// json.Unmarshal leaves its target untouched with a nil error for a
+	// JSON null, so null is rejected before the string probe.
+	if string(raw) == "null" {
 		return false
 	}
-	return method == "tools/call"
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return true
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		return false
+	}
+	literal := number.String()
+	if _, err := strconv.ParseInt(literal, 10, 64); err == nil {
+		return true
+	}
+	// JSON Schema "integer" also matches values such as 1.0 or 1e2 whose
+	// value carries no fractional part.
+	value, err := strconv.ParseFloat(literal, 64)
+	return err == nil && value == math.Trunc(value)
+}
+
+// isToolsCallMember reports whether one JSON-RPC envelope member is a genuine
+// MCP tools/call request. The classification owner answers request,
+// notification, response, or malformed; only a genuine request whose method
+// is tools/call counts.
+func isToolsCallMember(raw json.RawMessage) bool {
+	member := classifyMCPMember(raw)
+	return member.kind == mcpMemberRequest && member.method == "tools/call"
 }
 
 func isManagedInitializeRequest(r *http.Request) (bool, error) {
@@ -593,6 +683,23 @@ func isManagedInitializeRequest(r *http.Request) (bool, error) {
 		return false, err
 	}
 	return method == "initialize", nil
+}
+
+// countToolsCallsInBody counts the tools/call requests in this POST body,
+// batch members included, for the daemon-wide call counter. Call accounting
+// is independent of the session-header branch: a request rejected before any
+// session lookup still counted its calls.
+func (g *ManagedHTTPGateway) countToolsCallsInBody(r *http.Request) {
+	if g.daemonMetrics == nil {
+		return
+	}
+	_, toolsCalls, err := classifyManagedRequestBody(r)
+	if err != nil || toolsCalls == 0 {
+		return
+	}
+	for i := 0; i < toolsCalls; i++ {
+		g.daemonMetrics.IncToolCalls()
+	}
 }
 
 func validateManagedGatewayTarget(target *url.URL) error {
