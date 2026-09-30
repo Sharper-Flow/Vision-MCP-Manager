@@ -15,12 +15,18 @@ type Snapshot struct {
 	SubprocessesActive int64 `json:"subprocesses_active"`
 }
 
-// DaemonMetrics provides thread-safe daemon-wide counters using sync/atomic.
+// DaemonMetrics holds the daemon-wide forwarding counters. The active session
+// and subprocess gauges are not counted here: they are derived at read time
+// from their existing owners through the providers wired with
+// SetGaugeProviders (per-server ServerMetrics for sessions; session managers
+// and the supervisor for processes). Providers must be wired before the daemon
+// starts serving; Snapshot is then safe for concurrent use.
 type DaemonMetrics struct {
-	toolCallsTotal     atomic.Int64
-	errorsTotal        atomic.Int64
-	sessionsActive     atomic.Int64
-	subprocessesActive atomic.Int64
+	toolCallsTotal atomic.Int64
+	errorsTotal    atomic.Int64
+
+	sessionsActive     func() int64
+	subprocessesActive func() int64
 }
 
 // NewDaemonMetrics creates a new zeroed DaemonMetrics.
@@ -38,34 +44,27 @@ func (m *DaemonMetrics) IncErrors() {
 	m.errorsTotal.Add(1)
 }
 
-// IncSessionsActive atomically increments the active session counter.
-func (m *DaemonMetrics) IncSessionsActive() {
-	m.sessionsActive.Add(1)
+// SetGaugeProviders wires the read-time derivations for the gauge fields.
+// Each provider is consulted on every Snapshot call; a nil provider reports 0.
+func (m *DaemonMetrics) SetGaugeProviders(sessionsActive, subprocessesActive func() int64) {
+	m.sessionsActive = sessionsActive
+	m.subprocessesActive = subprocessesActive
 }
 
-// DecSessionsActive atomically decrements the active session counter.
-func (m *DaemonMetrics) DecSessionsActive() {
-	m.sessionsActive.Add(-1)
-}
-
-// IncSubprocessesActive atomically increments the active subprocess counter.
-func (m *DaemonMetrics) IncSubprocessesActive() {
-	m.subprocessesActive.Add(1)
-}
-
-// DecSubprocessesActive atomically decrements the active subprocess counter.
-func (m *DaemonMetrics) DecSubprocessesActive() {
-	m.subprocessesActive.Add(-1)
-}
-
-// Snapshot returns a point-in-time copy of all counters.
+// Snapshot returns a point-in-time copy of all counters, deriving the gauges
+// from their wired owners at read time.
 func (m *DaemonMetrics) Snapshot() Snapshot {
-	return Snapshot{
-		ToolCallsTotal:     m.toolCallsTotal.Load(),
-		ErrorsTotal:        m.errorsTotal.Load(),
-		SessionsActive:     m.sessionsActive.Load(),
-		SubprocessesActive: m.subprocessesActive.Load(),
+	snapshot := Snapshot{
+		ToolCallsTotal: m.toolCallsTotal.Load(),
+		ErrorsTotal:    m.errorsTotal.Load(),
 	}
+	if m.sessionsActive != nil {
+		snapshot.SessionsActive = m.sessionsActive()
+	}
+	if m.subprocessesActive != nil {
+		snapshot.SubprocessesActive = m.subprocessesActive()
+	}
+	return snapshot
 }
 
 // ServerMetricsSnapshot holds a point-in-time copy of per-server metrics.

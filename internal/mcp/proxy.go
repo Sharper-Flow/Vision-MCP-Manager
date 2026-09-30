@@ -206,6 +206,10 @@ type ProxyConfig struct {
 
 	// Metrics tracks per-server session lifecycle counters. Optional; nil = no metrics.
 	Metrics metrics.ServerMetricsReporter
+
+	// DaemonMetrics records daemon-wide tool call and forwarding failure
+	// counters. Optional; nil = no daemon-wide counting.
+	DaemonMetrics *metrics.DaemonMetrics
 }
 
 // hasExactlyOneManagerSource reports whether exactly one of SessionManager,
@@ -350,6 +354,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				cfg.RetryConfig,
 				cfg.CircuitBreakerConfig,
 				cfg.Metrics,
+				cfg.DaemonMetrics,
 				getReachabilityStore,
 				func(upstreamSessionID string, ps *proxySession) {
 					ps.SetReachabilityStore(getReachabilityStore())
@@ -405,6 +410,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			cfg.RetryConfig,
 			cfg.CircuitBreakerConfig,
 			cfg.Metrics,
+			cfg.DaemonMetrics,
 			getReachabilityStore,
 			func(upstreamSessionID string, ps *proxySession) {
 				ps.SetReachabilityStore(getReachabilityStore())
@@ -653,6 +659,10 @@ type proxySession struct {
 
 	// metrics tracks per-server session lifecycle counters. Optional; nil = no metrics.
 	metrics metrics.ServerMetricsReporter
+
+	// daemonMetrics records daemon-wide tool call and forwarding failure
+	// counters. Optional; nil = no daemon-wide counting.
+	daemonMetrics *metrics.DaemonMetrics
 }
 
 // SetReachabilityStore configures the optional store used by this session's
@@ -682,6 +692,7 @@ func newPerSessionServer(
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
 	srvMetrics metrics.ServerMetricsReporter,
+	daemonMetrics *metrics.DaemonMetrics,
 	reachabilityStore func() *reachability.Store,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
@@ -707,6 +718,7 @@ func newPerSessionServer(
 		retryConfig:         retryConfig,
 		circuitBreaker:      newCircuitBreaker(circuitBreakerConfig, nil),
 		metrics:             srvMetrics,
+		daemonMetrics:       daemonMetrics,
 	}
 	if reachabilityStore != nil {
 		ps.SetReachabilityStore(reachabilityStore())
@@ -732,7 +744,7 @@ func newPerSessionServer(
 		Name:    fmt.Sprintf("vision-proxy-%s", serverName),
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{
-		HasTools: true,
+		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}},
 		// Capture the ServerSession when the upstream client completes initialization.
 		InitializedHandler: func(_ context.Context, req *mcp.InitializedRequest) {
 			ps.mu.Lock()
@@ -819,6 +831,7 @@ func newSharedModeServer(
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
 	srvMetrics metrics.ServerMetricsReporter,
+	daemonMetrics *metrics.DaemonMetrics,
 	reachabilityStore func() *reachability.Store,
 	onInitialized func(string, *proxySession),
 	onClosed func(string),
@@ -840,6 +853,7 @@ func newSharedModeServer(
 		retryConfig:        retryConfig,
 		circuitBreaker:     newCircuitBreaker(circuitBreakerConfig, nil),
 		metrics:            srvMetrics,
+		daemonMetrics:      daemonMetrics,
 	}
 	if reachabilityStore != nil {
 		ps.SetReachabilityStore(reachabilityStore())
@@ -865,7 +879,7 @@ func newSharedModeServer(
 		Name:    fmt.Sprintf("vision-proxy-%s", serverName),
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{
-		HasTools: true,
+		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}},
 		InitializedHandler: func(_ context.Context, req *mcp.InitializedRequest) {
 			ps.mu.Lock()
 			ps.upstreamSession = req.Session
@@ -1161,18 +1175,22 @@ func (ps *proxySession) getDownstream(ctx context.Context) (*mcp.ClientSession, 
 }
 
 func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToolRequest, toolName string) (*mcp.CallToolResult, error) {
+	if ps.daemonMetrics != nil {
+		ps.daemonMetrics.IncToolCalls()
+	}
+
 	if ps.circuitBreaker != nil && !ps.circuitBreaker.allow() {
 		err := &CircuitOpenError{Server: ps.serverName, RetryIn: ps.circuitBreaker.retryIn()}
 		ps.logger.Warn("circuit breaker open, failing fast",
 			slog.String("tool", toolName),
 			slog.Duration("retry_in", err.RetryIn),
 		)
-		return nil, classifyToolCallError(err, false, ps.retryConfig.RetryableErrors)
+		return nil, ps.recordForwardingFailure(classifyToolCallError(err, false, ps.retryConfig.RetryableErrors))
 	}
 
 	release, err := ps.inFlightLimiter.acquire(ctx)
 	if err != nil {
-		return nil, classifyToolCallError(err, false, ps.retryConfig.RetryableErrors)
+		return nil, ps.recordForwardingFailure(classifyToolCallError(err, false, ps.retryConfig.RetryableErrors))
 	}
 	defer release()
 
@@ -1181,18 +1199,18 @@ func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToo
 
 	ds, closed, err := ps.getDownstream(requestCtx)
 	if err != nil {
-		return nil, classifyToolCallError(err, false, ps.retryConfig.RetryableErrors)
+		return nil, ps.recordForwardingFailure(classifyToolCallError(err, false, ps.retryConfig.RetryableErrors))
 	}
 	if closed || ds == nil {
 		if ps.shared {
-			return nil, classifyToolCallError(ErrDownstreamUnavailable, false, ps.retryConfig.RetryableErrors)
+			return nil, ps.recordForwardingFailure(classifyToolCallError(ErrDownstreamUnavailable, false, ps.retryConfig.RetryableErrors))
 		}
 		ps.logger.Info("downstream unavailable before dispatch, attempting respawn",
 			slog.String("tool", toolName),
 		)
 		ds, err = ps.respawnDownstream(requestCtx, "tool_call_pre_dispatch")
 		if err != nil {
-			return nil, classifyToolCallError(ErrDownstreamUnavailable, false, ps.retryConfig.RetryableErrors)
+			return nil, ps.recordForwardingFailure(classifyToolCallError(ErrDownstreamUnavailable, false, ps.retryConfig.RetryableErrors))
 		}
 	}
 
@@ -1218,12 +1236,22 @@ func (ps *proxySession) callDownstreamTool(ctx context.Context, req *mcp.CallToo
 	if shouldRecordCircuitFailure(lastErr, ps.retryConfig.RetryableErrors) {
 		ps.circuitBreaker.recordFailure()
 	}
-	classifiedErr := classifyToolCallError(lastErr, false, ps.retryConfig.RetryableErrors)
+	classifiedErr := ps.recordForwardingFailure(classifyToolCallError(lastErr, false, ps.retryConfig.RetryableErrors))
 	ps.logger.Error("downstream tool call failed without replay",
 		slog.String("tool", toolName),
 		slog.String("error", classifiedErr.Error()),
 	)
 	return nil, classifiedErr
+}
+
+// recordForwardingFailure counts one daemon-wide forwarding failure and passes
+// the classified error through. Every classified error return from the stdio
+// tools/call path goes through here exactly once.
+func (ps *proxySession) recordForwardingFailure(err error) error {
+	if ps.daemonMetrics != nil {
+		ps.daemonMetrics.IncErrors()
+	}
+	return err
 }
 
 func (c *sharedToolCoordinator) enabledFor(tool string) bool {

@@ -17,20 +17,20 @@ func TestDaemonMetrics_IncrementAndFetch(t *testing.T) {
 		t.Errorf("initial ErrorsTotal = %d, want 0", s.ErrorsTotal)
 	}
 	if s.SessionsActive != 0 {
-		t.Errorf("initial SessionsActive = %d, want 0", s.SessionsActive)
+		t.Errorf("initial SessionsActive = %d, want 0 (no gauge providers wired)", s.SessionsActive)
 	}
 	if s.SubprocessesActive != 0 {
-		t.Errorf("initial SubprocessesActive = %d, want 0", s.SubprocessesActive)
+		t.Errorf("initial SubprocessesActive = %d, want 0 (no gauge providers wired)", s.SubprocessesActive)
 	}
 
-	// Increment and verify
+	// Increment counters and wire derived gauges
 	m.IncToolCalls()
 	m.IncToolCalls()
 	m.IncErrors()
-	m.IncSessionsActive()
-	m.IncSessionsActive()
-	m.IncSessionsActive()
-	m.IncSubprocessesActive()
+	m.SetGaugeProviders(
+		func() int64 { return 3 },
+		func() int64 { return 1 },
+	)
 
 	s = m.Snapshot()
 	if s.ToolCallsTotal != 2 {
@@ -40,35 +40,35 @@ func TestDaemonMetrics_IncrementAndFetch(t *testing.T) {
 		t.Errorf("ErrorsTotal = %d, want 1", s.ErrorsTotal)
 	}
 	if s.SessionsActive != 3 {
-		t.Errorf("SessionsActive = %d, want 3", s.SessionsActive)
+		t.Errorf("SessionsActive = %d, want 3 from the provider", s.SessionsActive)
 	}
 	if s.SubprocessesActive != 1 {
-		t.Errorf("SubprocessesActive = %d, want 1", s.SubprocessesActive)
+		t.Errorf("SubprocessesActive = %d, want 1 from the provider", s.SubprocessesActive)
 	}
 }
 
-func TestDaemonMetrics_DecrementSessions(t *testing.T) {
+// TestDaemonMetrics_GaugesDeriveAtReadTime proves the gauge providers are
+// consulted on every Snapshot call, so the gauges always reflect their owners.
+func TestDaemonMetrics_GaugesDeriveAtReadTime(t *testing.T) {
+	sessions := int64(2)
+	subprocesses := int64(5)
 	m := NewDaemonMetrics()
+	m.SetGaugeProviders(
+		func() int64 { return sessions },
+		func() int64 { return subprocesses },
+	)
 
-	m.IncSessionsActive()
-	m.IncSessionsActive()
-	m.DecSessionsActive()
-
-	s := m.Snapshot()
-	if s.SessionsActive != 1 {
-		t.Errorf("SessionsActive = %d, want 1", s.SessionsActive)
+	if got := m.Snapshot().SessionsActive; got != 2 {
+		t.Fatalf("SessionsActive = %d, want 2", got)
 	}
-}
-
-func TestDaemonMetrics_DecrementSubprocesses(t *testing.T) {
-	m := NewDaemonMetrics()
-
-	m.IncSubprocessesActive()
-	m.DecSubprocessesActive()
-
+	sessions = 7
+	subprocesses = 0
 	s := m.Snapshot()
+	if s.SessionsActive != 7 {
+		t.Errorf("SessionsActive after owner change = %d, want 7 (read-time derivation)", s.SessionsActive)
+	}
 	if s.SubprocessesActive != 0 {
-		t.Errorf("SubprocessesActive = %d, want 0", s.SubprocessesActive)
+		t.Errorf("SubprocessesActive after owner change = %d, want 0 (read-time derivation)", s.SubprocessesActive)
 	}
 }
 
@@ -81,8 +81,7 @@ func TestDaemonMetrics_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			m.IncToolCalls()
-			m.IncSessionsActive()
-			m.DecSessionsActive()
+			m.IncErrors()
 		}()
 	}
 	wg.Wait()
@@ -91,8 +90,8 @@ func TestDaemonMetrics_ConcurrentAccess(t *testing.T) {
 	if s.ToolCallsTotal != 100 {
 		t.Errorf("ToolCallsTotal = %d, want 100", s.ToolCallsTotal)
 	}
-	if s.SessionsActive != 0 {
-		t.Errorf("SessionsActive = %d, want 0 (all inc/dec paired)", s.SessionsActive)
+	if s.ErrorsTotal != 100 {
+		t.Errorf("ErrorsTotal = %d, want 100", s.ErrorsTotal)
 	}
 }
 
