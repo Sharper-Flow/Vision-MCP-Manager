@@ -56,6 +56,12 @@ func (r *recordingSignaler) recorded() []signalCall {
 // completes by an event (a channel close, a FIFO open pairing, or a read EOF).
 const fixtureHandshakeTimeout = 5 * time.Second
 
+// recordFailureBodyWaitDeadline drives the timed-out body-wait branch of the
+// disposal regression. It is a failure-detector deadline, never correctness
+// synchronization: the record barrier is provably held, so Serve cannot
+// return and the deadline always expires first.
+const recordFailureBodyWaitDeadline = 2 * time.Millisecond
+
 // fifoPump owns every read from the FIFO read end. One goroutine pumps
 // completed lines into a buffered channel and closes both channels at EOF, so
 // handshakes are events and cleanup joins a single known reader before the
@@ -210,7 +216,6 @@ type recordFailureFixture struct {
 	releaseOnce   sync.Once
 
 	serveDone     chan error
-	serveAwaited  sync.Once
 	serveErr      error
 	serveReturned bool
 
@@ -299,7 +304,7 @@ func (fx *recordFailureFixture) awaitRecordStarted() {
 	select {
 	case <-fx.recordStarted:
 	case err := <-fx.serveDone:
-		fx.serveAwaited.Do(func() { fx.serveErr, fx.serveReturned = err, true })
+		fx.serveErr, fx.serveReturned = err, true
 		fx.t.Fatalf("Serve returned before the lease record started: %v", err)
 	case <-timer.C:
 		fx.t.Fatal("lease record never started within deadline")
@@ -317,19 +322,26 @@ func (fx *recordFailureFixture) releaseRecordBarrier() {
 	fx.releaseOnce.Do(func() { close(fx.recordRelease) })
 }
 
-// awaitServe waits once, bounded, for Serve to return after the record
-// barrier is released, and records the outcome for the caller.
-func (fx *recordFailureFixture) awaitServe() {
-	fx.serveAwaited.Do(func() {
-		timer := time.NewTimer(fixtureHandshakeTimeout)
-		defer timer.Stop()
-		select {
-		case fx.serveErr = <-fx.serveDone:
-			fx.serveReturned = true
-		case <-timer.C:
-			fx.t.Errorf("Serve did not return after the record barrier was released")
-		}
-	})
+// awaitServe waits bounded for Serve to return and records the outcome. Only
+// an actual receive from serveDone marks the result owned: a timed-out wait
+// consumes nothing, so disposal performs its own bounded receive after the
+// group kill and still joins a late Serve result. The return reports whether
+// the result arrived; callers decide whether a timeout fails the test. Every
+// caller runs on the test goroutine: the test body and t.Cleanup are
+// sequential, so the plain serveReturned marker needs no lock.
+func (fx *recordFailureFixture) awaitServe(deadline time.Duration) bool {
+	if fx.serveReturned {
+		return true
+	}
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	select {
+	case err := <-fx.serveDone:
+		fx.serveErr, fx.serveReturned = err, true
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // dispose releases every fixture barrier and process on any path. The child
@@ -354,7 +366,9 @@ func (fx *recordFailureFixture) dispose() {
 		_ = fx.fifoFile.Close()
 		fx.pumpExited = true
 	}
-	fx.awaitServe()
+	if !fx.awaitServe(fixtureHandshakeTimeout) {
+		fx.t.Errorf("disposal could not join the Serve goroutine after the group kill")
+	}
 	// Reap the leader when a failed path skipped production cleanup. The read
 	// follows the serveDone handoff, so the Serve goroutine has exited.
 	if fx.serveReturned {
@@ -406,8 +420,7 @@ func TestManagedProcessRecordFailureKillsGroupAndNeverRuns(t *testing.T) {
 	}
 
 	fx.releaseRecordBarrier()
-	fx.awaitServe()
-	if !fx.serveReturned {
+	if !fx.awaitServe(fixtureHandshakeTimeout) {
 		t.Fatal("Serve did not return after failed lease record")
 	}
 	serveErr := fx.serveErr
@@ -485,6 +498,46 @@ func TestManagedProcessRecordFailureFixtureCleanupOnEarlyFailure(t *testing.T) {
 	fx.process.mu.RUnlock()
 	if processState == nil {
 		t.Fatal("early-failure disposal left the leader unreaped")
+	}
+}
+
+// TestManagedProcessRecordFailureDisposalJoinsLateServeAfterBodyTimeout pins
+// the join-ownership rule of the disposal: a body wait whose deadline expires
+// before Serve returns must consume nothing, so the disposal still performs
+// its own bounded receive after the group kill, joins the late Serve result,
+// and observes the reaped leader.
+func TestManagedProcessRecordFailureDisposalJoinsLateServeAfterBodyTimeout(t *testing.T) {
+	fx := newRecordFailureFixture(t)
+	fx.start()
+	fx.awaitRecordStarted()
+
+	// The record barrier is still held, so Serve is blocked in the lease
+	// record and cannot return: the short body deadline always expires.
+	if state, generation := fx.process.LifecycleSnapshot(); state != StateStarting || generation != 0 {
+		t.Fatalf("lifecycle during body wait = %s/%d, want %s/0", state, generation, StateStarting)
+	}
+	if fx.awaitServe(recordFailureBodyWaitDeadline) {
+		t.Fatal("Serve returned while the lease record was still blocked")
+	}
+	if fx.serveReturned {
+		t.Fatal("timed-out body wait consumed the Serve result before disposal")
+	}
+
+	// Disposal releases the barrier, kills the group, and must still join
+	// the late Serve result and observe the reaped leader.
+	fx.dispose()
+
+	if !fx.serveReturned {
+		t.Fatal("disposal after a timed-out body wait did not join the late Serve result")
+	}
+	if fx.serveErr == nil {
+		t.Fatal("disposal after a timed-out body wait lost the lease record error")
+	}
+	fx.process.mu.RLock()
+	processState := fx.process.cmd.ProcessState
+	fx.process.mu.RUnlock()
+	if processState == nil {
+		t.Fatal("disposal after a timed-out body wait left the leader unreaped")
 	}
 }
 
