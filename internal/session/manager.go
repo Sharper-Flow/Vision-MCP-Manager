@@ -112,11 +112,13 @@ func (m *Manager) SpawnSession(ctx context.Context, sessionID string, clientOpts
 		return nil, fmt.Errorf("failed to build command: %w", err)
 	}
 
+	// Args resolve ${VAR} at config load and may hold credentials; the count
+	// identifies the spawn without writing their values to the journal.
 	m.logger.Info("spawning downstream subprocess",
 		slog.String("event", "session.spawn"),
 		slog.String("session_id", sessionID),
 		slog.String("command", m.config.Command),
-		slog.Any("args", m.config.Args),
+		slog.Int("arg_count", len(m.config.Args)),
 	)
 
 	// Create CommandTransport and Client

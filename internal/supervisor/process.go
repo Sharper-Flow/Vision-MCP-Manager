@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"sync"
@@ -537,6 +538,20 @@ func (p *ManagedProcess) collectStdout() {
 	}
 }
 
+// sanitizedURL keeps scheme, host, and path for logging and drops userinfo,
+// query, and fragment. Config URLs resolve ${VAR} before parse and may carry
+// credentials; a URL that fails to parse logs as empty rather than raw.
+func sanitizedURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
 // serveProxy handles http/sse transports by proxying to existing servers.
 // This is a placeholder - full implementation in Phase 4 (stdio-http bridge).
 func (p *ManagedProcess) serveProxy(ctx context.Context) error {
@@ -547,7 +562,7 @@ func (p *ManagedProcess) serveProxy(ctx context.Context) error {
 
 	p.logger.Info("proxy server started",
 		slog.Int("port", p.config.Port),
-		slog.String("url", p.config.URL),
+		slog.String("url", sanitizedURL(p.config.URL)),
 	)
 
 	// Block until context cancelled
