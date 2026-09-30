@@ -659,10 +659,14 @@ func (d *Daemon) setupSlotGroupProxies() error {
 				continue
 			}
 			nameCopy := serverName
+			d.serverMetricsMu.RLock()
+			reporter := d.serverMetrics[serverName]
+			d.serverMetricsMu.RUnlock()
 			entries = append(entries, slots.Entry{
 				SlotName: serverName,
 				Index:    serverCfg.SlotIndex,
 				Manager:  mgr,
+				Reporter: reporter,
 				Healthy: func() bool {
 					if d.registry == nil {
 						return true
@@ -1322,7 +1326,12 @@ func (d *Daemon) activeSubprocesses() int64 {
 		}
 		switch proc.State() {
 		case supervisor.StateRunning, supervisor.StateStarting:
-			total++
+			// Externally owned http/sse services run without a child
+			// process (PID 0). Only a process that owns a live child
+			// contributes to the subprocess gauge.
+			if proc.PID() > 0 {
+				total++
+			}
 		}
 	}
 	return total

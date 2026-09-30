@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 )
 
@@ -22,4 +23,12 @@ type ManagerSelector interface {
 	ReportSpawnResult(sessionKey string, err error)
 	SetOnSessionRemoved(fn func(sessionID string))
 	Release(upstreamSessionID string)
+}
+
+// SlotMetricsResolver optionally resolves the per-server metrics reporter
+// that owns a selected member manager's sessions. Slot-group selectors
+// implement it so group-created sessions reach their member server's session
+// gauge instead of reporting with no owner.
+type SlotMetricsResolver interface {
+	ReporterFor(mgr *session.Manager) metrics.ServerMetricsReporter
 }

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 )
 
@@ -15,14 +16,20 @@ type Entry struct {
 	Index    int
 	Manager  *session.Manager
 	Healthy  func() bool
+
+	// Reporter owns the member server's session gauge. Sessions the group
+	// routes to this member increment this reporter so read-time daemon
+	// derivation counts them.
+	Reporter metrics.ServerMetricsReporter
 }
 
 type slotEntry struct {
-	slotName string
-	index    int
-	mgr      *session.Manager
-	pending  int
-	healthy  func() bool
+	slotName         string
+	index            int
+	mgr              *session.Manager
+	reporter         metrics.ServerMetricsReporter
+	pending          int
+	healthy          func() bool
 	quarantinedUntil time.Time
 }
 
@@ -32,6 +39,14 @@ type Multiplexer struct {
 	byUpstream map[string]*slotEntry
 	logger     *slog.Logger
 	mu         sync.RWMutex
+
+	// onSessionRemoved is the group proxy's removal observer. It is added to
+	// each member manager as an extra observer so the member endpoint's own
+	// removal callback survives, and it is re-applied to replacement member
+	// managers in ReplaceEntries. hooked records which managers already carry
+	// it so re-registration never stacks duplicates.
+	onSessionRemoved func(sessionID string)
+	hooked           map[*session.Manager]bool
 }
 
 func NewMultiplexer(groupName string, logger *slog.Logger, entries []Entry) *Multiplexer {
@@ -40,7 +55,7 @@ func NewMultiplexer(groupName string, logger *slog.Logger, entries []Entry) *Mul
 	}
 	slots := make([]*slotEntry, 0, len(entries))
 	for _, entry := range entries {
-		slots = append(slots, &slotEntry{slotName: entry.SlotName, index: entry.Index, mgr: entry.Manager, healthy: entry.Healthy})
+		slots = append(slots, &slotEntry{slotName: entry.SlotName, index: entry.Index, mgr: entry.Manager, reporter: entry.Reporter, healthy: entry.Healthy})
 	}
 	sort.Slice(slots, func(i, j int) bool {
 		return slots[i].index < slots[j].index
@@ -55,8 +70,6 @@ func NewMultiplexer(groupName string, logger *slog.Logger, entries []Entry) *Mul
 
 func (m *Multiplexer) ReplaceEntries(entries []Entry) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	updated := make([]*slotEntry, 0, len(entries))
 	for _, entry := range entries {
 		var existing *slotEntry
@@ -69,14 +82,36 @@ func (m *Multiplexer) ReplaceEntries(entries []Entry) {
 		if existing != nil {
 			existing.index = entry.Index
 			existing.mgr = entry.Manager
+			existing.reporter = entry.Reporter
 			existing.healthy = entry.Healthy
 			updated = append(updated, existing)
 			continue
 		}
-		updated = append(updated, &slotEntry{slotName: entry.SlotName, index: entry.Index, mgr: entry.Manager, healthy: entry.Healthy})
+		updated = append(updated, &slotEntry{slotName: entry.SlotName, index: entry.Index, mgr: entry.Manager, reporter: entry.Reporter, healthy: entry.Healthy})
 	}
 	sort.Slice(updated, func(i, j int) bool { return updated[i].index < updated[j].index })
 	m.slots = updated
+	m.mu.Unlock()
+
+	// Replacement member managers must observe group-session removals too,
+	// or a reap on a restarted member strands the session gauge.
+	for _, entry := range updated {
+		m.applyRemovalHook(entry)
+	}
+}
+
+// ReporterFor resolves the per-server metrics reporter owning the given
+// member manager's sessions, so the proxy can feed group-created sessions
+// into their existing owner.
+func (m *Multiplexer) ReporterFor(mgr *session.Manager) metrics.ServerMetricsReporter {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, slot := range m.slots {
+		if slot != nil && slot.mgr == mgr {
+			return slot.reporter
+		}
+	}
+	return nil
 }
 
 func (m *Multiplexer) SelectForNewSession(_ context.Context, upstreamSessionID string) (*session.Manager, error) {
@@ -175,16 +210,40 @@ func (m *Multiplexer) ReportSpawnResult(sessionKey string, err error) {
 	entry.quarantinedUntil = time.Now().Add(2 * time.Second)
 }
 
+// SetOnSessionRemoved stores the group proxy's removal observer and adds it
+// to every current member manager. Member managers keep their own endpoint's
+// callback: sessions created through either endpoint must reach their owning
+// proxy's closeDownstream.
 func (m *Multiplexer) SetOnSessionRemoved(fn func(sessionID string)) {
-	m.mu.RLock()
+	m.mu.Lock()
+	m.onSessionRemoved = fn
 	entries := make([]*slotEntry, 0, len(m.slots))
 	entries = append(entries, m.slots...)
-	m.mu.RUnlock()
+	m.mu.Unlock()
 
 	for _, entry := range entries {
-		if entry != nil && entry.mgr != nil {
-			entry.mgr.SetOnSessionRemoved(fn)
+		m.applyRemovalHook(entry)
+	}
+}
+
+// applyRemovalHook adds the group's removal observer to one member manager at
+// most once, so repeated entry replacement never stacks duplicate callbacks.
+func (m *Multiplexer) applyRemovalHook(entry *slotEntry) {
+	if entry == nil || entry.mgr == nil {
+		return
+	}
+	m.mu.Lock()
+	fn := m.onSessionRemoved
+	alreadyHooked := m.hooked[entry.mgr]
+	if fn != nil && !alreadyHooked {
+		if m.hooked == nil {
+			m.hooked = make(map[*session.Manager]bool)
 		}
+		m.hooked[entry.mgr] = true
+	}
+	m.mu.Unlock()
+	if fn != nil && !alreadyHooked {
+		entry.mgr.AddOnSessionRemoved(fn)
 	}
 }
 

@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -165,10 +167,15 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if sessionID == "" {
 			initialize, err := isManagedInitializeRequest(r)
 			if err != nil {
+				g.countToolsCallsInBody(r)
 				writeManagedError(w, http.StatusBadRequest, -32600, "invalid JSON-RPC request")
 				return
 			}
 			if !initialize {
+				// Count every JSON-RPC tools/call request even when the
+				// session header is missing; the session-header branch owns
+				// rejection, not call accounting.
+				g.countToolsCallsInBody(r)
 				writeManagedError(w, http.StatusNotFound, -32001, "MCP session not found")
 				return
 			}
@@ -186,15 +193,18 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			state.hasReservation = true
 		} else {
 			activity, toolsCalls, err := classifyManagedRequestBody(r)
-			if err != nil {
-				writeManagedError(w, http.StatusBadRequest, -32600, "invalid JSON-RPC request")
-				return
-			}
 			state.toolsCalls = toolsCalls
 			if toolsCalls > 0 && g.daemonMetrics != nil {
 				for i := 0; i < toolsCalls; i++ {
 					g.daemonMetrics.IncToolCalls()
 				}
+			}
+			if err != nil {
+				// Genuine members still count when whole-body admission
+				// rejects the envelope: the member classifier owns call
+				// counting, the admission gate owns rejection.
+				writeManagedError(w, http.StatusBadRequest, -32600, "invalid JSON-RPC request")
+				return
 			}
 			complete, err := g.leases.BeginRequest(sessionID, activity)
 			if err != nil {
@@ -239,6 +249,12 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if state.kind == managedRequestDelete {
 			g.leases.RestoreActive(state.sessionID)
+		}
+		// A tools/call refused at backend admission is a forwarding failure
+		// even though no reverse-proxy callback observed it. Count it once,
+		// matching the stdio path's pre-dispatch unavailable failures.
+		if state.toolsCalls > 0 && g.daemonMetrics != nil {
+			g.daemonMetrics.IncErrors()
 		}
 		writeManagedError(w, http.StatusServiceUnavailable, -32002, "managed MCP backend unavailable")
 		return
@@ -497,8 +513,12 @@ type managedProxyRequest struct {
 }
 
 // classifyManagedRequestBody reads and restores the JSON-RPC body once and
-// reports whether it carries application activity plus how many tools/call
-// requests it contains, so daemon-wide tool call counting sees each call.
+// reports whether it carries application activity plus how many genuine
+// tools/call requests it contains, so daemon-wide tool call counting sees each
+// call. Counting is independent of whole-envelope admission: a body whose
+// activity classification fails (for example a batch holding one genuine
+// request beside an invalid member) still reports its genuine members, and the
+// caller counts them before writing the admission rejection.
 func classifyManagedRequestBody(r *http.Request) (bool, int, error) {
 	if r.Body == nil {
 		return false, 0, errors.New("missing JSON-RPC body")
@@ -507,15 +527,9 @@ func classifyManagedRequestBody(r *http.Request) (bool, int, error) {
 	if err != nil {
 		return false, 0, err
 	}
-	activity, err := ClassifyApplicationActivity(body)
-	if err != nil {
-		return false, 0, err
-	}
-	toolsCalls, err := countManagedToolsCalls(body)
-	if err != nil {
-		return activity, 0, nil
-	}
-	return activity, toolsCalls, nil
+	activity, activityErr := ClassifyApplicationActivity(body)
+	toolsCalls, _ := countManagedToolsCalls(body)
+	return activity, toolsCalls, activityErr
 }
 
 // countManagedToolsCalls returns the number of tools/call requests in a
@@ -547,20 +561,108 @@ func countManagedToolsCalls(body []byte) (int, error) {
 	return 0, nil
 }
 
-func isToolsCallMember(raw json.RawMessage) bool {
+// mcpMemberKind classifies one JSON-RPC envelope member against the MCP
+// basic Messages schema (2025-11-25): a request carries jsonrpc "2.0", a
+// string-or-integer id, and a method; a notification omits the id; a response
+// carries an id with result or error and no method.
+type mcpMemberKind uint8
+
+const (
+	mcpMemberMalformed mcpMemberKind = iota
+	mcpMemberNotification
+	mcpMemberRequest
+	mcpMemberResponse
+)
+
+// mcpMember is one envelope member's classification plus its method name.
+type mcpMember struct {
+	kind   mcpMemberKind
+	method string
+}
+
+// classifyMCPMember is the single envelope-classification owner for managed
+// gateway counting: request, notification, response, or malformed. It
+// validates the envelope only and never reads method params. The go-sdk
+// jsonrpc.DecodeMessage is not used here because it accepts a fractional id
+// (1.5) as a call by truncating it, while the MCP schema restricts request
+// ids to strings and integers.
+func classifyMCPMember(raw json.RawMessage) mcpMember {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
-		return false
+		return mcpMember{kind: mcpMemberMalformed}
 	}
+	versionRaw, hasVersion := fields["jsonrpc"]
+	if !hasVersion {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
+	var version string
+	if err := json.Unmarshal(versionRaw, &version); err != nil || version != "2.0" {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
+	idRaw, hasID := fields["id"]
+	_, hasResult := fields["result"]
+	_, hasError := fields["error"]
 	methodRaw, hasMethod := fields["method"]
 	if !hasMethod {
-		return false
+		// No method: only a response shape (id with result or error) is
+		// recognizable; anything else is malformed.
+		if hasID && (hasResult || hasError) {
+			return mcpMember{kind: mcpMemberResponse}
+		}
+		return mcpMember{kind: mcpMemberMalformed}
 	}
 	var method string
-	if err := json.Unmarshal(methodRaw, &method); err != nil {
+	if err := json.Unmarshal(methodRaw, &method); err != nil || method == "" {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
+	if !hasID {
+		return mcpMember{kind: mcpMemberNotification, method: method}
+	}
+	if hasResult || hasError || !isMCPRequestID(idRaw) {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
+	return mcpMember{kind: mcpMemberRequest, method: method}
+}
+
+// isMCPRequestID reports whether the raw JSON value is a valid MCP request
+// id: a JSON string, or a JSON number with no fractional part. null,
+// booleans, objects, arrays, and fractional numbers are rejected.
+func isMCPRequestID(raw json.RawMessage) bool {
+	// json.Unmarshal leaves its target untouched with a nil error for a
+	// JSON null, so null is rejected before the string probe.
+	if string(raw) == "null" {
 		return false
 	}
-	return method == "tools/call"
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return true
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		return false
+	}
+	literal := number.String()
+	if _, err := strconv.ParseInt(literal, 10, 64); err == nil {
+		return true
+	}
+	// JSON Schema "integer" also matches values such as 1.0 or 1e2 whose
+	// value carries no fractional part. Decide from the exact literal: a
+	// float64 conversion accepts 1.0000000000000001 and
+	// 9007199254740992.5 by rounding, and underflows 1e-999 to zero.
+	var value big.Rat
+	if _, ok := value.SetString(literal); !ok {
+		return false
+	}
+	return value.IsInt()
+}
+
+// isToolsCallMember reports whether one JSON-RPC envelope member is a genuine
+// MCP tools/call request. The classification owner answers request,
+// notification, response, or malformed; only a genuine request whose method
+// is tools/call counts.
+func isToolsCallMember(raw json.RawMessage) bool {
+	member := classifyMCPMember(raw)
+	return member.kind == mcpMemberRequest && member.method == "tools/call"
 }
 
 func isManagedInitializeRequest(r *http.Request) (bool, error) {
@@ -587,6 +689,26 @@ func isManagedInitializeRequest(r *http.Request) (bool, error) {
 		return false, err
 	}
 	return method == "initialize", nil
+}
+
+// countToolsCallsInBody counts the tools/call requests in this POST body,
+// batch members included, for the daemon-wide call counter. Call accounting
+// is independent of the session-header branch: a request rejected before any
+// session lookup still counted its calls.
+func (g *ManagedHTTPGateway) countToolsCallsInBody(r *http.Request) {
+	if g.daemonMetrics == nil {
+		return
+	}
+	// Counting is independent of whole-body admission: the classification
+	// error marks a body the gate will reject, and genuine members still
+	// count through that rejection.
+	_, toolsCalls, _ := classifyManagedRequestBody(r)
+	if toolsCalls == 0 {
+		return
+	}
+	for i := 0; i < toolsCalls; i++ {
+		g.daemonMetrics.IncToolCalls()
+	}
 }
 
 func validateManagedGatewayTarget(target *url.URL) error {
