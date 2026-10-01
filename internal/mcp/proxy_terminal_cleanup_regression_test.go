@@ -151,9 +151,10 @@ func reviewSlotDeleteAdmission(t *testing.T, removeBeforeInitialized bool) {
 // that lands inside the publication window: publishInitialized releases
 // closeMu before the publish callback takes the index lock, so a manager
 // expiry can finish its real close path in that gap and the callback then
-// reinserts the closed proxy. The subsequent DELETE must still run the
-// terminal cleanup and remove the reinserted owner; a consumed generation
-// close must not strand it.
+// reinserts the closed proxy. The consumed generation close can never run
+// again and no lease remains to expire, so publishInitialized itself must
+// detect the lost generation after the publication and run the terminal
+// cleanup — with no later DELETE supplying it.
 func TestSharedRemovalBeforePublicationCleansOwner(t *testing.T) {
 	skipIfNoNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -179,11 +180,55 @@ func TestSharedRemovalBeforePublicationCleansOwner(t *testing.T) {
 		idx.closeOwner(p.downstreamID())
 		idx.register(p)
 	})
-	ps.closeDownstream("upstream delete")
 	if sm.SessionCount() != 0 || owner.Snapshot().ActiveSessions != 0 {
 		t.Fatal("fixture did not reach the zero-manager/zero-gauge state")
 	}
 	if n := idx.count(); n != 0 {
-		t.Fatalf("shared removal before index publication retains %d downstream owner(s), want 0", n)
+		t.Fatalf("shared removal inside the publication window retains %d downstream owner(s) without a later close, want 0", n)
+	}
+}
+
+// TestStatefulRemovalInsidePublicationWindowCleansOwner is the stateful twin
+// of the shared publication-window proof: a manager removal completes inside
+// the gap between publishInitialized's liveness check and the publish
+// callback, the callback reinserts the closed proxy into the owner index, and
+// no later DELETE arrives. The publication-window recheck must close the lost
+// generation and remove the reinserted owner; a retained owner pins the
+// upstream session's tracking until an unrelated close.
+func TestStatefulRemovalInsidePublicationWindowCleansOwner(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	logger := testLogger(t)
+	mgr := session.NewManager("stateful-publish-window", testServerConfig(), logger)
+	defer mgr.CloseAll()
+	owner := metrics.NewServerMetrics()
+	idx := &lifecycleOwnerIndex{owners: map[string]*proxySession{}}
+	mgr.SetOnSessionRemoved(idx.closeOwner)
+	var ps *proxySession
+	_, err := newPerSessionServer(ctx, "stateful-publish-window", mgr, logger,
+		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		owner, nil, nil,
+		func(p *proxySession) { ps = p; idx.register(p) }, nil, nil, idx.rekey, idx.unregister)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps.mu.Lock()
+	ps.upstreamSessionID = "stateful-window-upstream"
+	ps.mu.Unlock()
+	ps.publishInitialized(func(_ string, p *proxySession) {
+		// The manager removal lands inside the publication window: the real
+		// removal path deletes the tracked session, fires the owner close,
+		// and only then does the callback perform the production insert.
+		if err := mgr.RemoveSession(p.downstreamID()); err != nil {
+			t.Errorf("removal inside publication window: %v", err)
+		}
+		idx.register(p)
+	})
+	if mgr.SessionCount() != 0 || owner.Snapshot().ActiveSessions != 0 {
+		t.Fatal("fixture did not reach the zero-manager/zero-gauge state")
+	}
+	if n := idx.count(); n != 0 {
+		t.Fatalf("stateful removal inside the publication window retains %d downstream owner(s) without a later close, want 0", n)
 	}
 }

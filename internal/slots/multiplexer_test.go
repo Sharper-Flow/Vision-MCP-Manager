@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
@@ -196,3 +197,51 @@ func TestReportSpawnResult_FailedSlotGetsSkippedTemporarily(t *testing.T) {
 }
 
 func assertErr(msg string) error { return errors.New(msg) }
+
+// TestReplaceEntriesConcurrent_HooksEachDistinctManager runs two goroutines
+// that replace the same slot entry concurrently. ReplaceEntries writes
+// entry.mgr under the multiplexer lock, so the removal-hook pass must work
+// from manager pointers snapshotted under that same lock; reading the live
+// slot entry outside the lock is a data race the detector flags. Every
+// distinct manager installed during the storm must end up hooked.
+func TestReplaceEntriesConcurrent_HooksEachDistinctManager(t *testing.T) {
+	mgrInitial := session.NewManager("race-slot-initial", &config.ServerConfig{Command: "echo"}, nil)
+	mgrA := session.NewManager("race-slot-a", &config.ServerConfig{Command: "echo"}, nil)
+	mgrB := session.NewManager("race-slot-b", &config.ServerConfig{Command: "echo"}, nil)
+	mx := NewMultiplexer("race-slot-group", nil, []Entry{
+		{SlotName: "race-slot", Index: 1, Manager: mgrInitial},
+	})
+	mx.SetOnSessionRemoved(func(string) {})
+
+	const rounds = 25
+	var wg sync.WaitGroup
+	for range rounds {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			mx.ReplaceEntries([]Entry{{SlotName: "race-slot", Index: 1, Manager: mgrA}})
+		}()
+		go func() {
+			defer wg.Done()
+			mx.ReplaceEntries([]Entry{{SlotName: "race-slot", Index: 1, Manager: mgrB}})
+		}()
+		wg.Wait()
+	}
+
+	mx.mu.RLock()
+	hooked := make(map[*session.Manager]bool, len(mx.hooked))
+	for mgr := range mx.hooked {
+		hooked[mgr] = true
+	}
+	mx.mu.RUnlock()
+
+	want := []*session.Manager{mgrInitial, mgrA, mgrB}
+	for _, mgr := range want {
+		if !hooked[mgr] {
+			t.Fatalf("manager installed during replacement never received the removal observer: %p", mgr)
+		}
+	}
+	if len(hooked) != len(want) {
+		t.Fatalf("hooked %d distinct managers, want %d", len(hooked), len(want))
+	}
+}

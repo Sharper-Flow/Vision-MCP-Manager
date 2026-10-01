@@ -91,12 +91,19 @@ func (m *Multiplexer) ReplaceEntries(entries []Entry) {
 	}
 	sort.Slice(updated, func(i, j int) bool { return updated[i].index < updated[j].index })
 	m.slots = updated
+	// Snapshot the manager pointers while still holding the lock: the hook
+	// pass works on the snapshot, so a concurrent ReplaceEntries writing the
+	// same slot entry can never race a read of entry.mgr outside the lock.
+	mgrs := make([]*session.Manager, 0, len(updated))
+	for _, entry := range updated {
+		mgrs = append(mgrs, entry.mgr)
+	}
 	m.mu.Unlock()
 
 	// Replacement member managers must observe group-session removals too,
 	// or a reap on a restarted member strands the session gauge.
-	for _, entry := range updated {
-		m.applyRemovalHook(entry)
+	for _, mgr := range mgrs {
+		m.applyRemovalHook(mgr)
 	}
 }
 
@@ -217,46 +224,54 @@ func (m *Multiplexer) ReportSpawnResult(sessionKey string, err error) {
 func (m *Multiplexer) SetOnSessionRemoved(fn func(sessionID string)) {
 	m.mu.Lock()
 	m.onSessionRemoved = fn
-	entries := make([]*slotEntry, 0, len(m.slots))
-	entries = append(entries, m.slots...)
+	// Snapshot the current managers under the same lock that published them,
+	// so the hook pass reads snapshotted values instead of live slot entries.
+	mgrs := make([]*session.Manager, 0, len(m.slots))
+	for _, entry := range m.slots {
+		mgrs = append(mgrs, entry.mgr)
+	}
 	m.mu.Unlock()
 
-	for _, entry := range entries {
-		m.applyRemovalHook(entry)
+	for _, mgr := range mgrs {
+		m.applyRemovalHook(mgr)
 	}
 }
 
 // applyRemovalHook adds the group's removal observer to one member manager at
 // most once, so repeated entry replacement never stacks duplicate callbacks.
-func (m *Multiplexer) applyRemovalHook(entry *slotEntry) {
-	if entry == nil || entry.mgr == nil {
+// Callers pass the manager snapshotted under m.mu, so hooking never reads a
+// slot entry's manager field outside the lock.
+func (m *Multiplexer) applyRemovalHook(mgr *session.Manager) {
+	if mgr == nil {
 		return
 	}
 	m.mu.Lock()
 	fn := m.onSessionRemoved
-	alreadyHooked := m.hooked[entry.mgr]
+	alreadyHooked := m.hooked[mgr]
 	if fn != nil && !alreadyHooked {
 		if m.hooked == nil {
 			m.hooked = make(map[*session.Manager]bool)
 		}
-		m.hooked[entry.mgr] = true
+		m.hooked[mgr] = true
 	}
 	m.mu.Unlock()
 	if fn != nil && !alreadyHooked {
-		entry.mgr.AddOnSessionRemoved(fn)
+		mgr.AddOnSessionRemoved(fn)
 	}
 }
 
 func (m *Multiplexer) CloseAll() {
 	m.mu.RLock()
-	entries := make([]*slotEntry, 0, len(m.slots))
-	entries = append(entries, m.slots...)
+	mgrs := make([]*session.Manager, 0, len(m.slots))
+	for _, entry := range m.slots {
+		if entry != nil && entry.mgr != nil {
+			mgrs = append(mgrs, entry.mgr)
+		}
+	}
 	m.mu.RUnlock()
 
-	for _, entry := range entries {
-		if entry != nil && entry.mgr != nil {
-			entry.mgr.CloseAll()
-		}
+	for _, mgr := range mgrs {
+		mgr.CloseAll()
 	}
 }
 

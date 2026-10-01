@@ -849,15 +849,26 @@ func (ps *proxySession) hasInitializedUpstreamSession() bool {
 // re-arms it and tears the late-initialized upstream down through the normal
 // close path — index cleanup and upstream close included — which leaves the
 // expired session id answered with 404.
+//
+// The publication itself runs outside closeMu, so a close whose completion
+// lands between the liveness check and the publication callback — a shared
+// lease expiry, a manager removal — consumes the generation close and clears
+// the indexes, and the callback then reinserts the closed proxy with no lease
+// left to expire again. After the publication the liveness state is
+// re-checked under closeMu: a generation that was live at entry and is closed
+// after the publication is closed again with reason publish_lost_race, and
+// the idempotent terminal owner cleanup removes exactly the entries the
+// publication inserted. A close that lands after the publication cleans
+// through its own terminal tail instead.
 func (ps *proxySession) publishInitialized(publish func(string, *proxySession)) {
 	if ps == nil {
 		return
 	}
 	ps.closeMu.Lock()
 	ps.downstreamMu.RLock()
-	live := !ps.downstreamClosed && ps.downstream != nil
+	wasLive := !ps.downstreamClosed && ps.downstream != nil
 	ps.downstreamMu.RUnlock()
-	if live {
+	if wasLive {
 		ps.acquireActiveSession()
 		ps.closeMu.Unlock()
 	} else if ps.shared {
@@ -877,6 +888,15 @@ func (ps *proxySession) publishInitialized(publish func(string, *proxySession)) 
 	upstreamID := ps.upstreamSessionID
 	ps.mu.Unlock()
 	publish(upstreamID, ps)
+
+	ps.closeMu.Lock()
+	ps.downstreamMu.RLock()
+	stillLive := !ps.downstreamClosed && ps.downstream != nil
+	ps.downstreamMu.RUnlock()
+	ps.closeMu.Unlock()
+	if wasLive && !stillLive {
+		ps.closeDownstream("publish_lost_race")
+	}
 }
 
 // newPerSessionServer creates a new mcp.Server for a single upstream session.
