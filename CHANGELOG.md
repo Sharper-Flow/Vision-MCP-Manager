@@ -1,3 +1,9 @@
+## 2026-10-01 (v1.5.13)
+
+### Fixed
+
+- balance owner lifecycle gauges and remove slot hook race (#29)
+
 ## 2026-10-01 (v1.5.12)
 
 ### Changed
