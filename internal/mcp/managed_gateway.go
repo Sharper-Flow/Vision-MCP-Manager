@@ -582,7 +582,8 @@ type mcpMember struct {
 
 // classifyMCPMember is the single envelope-classification owner for managed
 // gateway counting: request, notification, response, or malformed. It
-// validates the envelope only and never reads method params. The go-sdk
+// validates the envelope only — including the params member's JSON type —
+// and never reads into a tool call's arguments. The go-sdk
 // jsonrpc.DecodeMessage is not used here because it accepts a fractional id
 // (1.5) as a call by truncating it, while the MCP schema restricts request
 // ids to strings and integers.
@@ -615,6 +616,12 @@ func classifyMCPMember(raw json.RawMessage) mcpMember {
 	if err := json.Unmarshal(methodRaw, &method); err != nil || method == "" {
 		return mcpMember{kind: mcpMemberMalformed}
 	}
+	// The MCP request and notification envelopes type params as an optional
+	// object (2025-11-25 basic Messages schema). A present non-object params
+	// value is not a genuine envelope member.
+	if paramsRaw, hasParams := fields["params"]; hasParams && !isMCPParamsObject(paramsRaw) {
+		return mcpMember{kind: mcpMemberMalformed}
+	}
 	if !hasID {
 		return mcpMember{kind: mcpMemberNotification, method: method}
 	}
@@ -622,6 +629,19 @@ func classifyMCPMember(raw json.RawMessage) mcpMember {
 		return mcpMember{kind: mcpMemberMalformed}
 	}
 	return mcpMember{kind: mcpMemberRequest, method: method}
+}
+
+// isMCPParamsObject reports whether the raw JSON value is a valid MCP params
+// member: a JSON object. The basic Messages schema types params as an
+// optional object, so null, booleans, numbers, strings, and arrays are
+// rejected. json.Unmarshal leaves its target untouched with a nil error for
+// a JSON null, so null is rejected before the object probe.
+func isMCPParamsObject(raw json.RawMessage) bool {
+	if string(raw) == "null" {
+		return false
+	}
+	var object map[string]json.RawMessage
+	return json.Unmarshal(raw, &object) == nil
 }
 
 // isMCPRequestID reports whether the raw JSON value is a valid MCP request

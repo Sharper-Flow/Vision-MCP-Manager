@@ -575,7 +575,7 @@ func TestStatefulRemovalDuringPublicationReleasesCredit(t *testing.T) {
 
 	var published atomic.Pointer[proxySession]
 	mgr.SetOnSessionRemoved(func(id string) {
-		if ps := published.Load(); ps != nil && ps.sessionID == id {
+		if ps := published.Load(); ps != nil && ps.downstreamID() == id {
 			ps.closeDownstream("session removed by manager")
 		}
 	})
@@ -587,10 +587,10 @@ func TestStatefulRemovalDuringPublicationReleasesCredit(t *testing.T) {
 			published.Store(ps)
 			// A real manager removal fires while publication runs, before
 			// control returns to the initialization path.
-			if err := mgr.RemoveSession(ps.sessionID); err != nil {
+			if err := mgr.RemoveSession(ps.downstreamID()); err != nil {
 				t.Errorf("removal during publication: %v", err)
 			}
-		}, nil, nil)
+		}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -948,9 +948,15 @@ func TestFailedSharedDiscoveryReleasesRemovalOwner(t *testing.T) {
 	byUpstream := make(map[string]*proxySession)
 	_, err := newSharedModeServer(ctx, "shared-owner-release", sm, logger,
 		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, owner, nil, nil,
-		func(ps *proxySession) { byDownstream[ps.sessionID] = ps },
-		func(id string, ps *proxySession) { byUpstream[id] = ps; byDownstream[ps.sessionID] = ps },
-		func(id string) { ps := byUpstream[id]; delete(byUpstream, id); if ps != nil { delete(byDownstream, ps.sessionID) } },
+		func(ps *proxySession) { byDownstream[ps.downstreamID()] = ps },
+		func(id string, ps *proxySession) { byUpstream[id] = ps; byDownstream[ps.downstreamID()] = ps },
+		func(id string) {
+			ps := byUpstream[id]
+			delete(byUpstream, id)
+			if ps != nil {
+				delete(byDownstream, ps.downstreamID())
+			}
+		},
 		func(sessionID string) { delete(byDownstream, sessionID) },
 	)
 	if err == nil {
