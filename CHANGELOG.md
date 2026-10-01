@@ -1,3 +1,9 @@
+## 2026-10-01 (v1.5.12)
+
+### Changed
+
+- deterministic failed-lease-record fixture with real group-kill evidence (#30) (test: supervisor)
+
 ## 2026-09-30 (v1.5.11)
 
 ### Fixed
