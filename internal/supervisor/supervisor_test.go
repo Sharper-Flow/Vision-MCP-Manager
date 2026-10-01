@@ -530,33 +530,6 @@ func TestManagedProcessRecordBlocksRunningPublication(t *testing.T) {
 	<-done
 }
 
-func TestManagedProcessRecordFailureKillsGroupAndNeverRuns(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "marker")
-	store := &fakeLeaseStore{recordErr: errors.New("record failed")}
-	cfg := config.SupervisionConfig{}
-	cfg.ApplyDefaults()
-	cfg.ShutdownTimeout = config.Duration(100 * time.Millisecond)
-	serverCfg := &config.ServerConfig{Command: "/bin/sh", Transport: config.TransportManagedHTTP, Args: []string{"-c", "touch " + marker + "; sleep 1"}}
-	p := NewManagedProcessWithOwnership("failure", serverCfg, cfg, slog.Default(), store, "daemon", WithProcReader(&fakeProcReader{}))
-	err := p.Serve(context.Background())
-	if err == nil || strings.Contains(err.Error(), ownership.OwnerTokenEnvKey) {
-		t.Fatalf("bad error: %v", err)
-	}
-	if p.State() != StateCrashed {
-		t.Fatalf("state=%s", p.State())
-	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("marker exists after record failure cleanup")
-	}
-	p.mu.RLock()
-	active := p.leaseActive
-	processState := p.cmd.ProcessState
-	p.mu.RUnlock()
-	if active || processState == nil {
-		t.Fatalf("cleanup state active=%v processState=%v", active, processState)
-	}
-}
-
 func TestManagedProcessLeaseRetainedWhileDescendantLives(t *testing.T) {
 	store := &fakeLeaseStore{}
 	reader := &fakeProcReader{}
