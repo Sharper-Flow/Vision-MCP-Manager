@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -53,7 +54,7 @@ type lifecycleOwnerIndex struct {
 
 func (idx *lifecycleOwnerIndex) register(ps *proxySession) {
 	idx.mu.Lock()
-	idx.owners[ps.sessionID] = ps
+	idx.owners[ps.downstreamID()] = ps
 	idx.mu.Unlock()
 }
 
@@ -88,6 +89,19 @@ func (idx *lifecycleOwnerIndex) count() int {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	return len(idx.owners)
+}
+
+// keys returns the sorted owner keys for precise assertions about which
+// registrations survive a lifecycle transition.
+func (idx *lifecycleOwnerIndex) keys() []string {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	out := make([]string, 0, len(idx.owners))
+	for k := range idx.owners {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // TestStatefulRemovalInsideSpawnWindowLeavesNoOwner proves a manager removal
@@ -259,7 +273,7 @@ func TestRespawnRemovalInsideSpawnWindowLeavesNoStaleOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.RemoveSession(ps.sessionID); err != nil {
+	if err := mgr.RemoveSession(ps.downstreamID()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ps.respawnDownstream(ctx, "test"); err == nil {
@@ -270,6 +284,50 @@ func TestRespawnRemovalInsideSpawnWindowLeavesNoStaleOwner(t *testing.T) {
 	}
 	if n := idx.count(); n != 0 {
 		t.Errorf("removed respawn retained %d owner(s) after failed discovery, want 0", n)
+	}
+}
+
+// waitForTerminalClose404 polls a raw tools/call carrying the expired
+// session id until the terminal close has retired the upstream session and
+// the streamable handler answers 404, which is the lifecycle evidence that
+// initialization processing settled and the dead generation is unreachable.
+// A 200 means the session is still registered and is retried; a transport
+// error is the close cutting the in-flight request and is retried too. Any
+// other status fails immediately. A 200 persisted until the deadline proves
+// the dead generation still dispatches.
+func waitForTerminalClose404(t *testing.T, ctx context.Context, ts *httptest.Server, sessionID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL,
+			strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"echo","arguments":{}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Mcp-Session-Id", sessionID)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			lastErr = err
+		} else {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusNotFound {
+				return
+			}
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("raw tools/call on the expired session returned status %d, want 404", resp.StatusCode)
+			}
+		}
+		if time.Now().After(deadline) {
+			if lastErr != nil {
+				t.Fatalf("terminal close never retired the expired session; last raw call failed with %v", lastErr)
+			}
+			t.Fatal("expired session remains reusable: status 200 persisted until the deadline, want 404")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -319,14 +377,13 @@ func TestSharedReaperDuringSpawnDoesNotCreditSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cs.Close()
-	// A request is the initialization-processing barrier. tools/list answers
-	// from the upstream-registered tools and dispatches nowhere. The terminal
-	// close of the expired generation may retire the upstream session before
-	// the barrier is served; either outcome proves initialization processing
-	// settled, and the expired session id must answer 404 afterward.
-	if _, err := cs.ListTools(ctx, nil); err != nil && !strings.Contains(err.Error(), "session not found") {
-		t.Fatal(err)
-	}
+	// Lifecycle completion evidence in place of a request barrier: the
+	// terminal close of the expired generation runs asynchronously after
+	// initialization processing and may cut an in-flight request, so the
+	// 404 that follows it is the deterministic signal that processing
+	// settled. A 200 persisted to the deadline would mean the dead
+	// generation still dispatches.
+	waitForTerminalClose404(t, ctx, ts, cs.ID())
 	if n := sm.SessionCount(); n != 0 {
 		t.Fatalf("manager population = %d, want 0", n)
 	}
@@ -378,7 +435,7 @@ func TestAbandonedRespawnDetachesAndNextCallRespawns(t *testing.T) {
 
 	// Reap the downstream the way the idle reaper does: the credit releases
 	// and the proxy detaches.
-	if err := mgr.RemoveSession(ps.sessionID); err != nil {
+	if err := mgr.RemoveSession(ps.downstreamID()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -471,7 +528,7 @@ func TestAbandonedRespawnDetachesAndNextCallRespawns(t *testing.T) {
 
 	// The upstream DELETE must balance the session and its credit.
 	ps.closeDownstream("upstream delete")
-	if err := mgr.RemoveSession(ps.sessionID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+	if err := mgr.RemoveSession(ps.downstreamID()); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatal(err)
 	}
 	if n := mgr.SessionCount(); n != 0 {
@@ -537,17 +594,6 @@ func TestExpiredSharedStartupTerminalCloseInvalidatesUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cs.Close()
-	// A request is the initialization-processing barrier. tools/list answers
-	// from the upstream-registered tools and dispatches nowhere. The terminal
-	// close of the expired generation may retire the upstream session before
-	// the barrier is served, and the async close can also cut the barrier
-	// request's connection mid-flight; either outcome proves initialization
-	// processing settled, and the expired session id must answer 404 afterward.
-	if _, err := cs.ListTools(ctx, nil); err != nil &&
-		!strings.Contains(err.Error(), "session not found") &&
-		!strings.Contains(err.Error(), "request terminated without response") {
-		t.Fatal(err)
-	}
 	if n := sm.SessionCount(); n != 0 {
 		t.Fatalf("manager population = %d, want 0", n)
 	}
@@ -555,42 +601,194 @@ func TestExpiredSharedStartupTerminalCloseInvalidatesUpstream(t *testing.T) {
 		t.Fatalf("active sessions = %d, want 0 before the raw call", got)
 	}
 
-	// The terminal close removes the session from the streamable handler a
-	// moment after initialization completes, so the raw call is answered 404.
-	// Retry across that close goroutine's scheduling window; a 200 means the
-	// dead generation still dispatches, which the unfixed proxy returned on
-	// every attempt until the deadline.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL,
-			strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"echo","arguments":{}}}`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Header.Set("Mcp-Session-Id", cs.ID())
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		resp, err := ts.Client().Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusNotFound {
-			break
-		}
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("raw tools/call on the expired shared session returned status %d, want 404", resp.StatusCode)
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("expired shared upstream remains reusable: status 200 persisted until the deadline, want 404")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// Lifecycle completion evidence in place of a request barrier: the
+	// terminal close removes the session from the streamable handler a
+	// moment after initialization completes, so the raw call is answered
+	// 404. The close may cut an in-flight raw call while it retires the
+	// session; a 200 means the dead generation still dispatches, which the
+	// unfixed proxy returned on every attempt until the deadline.
+	waitForTerminalClose404(t, ctx, ts, cs.ID())
 	if n := sm.SessionCount(); n != 0 {
 		t.Errorf("manager population after the terminal close = %d, want 0", n)
 	}
 	if got := owner.Snapshot().ActiveSessions; got != 0 {
 		t.Errorf("active sessions after the terminal close = %d, want 0", got)
+	}
+}
+
+// TestRemovalAfterRespawnKeysPublishedGeneration proves the respawn
+// publication contract: once respawnDownstream returns, the proxy's
+// downstream identifier is the rekeyed generation the manager holds, the
+// removal-owner index holds exactly that one registration, and a manager
+// removal of the published generation closes the proxy keyed on it, leaving
+// no entry for either the old or the new identifier.
+func TestRemovalAfterRespawnKeysPublishedGeneration(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	logger := testLogger(t)
+	mgr := session.NewManager("respawn-keying", testServerConfig(), logger)
+	defer mgr.CloseAll()
+	owner := metrics.NewServerMetrics()
+	idx := &lifecycleOwnerIndex{owners: map[string]*proxySession{}}
+	mgr.SetOnSessionRemoved(idx.closeOwner)
+	var ps *proxySession
+	_, err := newPerSessionServer(ctx, "respawn-keying", mgr, logger,
+		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		owner, nil, nil,
+		func(p *proxySession) { ps = p; idx.register(p) },
+		nil, nil, idx.rekey, idx.unregister,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Initialize the upstream session so the proxy holds one credit.
+	ps.mu.Lock()
+	ps.upstreamSessionID = "keying-upstream"
+	ps.mu.Unlock()
+	ps.publishInitialized(nil)
+	if got := owner.Snapshot().ActiveSessions; got != 1 {
+		t.Fatalf("active sessions after initialization = %d, want 1", got)
+	}
+
+	// Reap the original downstream the way the idle reaper does.
+	oldID := ps.downstreamID()
+	if err := mgr.RemoveSession(oldID); err != nil {
+		t.Fatal(err)
+	}
+	if got := owner.Snapshot().ActiveSessions; got != 0 {
+		t.Fatalf("active sessions after the reap = %d, want 0", got)
+	}
+
+	// Respawn and prove the publication keyed everything on the new
+	// generation.
+	if _, err := ps.respawnDownstream(ctx, "test"); err != nil {
+		t.Fatalf("respawn failed: %v", err)
+	}
+	newID := ps.downstreamID()
+	if newID == oldID || !strings.Contains(newID, "-respawn-") {
+		t.Fatalf("published identifier %q does not name the respawned generation (old %q)", newID, oldID)
+	}
+	if ids := mgr.Sessions(); len(ids) != 1 || ids[0] != newID {
+		t.Fatalf("manager population after respawn = %v, want [%s]", ids, newID)
+	}
+	if keys := idx.keys(); len(keys) != 1 || keys[0] != newID {
+		t.Fatalf("removal-owner index after respawn = %v, want [%s]", keys, newID)
+	}
+	if got := owner.Snapshot().ActiveSessions; got != 1 {
+		t.Fatalf("active sessions after respawn = %d, want 1", got)
+	}
+
+	// A manager removal of the published generation must reach the proxy and
+	// tear it down keyed on that generation.
+	if err := mgr.RemoveSession(newID); err != nil {
+		t.Fatal(err)
+	}
+	if n := mgr.SessionCount(); n != 0 {
+		t.Errorf("manager population after removal = %d, want 0", n)
+	}
+	if got := owner.Snapshot().ActiveSessions; got != 0 {
+		t.Errorf("active sessions after removal = %d, want 0", got)
+	}
+	if got := idx.count(); got != 0 {
+		t.Errorf("removal-owner index after removal retains %v, want none", idx.keys())
+	}
+	ps.downstreamMu.RLock()
+	retained := ps.downstream != nil && !ps.downstreamClosed
+	ps.downstreamMu.RUnlock()
+	if retained {
+		t.Error("removal of the published generation left the proxy attached")
+	}
+}
+
+// TestRemovalConcurrentWithRespawnPublicationLeavesNoStaleOwner drives a
+// manager removal against the tail of a respawn publication and proves no
+// stale removal-owner entry survives. The respawn publishes the new
+// identifier inside the closeMu critical section before the credit
+// reacquisition flips the gauge, so the gauge observation proves the
+// identifier is published; the removal's closeDownstream must then key on
+// the published generation and clean the rekeyed entry. Under -race this
+// pins the identifier write/read pair that used to collide outside every
+// lock and leave the rekeyed registration behind.
+func TestRemovalConcurrentWithRespawnPublicationLeavesNoStaleOwner(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	logger := testLogger(t)
+	mgr := session.NewManager("respawn-publication-race", testServerConfig(), logger)
+	defer mgr.CloseAll()
+	owner := metrics.NewServerMetrics()
+	idx := &lifecycleOwnerIndex{owners: map[string]*proxySession{}}
+	mgr.SetOnSessionRemoved(idx.closeOwner)
+	var ps *proxySession
+	_, err := newPerSessionServer(ctx, "respawn-publication-race", mgr, logger,
+		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		owner, nil, nil,
+		func(p *proxySession) { ps = p; idx.register(p) },
+		nil, nil, idx.rekey, idx.unregister,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps.mu.Lock()
+	ps.upstreamSessionID = "publication-race-upstream"
+	ps.mu.Unlock()
+	ps.publishInitialized(nil)
+	if got := owner.Snapshot().ActiveSessions; got != 1 {
+		t.Fatalf("active sessions after initialization = %d, want 1", got)
+	}
+	if err := mgr.RemoveSession(ps.downstreamID()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Respawn in the background. The credit reacquisition inside the
+	// publication critical section flips the gauge back to 1 the moment the
+	// new generation is admitted.
+	respawnDone := make(chan error, 1)
+	go func() { _, err := ps.respawnDownstream(ctx, "test"); respawnDone <- err }()
+	deadline := time.Now().Add(20 * time.Second)
+	for owner.Snapshot().ActiveSessions != 1 {
+		select {
+		case err := <-respawnDone:
+			t.Fatalf("respawn did not publish a generation; gauge stayed 0: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("respawn never published a live generation")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Remove the published generation while the respawn goroutine is still
+	// finishing its tail. The removal's closeDownstream must key on the
+	// published generation.
+	newID := ps.downstreamID()
+	if !strings.Contains(newID, "-respawn-") {
+		t.Fatalf("published identifier %q does not name a respawned generation", newID)
+	}
+	removalDone := make(chan error, 1)
+	go func() { removalDone <- mgr.RemoveSession(newID) }()
+	if err := <-removalDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-respawnDone; err != nil {
+		t.Fatalf("respawn failed after a clean publication: %v", err)
+	}
+
+	if n := mgr.SessionCount(); n != 0 {
+		t.Errorf("manager population after removal = %d, want 0", n)
+	}
+	if got := owner.Snapshot().ActiveSessions; got != 0 {
+		t.Errorf("active sessions after removal = %d, want 0", got)
+	}
+	if got := idx.count(); got != 0 {
+		t.Errorf("stale removal-owner entries survived the concurrent removal: %v", idx.keys())
+	}
+	ps.downstreamMu.RLock()
+	retained := ps.downstream != nil && !ps.downstreamClosed
+	ps.downstreamMu.RUnlock()
+	if retained {
+		t.Error("concurrent removal left the published generation attached")
 	}
 }

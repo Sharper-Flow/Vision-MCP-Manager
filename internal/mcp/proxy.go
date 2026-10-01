@@ -374,31 +374,31 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 					// Register the removal owner before the shared lease
 					// exists, so an expiry during startup reaches this proxy.
 					idx.mu.Lock()
-					idx.byDownstream[ps.sessionID] = ps
+					idx.byDownstream[ps.downstreamID()] = ps
 					idx.mu.Unlock()
 				},
 				func(upstreamSessionID string, ps *proxySession) {
 					ps.SetReachabilityStore(getReachabilityStore())
 					idx.mu.Lock()
 					idx.byUpstream[upstreamSessionID] = ps
-					idx.byDownstream[ps.sessionID] = ps
+					idx.byDownstream[ps.downstreamID()] = ps
 					idx.mu.Unlock()
 				},
-			func(upstreamSessionID string) {
-				idx.mu.Lock()
-				ps := idx.byUpstream[upstreamSessionID]
-				delete(idx.byUpstream, upstreamSessionID)
-				if ps != nil {
-					delete(idx.byDownstream, ps.sessionID)
-				}
-				idx.mu.Unlock()
-			},
-			func(sessionID string) {
-				idx.mu.Lock()
-				delete(idx.byDownstream, sessionID)
-				idx.mu.Unlock()
-			},
-		)
+				func(upstreamSessionID string) {
+					idx.mu.Lock()
+					ps := idx.byUpstream[upstreamSessionID]
+					delete(idx.byUpstream, upstreamSessionID)
+					if ps != nil {
+						delete(idx.byDownstream, ps.downstreamID())
+					}
+					idx.mu.Unlock()
+				},
+				func(sessionID string) {
+					idx.mu.Lock()
+					delete(idx.byDownstream, sessionID)
+					idx.mu.Unlock()
+				},
+			)
 			if err != nil {
 				logger.Warn("failed to create shared-mode proxy server",
 					slog.String("error", err.Error()),
@@ -450,7 +450,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				// Register the removal owner before the spawn, so a removal
 				// during the spawn window reaches this proxy.
 				idx.mu.Lock()
-				idx.byDownstream[ps.sessionID] = ps
+				idx.byDownstream[ps.downstreamID()] = ps
 				idx.mu.Unlock()
 			},
 			func(upstreamSessionID string, ps *proxySession) {
@@ -460,7 +460,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				}
 				idx.mu.Lock()
 				idx.byUpstream[upstreamSessionID] = ps
-				idx.byDownstream[ps.sessionID] = ps
+				idx.byDownstream[ps.downstreamID()] = ps
 				idx.mu.Unlock()
 			},
 			func(upstreamSessionID string) {
@@ -475,7 +475,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				ps := idx.byUpstream[upstreamSessionID]
 				delete(idx.byUpstream, upstreamSessionID)
 				if ps != nil {
-					delete(idx.byDownstream, ps.sessionID)
+					delete(idx.byDownstream, ps.downstreamID())
 				}
 				idx.mu.Unlock()
 			},
@@ -554,7 +554,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			if ps != nil && applicationActivity {
 				ps.touch()
 				if ps.shared && ps.sharedMgr != nil {
-					release := ps.sharedMgr.BeginRequest(ps.sessionID)
+					release := ps.sharedMgr.BeginRequest(ps.downstreamID())
 					defer release()
 				}
 			}
@@ -574,7 +574,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				// already set the closed flag, so the onSessionRemoved callback
 				// will be a no-op.
 				if !ps.shared && ps.mgr != nil {
-					if err := ps.mgr.RemoveSession(ps.sessionID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+					if err := ps.mgr.RemoveSession(ps.downstreamID()); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
 						logger.Warn("failed to remove session on delete",
 							slog.String("error", err.Error()),
 						)
@@ -641,10 +641,17 @@ func isApplicationActivityRequest(r *http.Request) bool {
 type proxySession struct {
 	serverName string
 	server     *mcp.Server
-	sessionID  string
-	mgr        *session.Manager
-	logger     *slog.Logger
-	onClosed   func(string)
+
+	// sessionID is the current downstream session identifier. It has one
+	// writer: the closeMu critical section that publishes a respawned
+	// generation. Every reader keys manager and index operations on it
+	// through downstreamID, so a cleanup path always reads the identifier
+	// of the generation it tears down.
+	sessionIDMu sync.RWMutex
+	sessionID   string
+	mgr         *session.Manager
+	logger      *slog.Logger
+	onClosed    func(string)
 
 	// onRespawn is called after a successful downstream respawn to update
 	// external indexes (e.g., idx.byDownstream). It receives the old and new
@@ -730,6 +737,32 @@ type proxySession struct {
 	// daemonMetrics records daemon-wide tool call and forwarding failure
 	// counters. Optional; nil = no daemon-wide counting.
 	daemonMetrics *metrics.DaemonMetrics
+}
+
+// downstreamID returns the current downstream session identifier.
+//
+// The identifier is written only inside the closeMu critical section that
+// publishes a respawned generation, before that section releases closeMu.
+// Readers that key manager or index operations on the identifier take this
+// accessor, so a cleanup path either reads the identifier of the generation
+// the manager holds or waits for the publication to complete; no reader can
+// pair the rekeyed index entry with the previous identifier.
+func (ps *proxySession) downstreamID() string {
+	if ps == nil {
+		return ""
+	}
+	ps.sessionIDMu.RLock()
+	defer ps.sessionIDMu.RUnlock()
+	return ps.sessionID
+}
+
+// setDownstreamID publishes a new downstream session identifier. It runs
+// only inside the closeMu critical section that publishes the respawned
+// generation.
+func (ps *proxySession) setDownstreamID(id string) {
+	ps.sessionIDMu.Lock()
+	ps.sessionID = id
+	ps.sessionIDMu.Unlock()
 }
 
 // SetReachabilityStore configures the optional store used by this session's
@@ -1209,7 +1242,7 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 		if ps.shared && ps.sharedMgr != nil {
 			// In shared mode, get or respawn via SharedManager.
 			var err error
-			ds, err = ps.sharedMgr.GetOrCreateSession(ctx, ps.sessionID)
+			ds, err = ps.sharedMgr.GetOrCreateSession(ctx, ps.downstreamID())
 			if err != nil {
 				ps.logger.Warn("failed to get shared downstream during tool list refresh",
 					slog.String("error", err.Error()),
@@ -1392,7 +1425,7 @@ func (ps *proxySession) getDownstream(ctx context.Context) (*mcp.ClientSession, 
 
 		if ds == nil {
 			var err error
-			ds, err = ps.sharedMgr.GetOrCreateSession(ctx, ps.sessionID)
+			ds, err = ps.sharedMgr.GetOrCreateSession(ctx, ps.downstreamID())
 			if err != nil {
 				return nil, false, err
 			}
@@ -1600,7 +1633,7 @@ func (ps *proxySession) respawnDownstream(ctx context.Context, trigger string) (
 	spawnCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	newSessionID := fmt.Sprintf("%s-respawn-%d", ps.sessionID, nextSessionID())
+	newSessionID := fmt.Sprintf("%s-respawn-%d", ps.downstreamID(), nextSessionID())
 	ps.mu.Lock()
 	previousCloseReason := ps.closeReason
 	ps.mu.Unlock()
@@ -1627,7 +1660,7 @@ func (ps *proxySession) respawnDownstream(ctx context.Context, trigger string) (
 	// leave the respawn publishing a generation the manager no longer holds.
 	// The rekey also drops the old key, so the later RemoveSession of the old
 	// session cannot reach this proxy and close the new downstream through it.
-	oldSessionID := ps.sessionID
+	oldSessionID := ps.downstreamID()
 	if ps.onRespawn != nil {
 		ps.onRespawn(oldSessionID, newSessionID, ps)
 	}
@@ -1696,6 +1729,12 @@ func (ps *proxySession) respawnDownstream(ctx context.Context, trigger string) (
 		return nil, fmt.Errorf("respawn abandoned: manager removed session %s during setup", newSessionID)
 	}
 	ps.closeOnce = sync.Once{}
+	// Publish the new identifier inside the same critical section that
+	// publishes the generation, before the credit reacquisition: every
+	// cleanup path that acquires closeMu after this point keys on the
+	// identifier of the published generation, and the gauge flip the
+	// reacquisition causes proves the identifier is already published.
+	ps.setDownstreamID(newSessionID)
 	// The reap released this session's active-session credit, but the
 	// initialized upstream session continues on the respawned downstream.
 	// Reacquire the credit in the same closeMu window as the publication: a
@@ -1706,18 +1745,16 @@ func (ps *proxySession) respawnDownstream(ctx context.Context, trigger string) (
 	if ps.hasInitializedUpstreamSession() {
 		ps.acquireActiveSession()
 	}
-	// Only now publish: the generation is proven live in the manager, its
-	// close path is armed through the fresh closeOnce, and the credit is
-	// held. A removal that lands after closeMu is released sees exactly this
-	// published generation and tears it down in a balanced way.
+	// Only now publish the pointer: the generation is proven live in the
+	// manager, its close path is armed through the fresh closeOnce, the new
+	// identifier is published, and the credit is held. A removal that lands
+	// after closeMu is released sees exactly this published generation and
+	// tears it down in a balanced way.
 	ps.downstreamMu.Lock()
 	ps.downstream = downstream
 	ps.downstreamClosed = false
 	ps.downstreamMu.Unlock()
 	ps.closeMu.Unlock()
-
-	// Update the session ID so that touch/close operate on the new session.
-	ps.sessionID = newSessionID
 
 	ps.mu.Lock()
 	ps.currentTools = newToolNames
@@ -1767,14 +1804,14 @@ func (ps *proxySession) touch() {
 	// Shared mode tracks activity on the upstream session record.
 	if ps.shared {
 		if ps.sharedMgr != nil {
-			ps.sharedMgr.TouchSession(ps.sessionID)
+			ps.sharedMgr.TouchSession(ps.downstreamID())
 		}
 		return
 	}
 	if ps.mgr == nil {
 		return
 	}
-	ps.mgr.TouchSession(ps.sessionID)
+	ps.mgr.TouchSession(ps.downstreamID())
 }
 
 func (ps *proxySession) closeDownstream(reason string) {
@@ -1812,12 +1849,12 @@ func (ps *proxySession) closeDownstream(reason string) {
 			// The terminal close of a startup-expired generation finds the
 			// lease already removed by the expiry callback; ErrSessionNotFound
 			// is the expected outcome there, not a leak.
-			if err := ps.sharedMgr.RemoveSession(ps.sessionID); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
+			if err := ps.sharedMgr.RemoveSession(ps.downstreamID()); err != nil && !errors.Is(err, session.ErrSessionNotFound) {
 				ps.logger.Warn("failed to remove shared session",
 					slog.String("error", err.Error()),
 				)
 			}
-			ps.sharedMgr.Unsubscribe(ps.sessionID)
+			ps.sharedMgr.Unsubscribe(ps.downstreamID())
 		} else {
 			// Stop the health probe before tearing down the downstream.
 			ps.stopHealthProbe()
@@ -1840,7 +1877,7 @@ func (ps *proxySession) closeDownstream(reason string) {
 		upstream := ps.upstreamSession
 		onClosed := ps.onClosed
 		onDownstreamClosed := ps.onDownstreamClosed
-		sessionID := ps.sessionID
+		sessionID := ps.downstreamID()
 		ps.mu.Unlock()
 		if onDownstreamClosed != nil {
 			onDownstreamClosed(sessionID)
