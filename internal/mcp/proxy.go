@@ -1814,6 +1814,15 @@ func (ps *proxySession) touch() {
 	ps.mgr.TouchSession(ps.downstreamID())
 }
 
+// closeDownstream tears the proxy's downstream generation down and then runs
+// the terminal owner cleanup. The generation close is guarded by closeOnce,
+// which respawn re-arms for the next generation; the terminal cleanup sits
+// outside it because it is keyed to the upstream session, not the generation:
+// a close whose generation close was already consumed by an earlier removal
+// (a manager removal that landed before notifications/initialized published
+// the session) must still release the slot reservation and the index entries
+// of the published upstream session. Both cleanup callbacks are idempotent
+// map deletions and slot releases, so repeated closes are no-ops.
 func (ps *proxySession) closeDownstream(reason string) {
 	if ps == nil {
 		return
@@ -1868,30 +1877,16 @@ func (ps *proxySession) closeDownstream(reason string) {
 		ps.downstream = nil
 		ps.downstreamMu.Unlock()
 
-		// Clean up index maps via the onClosed callback. The downstream-keyed
-		// registration is removed unconditionally: a close before upstream
-		// initialization (failed initial tools/list, pre-publish removal)
-		// has no upstream ID, so the gated onClosed call cannot reach it.
-		ps.mu.Lock()
-		upstreamID := ps.upstreamSessionID
-		upstream := ps.upstreamSession
-		onClosed := ps.onClosed
-		onDownstreamClosed := ps.onDownstreamClosed
-		sessionID := ps.downstreamID()
-		ps.mu.Unlock()
-		if onDownstreamClosed != nil {
-			onDownstreamClosed(sessionID)
-		}
-		if onClosed != nil && upstreamID != "" {
-			onClosed(upstreamID)
-		}
-
 		// A shared-mode proxy session never reacquires its lease, so the
 		// upstream session must end with it. Closing the upstream session
 		// removes it from the streamable HTTP handler, which then answers the
 		// session ID with HTTP 404; the MCP transport requires the client to
 		// initialize a new session on 404. Close waits for in-flight upstream
 		// requests, so it runs outside closeMu.
+		ps.mu.Lock()
+		upstream := ps.upstreamSession
+		upstreamID := ps.upstreamSessionID
+		ps.mu.Unlock()
 		if ps.shared && upstream != nil {
 			go func() {
 				if err := upstream.Close(); err != nil {
@@ -1903,6 +1898,27 @@ func (ps *proxySession) closeDownstream(reason string) {
 			}()
 		}
 	})
+
+	// Terminal owner cleanup: release the slot reservation and remove the
+	// index entries. This runs on every close, outside closeOnce: a
+	// generation close consumed by an earlier removal must not stop the
+	// later DELETE or upstream-end close from cleaning the published upstream
+	// session's owner entries. The downstream-keyed registration is removed
+	// unconditionally: a close before upstream initialization (failed initial
+	// tools/list, pre-publish removal) has no upstream ID, so the gated
+	// onClosed call cannot reach it. Both calls are idempotent.
+	ps.mu.Lock()
+	upstreamID := ps.upstreamSessionID
+	onClosed := ps.onClosed
+	onDownstreamClosed := ps.onDownstreamClosed
+	sessionID := ps.downstreamID()
+	ps.mu.Unlock()
+	if onDownstreamClosed != nil {
+		onDownstreamClosed(sessionID)
+	}
+	if onClosed != nil && upstreamID != "" {
+		onClosed(upstreamID)
+	}
 }
 
 // isDownstreamClosureError reports whether err is an SDK-level connection
