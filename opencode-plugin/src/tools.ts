@@ -89,7 +89,7 @@ async function checkDaemonRunning(): Promise<string | null> {
     return JSON.stringify({
       success: false,
       error: "Vision daemon is not running",
-      suggestion: "Start it with: vision daemon start",
+      suggestion: "Restart it with: systemctl --user restart vision.service",
     })
   }
   return null

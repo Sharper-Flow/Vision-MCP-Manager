@@ -4,7 +4,6 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 
 ## Features
 
-- **Context Injection**: Automatically injects Vision usage instructions at session start
 - **Tool Wrappers**: Exposes all Vision Admin MCP tools as OpenCode plugin tools
 - **Runtime MCP Control**: Connect and disconnect opencode's own MCP servers mid-session, without the Vision daemon
 - **Health Check**: Detects if daemon is running and provides helpful guidance
@@ -24,7 +23,7 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 2. For the `vision_*` tools, ensure the Vision daemon is installed and running:
 
    ```bash
-   vision daemon start
+   systemctl --user restart vision.service
    ```
 
    The `opencode_mcp_*` tools need no daemon.
@@ -35,7 +34,7 @@ The plugin exposes two groups of tools. The distinction matters twice over: the
 first group needs the Vision daemon, the second does not — and the first group is
 registered **only when Code Mode is off**.
 
-### Daemon-backed (require `vision daemon start`)
+### Daemon-backed (require `systemctl --user restart vision.service`)
 
 These wrap Vision Admin MCP calls on port 6275. They return a structured error if
 the daemon is not running.
@@ -129,8 +128,6 @@ OpenCode Session
       ▼
 Vision Plugin (this package)
       │
-      ├── Context Injection (session.created, compacting)
-      │
       ├── vision_* tools ──────► Vision Admin MCP (port 6275)
       │   [Code Mode OFF only]        │
       │                               ▼
@@ -154,11 +151,9 @@ bound, which is the default for the TUI.
 
 The plugin:
 
-1. Injects context at session start to solve the "bootstrap problem", rendering
-   `tools.vision.*()` or bare tool names depending on Code Mode
-2. Wraps Admin MCP tool calls for OpenCode tool discovery, when Code Mode is off
-3. Handles daemon-not-running errors gracefully
-4. Connects and disconnects opencode MCP servers at runtime, independent of the daemon
+1. Wraps Admin MCP tool calls for OpenCode tool discovery, when Code Mode is off
+2. Handles daemon-not-running errors gracefully
+3. Connects and disconnects opencode MCP servers at runtime, independent of the daemon
 
 ## Development
 

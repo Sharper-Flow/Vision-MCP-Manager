@@ -223,10 +223,12 @@ func (sm *SharedSessionManager) spawn(ctx context.Context) (*mcp.ClientSession, 
 	// Safe without lock: spawn() is always called under mu.Lock from getOrCreateDownstream.
 	sm.cmd = cmd
 
+	// Args resolve ${VAR} at config load and may hold credentials; the count
+	// identifies the spawn without writing their values to the journal.
 	sm.logger.Info("spawning shared downstream subprocess",
 		slog.String("event", "shared_session.spawn"),
 		slog.String("command", sm.config.Command),
-		slog.Any("args", sm.config.Args),
+		slog.Int("arg_count", len(sm.config.Args)),
 	)
 
 	transport := &mcp.CommandTransport{Command: cmd}

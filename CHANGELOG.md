@@ -1,3 +1,27 @@
+## 2026-10-01 (v1.5.12)
+
+### Changed
+
+- deterministic failed-lease-record fixture with real group-kill evidence (#30) (test: supervisor)
+
+## 2026-09-30 (v1.5.11)
+
+### Fixed
+
+- repair five review defects in the daemon metrics wiring (#26)
+
+## 2026-09-30 (v1.5.10)
+
+### Fixed
+
+- drop compaction context injection and systemd-only daemon advice (#28)
+
+## 2026-09-30 (v1.5.9)
+
+### Fixed
+
+- stop spawn and proxy logs writing resolved credentials (#27)
+
 ## 2026-09-30 (v1.5.8)
 
 ### Fixed
