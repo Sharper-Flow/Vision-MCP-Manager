@@ -1,3 +1,9 @@
+## 2026-10-05 (v1.5.14)
+
+### Fixed
+
+- preserve depth evidence and repair user boot ordering (#31)
+
 ## 2026-10-01 (v1.5.13)
 
 ### Fixed
