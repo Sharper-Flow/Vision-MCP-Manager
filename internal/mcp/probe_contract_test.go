@@ -65,9 +65,9 @@ func TestListenerProbeBypassesAdmissionRateLimitAndMCPHandler(t *testing.T) {
 	probe := NewListenerProbe()
 	baseline := gateway.Snapshot(0)
 	for i := 0; i < 20; i++ {
-		reachable, err := probe.Probe(context.Background(), target)
-		if err != nil || !reachable {
-			t.Fatalf("listener probe %d = %t, %v; want reachable", i, reachable, err)
+		attempt := probe.Probe(context.Background(), target)
+		if attempt.Disposition != reachability.DispositionSuccess || attempt.Err != nil {
+			t.Fatalf("listener probe %d = %+v; want reachable", i, attempt)
 		}
 	}
 	if got := handlerCalls.Load(); got != 0 {
@@ -128,9 +128,9 @@ func TestEndToEndProbeCleanupSurvivesParentCancellation(t *testing.T) {
 	transport := &cancelAfterInitializeTransport{base: http.DefaultTransport, cancel: cancel}
 	probe := &EndToEndProbe{Client: &http.Client{Transport: transport}}
 	baseline := gateway.Snapshot(0)
-	reachable, err := probe.Probe(ctx, reachability.Target{Port: listener.Listener.Addr().(*net.TCPAddr).Port})
-	if err != nil || !reachable {
-		t.Fatalf("cancelled-parent probe = %t, %v; want reachable", reachable, err)
+	attempt := probe.Probe(ctx, reachability.Target{Port: listener.Listener.Addr().(*net.TCPAddr).Port})
+	if attempt.Disposition != reachability.DispositionSuccess || attempt.Err != nil {
+		t.Fatalf("cancelled-parent probe = %+v; want reachable", attempt)
 	}
 	if ctx.Err() != context.Canceled {
 		t.Fatalf("parent context error = %v, want context canceled", ctx.Err())
@@ -177,9 +177,9 @@ func TestListenerProbeDoesNotSpawnIdleSharedStdioDownstream(t *testing.T) {
 	probe := NewListenerProbe()
 	target := reachability.Target{Port: listener.Listener.Addr().(*net.TCPAddr).Port}
 	for i := 0; i < 20; i++ {
-		reachable, err := probe.Probe(context.Background(), target)
-		if err != nil || !reachable {
-			t.Fatalf("idle shared listener probe %d = %t, %v; want reachable", i, reachable, err)
+		attempt := probe.Probe(context.Background(), target)
+		if attempt.Disposition != reachability.DispositionSuccess || attempt.Err != nil {
+			t.Fatalf("idle shared listener probe %d = %+v; want reachable", i, attempt)
 		}
 	}
 	if got := shared.SessionCount(); got != 0 {

@@ -23,6 +23,18 @@ import (
 
 const managedProbeInitialize = `{"jsonrpc":"2.0","id":"vision-readiness","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"vision-readiness","version":"1.0.0"}}}`
 
+const (
+	// gatewayDenialHeader is the deterministic provenance marker Vision's
+	// gateways set on a response they wrote themselves, before the backend
+	// was touched. It is the only admissible evidence that a refusal came
+	// from Vision rather than from the backend: refusal provenance is never
+	// inferred from a status code, a body, or preflight capacity.
+	gatewayDenialHeader = "X-Vision-Gateway-Denial"
+	// gatewayDenialAdmissionCapacity marks a session-capacity admission
+	// denial answered by the gateway ahead of any backend dispatch.
+	gatewayDenialAdmissionCapacity = "admission-capacity"
+)
+
 // ManagedBackendGate blocks dispatch while the supervised native HTTP backend
 // is starting, draining, or restarting.
 type ManagedBackendGate interface {
@@ -185,6 +197,9 @@ func (g *ManagedHTTPGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if g.metrics != nil {
 					g.metrics.IncAdmissionDenied()
 				}
+				// This response is written by the gateway before the backend
+				// is touched, so it carries the gateway-owned denial marker.
+				w.Header().Set(gatewayDenialHeader, gatewayDenialAdmissionCapacity)
 				writeManagedError(w, http.StatusTooManyRequests, -32000,
 					fmt.Sprintf("max sessions reached: limit %d (current %d)", g.leases.Snapshot(0).CapacityMax, g.leases.CapacityUsed()))
 				return
@@ -363,6 +378,12 @@ func (g *ManagedHTTPGateway) proxy(state *managedProxyRequest) *httputil.Reverse
 		Transport:     g.transport,
 		FlushInterval: -1,
 		ModifyResponse: func(resp *http.Response) error {
+			// Denial provenance is gateway-owned: a forwarded backend
+			// response must never carry it to a client, so strip the marker
+			// before the response is written. This is what makes the marker
+			// unforgeable — a backend answering 429 (or pretending to be a
+			// gateway denial) stays a backend answer.
+			resp.Header.Del(gatewayDenialHeader)
 			return g.observeResponse(state, resp)
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {

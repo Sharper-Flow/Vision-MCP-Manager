@@ -624,6 +624,7 @@ func (sm *SharedSessionManager) healthCheck() {
 			store.RecordProbe(sm.serverName, reachability.ProbeResult{
 				Depth:       reachability.DepthSession,
 				AttemptedAt: attemptedAt,
+				Disposition: reachability.DispositionFailure,
 				Error:       err.Error(),
 			})
 		}
@@ -689,7 +690,7 @@ func (sm *SharedSessionManager) healthCheck() {
 		store.RecordProbe(sm.serverName, reachability.ProbeResult{
 			Depth:       reachability.DepthSession,
 			AttemptedAt: attemptedAt,
-			Success:     true,
+			Disposition: reachability.DispositionSuccess,
 		})
 	}
 }

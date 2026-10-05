@@ -32,10 +32,30 @@ type Target struct {
 	BearerToken     string
 }
 
-// Probe is the version-independent seam for reachability mechanisms.
-// Implementations return false with an error when the target is not reachable.
+// Attempt is one probe attempt's completion: its disposition plus the cause
+// detail. Err carries the reason for failures and inconclusive attempts and
+// is ignored for successes.
+type Attempt struct {
+	Disposition Disposition
+	Err         error
+}
+
+// Probe is the version-independent seam for reachability mechanisms. An
+// implementation reports the disposition of its attempt; only a mechanism
+// that observes why its attempt proved nothing (for example an admission
+// denial answered before the backend was touched) may report inconclusive.
 type Probe interface {
-	Probe(context.Context, Target) (bool, error)
+	Probe(context.Context, Target) Attempt
+}
+
+// DispositionFromError maps a completed traffic check to a disposition: an
+// error is a failure, no error is a success. It never reports inconclusive;
+// only a probe owner that observes an inconclusive condition may.
+func DispositionFromError(err error) Disposition {
+	if err == nil {
+		return DispositionSuccess
+	}
+	return DispositionFailure
 }
 
 // VersionSelector maps negotiated MCP revisions to probe mechanisms. It is
@@ -273,11 +293,25 @@ func runProbe(ctx context.Context, store *Store, logger *slog.Logger, target Tar
 	runProbeAtDepth(ctx, store, logger, target, probe, DepthListener)
 }
 
+// runEndToEndProbe decides whether a deep-probe opportunity actually probes.
+// Fresh session evidence normally covers the deep depth: real client traffic
+// is the better signal, and the admission-consuming probe stays rare. A failed
+// deep depth is not covered. Healthy sessions keep refreshing the session
+// evidence while the stale deep failure keeps dominating the aggregate state,
+// so a failed deep depth must be re-probed at the same cadence until an actual
+// successful deep probe clears it. Evidence at other depths never clears it,
+// and a denied deep probe completes inconclusively without changing it.
 func runEndToEndProbe(ctx context.Context, store *Store, logger *slog.Logger, target Target, freshness time.Duration, probe Probe) {
 	now := time.Now()
 	if value, ok := store.Get(target.Name); ok {
-		if evidence, ok := value.Evidence[DepthSession]; ok && !evidence.LastProbeAttempt.IsZero() && now.Before(evidence.LastProbeAttempt.Add(freshness)) {
-			return
+		// Freshness is a completed-outcome property: only a session outcome
+		// that actually completed inside the window covers the deep depth.
+		// An attempt that is in flight or proved nothing carries no fresh
+		// completed evidence, so it must not suppress the deep probe.
+		if evidence, ok := value.Evidence[DepthSession]; ok && !evidence.LastOutcomeAt.IsZero() && now.Before(evidence.LastOutcomeAt.Add(freshness)) {
+			if deep, ok := value.Evidence[DepthEndToEnd]; !ok || deep.LastProbeOutcome != OutcomeFailure {
+				return
+			}
 		}
 	}
 	runProbeAtDepth(ctx, store, logger, target, probe, DepthEndToEnd)
@@ -287,16 +321,28 @@ func runProbeAtDepth(ctx context.Context, store *Store, logger *slog.Logger, tar
 	attemptedAt := time.Now()
 	store.StartProbe(target.Name, depth, attemptedAt)
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-	reachable, err := probe.Probe(probeCtx, target)
+	attempt := probe.Probe(probeCtx, target)
 	cancel()
-	if err != nil {
-		logger.Warn("server reachability probe failed", slog.String("server", target.Name), slog.String("error", err.Error()))
+	switch attempt.Disposition {
+	case DispositionInconclusive:
+		// An inconclusive attempt answers nothing at this depth: record it
+		// without weakening or clearing any completed evidence, and keep the
+		// reason in the log where operators diagnose probe behavior.
+		logger.Info("server reachability probe inconclusive",
+			slog.String("server", target.Name),
+			slog.String("depth", string(depth)),
+			slog.String("error", errorText(attempt.Err)))
+	case DispositionFailure:
+		logger.Warn("server reachability probe failed",
+			slog.String("server", target.Name),
+			slog.String("depth", string(depth)),
+			slog.String("error", errorText(attempt.Err)))
 	}
 	store.RecordProbe(target.Name, ProbeResult{
 		Depth:       depth,
 		AttemptedAt: attemptedAt,
-		Success:     reachable && err == nil,
-		Error:       errorText(err),
+		Disposition: attempt.Disposition,
+		Error:       errorText(attempt.Err),
 	})
 }
 

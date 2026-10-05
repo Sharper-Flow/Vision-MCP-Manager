@@ -37,9 +37,9 @@ func TestEndToEndProbeLeavesAdmissionAtBaselineAcrossCycles(t *testing.T) {
 	baseline := gateway.Snapshot(0)
 	const cycles = 10
 	for cycle := 0; cycle < cycles; cycle++ {
-		reachable, err := probe.Probe(context.Background(), target)
-		if err != nil || !reachable {
-			t.Fatalf("cycle %d probe = %t, %v; want reachable", cycle, reachable, err)
+		attempt := probe.Probe(context.Background(), target)
+		if attempt.Disposition != reachability.DispositionSuccess || attempt.Err != nil {
+			t.Fatalf("cycle %d probe = %+v; want reachable", cycle, attempt)
 		}
 		snapshot := gateway.Snapshot(0)
 		if snapshot.CapacityUsed != baseline.CapacityUsed || len(snapshot.Rows) != len(baseline.Rows) {
@@ -72,8 +72,8 @@ func TestEndToEndProbeCleansUpAfterInitializeFailure(t *testing.T) {
 	probe := NewEndToEndProbe()
 	target := reachability.Target{Port: listener.Listener.Addr().(*net.TCPAddr).Port}
 	baseline := gateway.Snapshot(0)
-	if reachable, err := probe.Probe(context.Background(), target); err == nil || reachable {
-		t.Fatalf("failed probe = %t, %v; want failure", reachable, err)
+	if attempt := probe.Probe(context.Background(), target); attempt.Disposition != reachability.DispositionFailure || attempt.Err == nil {
+		t.Fatalf("failed probe = %+v; want failure", attempt)
 	}
 	if deletes.Load() != 1 {
 		t.Fatalf("cleanup DELETE count = %d, want 1", deletes.Load())
@@ -117,7 +117,12 @@ func TestManagerRecordsEndToEndSuccess(t *testing.T) {
 	}
 }
 
-func TestManagerRecordsCapacityDenialAsReachable(t *testing.T) {
+// With no prior deep evidence, capacity-denied deep probes complete
+// inconclusively: they record the attempt, invent no deep outcome, and leave
+// the aggregate state to the completed shallower evidence. The first-ever
+// inconclusive deep result must select that completed evidence — never an
+// empty state and never a permanently probing one.
+func TestManagerCapacityDenialRecordsNoDeepOutcomeAndStaysReachable(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Mcp-Session-Id", "occupied")
 		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
@@ -134,17 +139,48 @@ func TestManagerRecordsCapacityDenialAsReachable(t *testing.T) {
 	if err := manager.Start(context.Background(), target, 2*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
-	evidence := waitForProbeEvidence(t, store, target.Name, reachability.DepthEndToEnd)
-	manager.Close()
-	if evidence.LastProbeOutcome != reachability.OutcomeSuccess || evidence.ConsecutiveFailures != 0 {
-		t.Fatalf("capacity-denied evidence = %#v, want successful reachable evidence", evidence)
+	defer manager.Close()
+
+	// Wait until a deep attempt actually ran (a denied probe leaves an
+	// attempt timestamp but no completed outcome) and the aggregate state
+	// settled back onto the completed listener evidence.
+	sawDeepAttempt := false
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		value, ok := store.Get(target.Name)
+		if ok {
+			if value.State == "" {
+				t.Fatal("denied deep probe left an empty aggregate state")
+			}
+			if evidence, ok := value.Evidence[reachability.DepthEndToEnd]; ok && !evidence.LastProbeAttempt.IsZero() {
+				sawDeepAttempt = true
+				if evidence.LastProbeOutcome != "" {
+					t.Fatalf("denied deep probe invented outcome = %q, want none", evidence.LastProbeOutcome)
+				}
+				if evidence.ConsecutiveFailures != 0 {
+					t.Fatalf("denied deep probe recorded failures = %d, want 0", evidence.ConsecutiveFailures)
+				}
+			}
+			if sawDeepAttempt && value.State == reachability.StateReachable {
+				break
+			}
+		}
+		time.Sleep(time.Millisecond)
 	}
-	if value, _ := store.Get(target.Name); value.State == reachability.StateUnreachable {
-		t.Fatal("capacity denial made server unreachable")
+	if !sawDeepAttempt {
+		t.Fatal("no denied deep attempt ran within the deadline")
 	}
+
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/mcp", nil)
 	deleteRequest.Header.Set("Mcp-Session-Id", active)
 	gateway.ServeHTTP(httptest.NewRecorder(), deleteRequest)
+
+	// Freed capacity lets the next deep probe reach the backend: only then
+	// may a deep outcome exist, and it must be a success.
+	evidence := waitForProbeEvidence(t, store, target.Name, reachability.DepthEndToEnd)
+	if evidence.LastProbeOutcome != reachability.OutcomeSuccess || evidence.ConsecutiveFailures != 0 {
+		t.Fatalf("post-capacity deep evidence = %#v, want successful evidence", evidence)
+	}
 }
 
 func waitForProbeEvidence(t *testing.T, store *reachability.Store, name string, depth reachability.Depth) reachability.ProbeEvidence {
@@ -162,7 +198,7 @@ func waitForProbeEvidence(t *testing.T, store *reachability.Store, name string, 
 	return reachability.ProbeEvidence{}
 }
 
-func TestEndToEndProbeTreatsCapacityDenialAsReachable(t *testing.T) {
+func TestEndToEndProbeTreatsCapacityDenialAsInconclusive(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Mcp-Session-Id", "existing")
 		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
@@ -177,9 +213,9 @@ func TestEndToEndProbeTreatsCapacityDenialAsReachable(t *testing.T) {
 	transport := &probeRecordingTransport{base: http.DefaultTransport}
 	probe := &EndToEndProbe{Client: &http.Client{Transport: transport}}
 	baseline := gateway.Snapshot(0)
-	reachable, err := probe.Probe(context.Background(), reachability.Target{Port: listener.Listener.Addr().(*net.TCPAddr).Port})
-	if err != nil || !reachable {
-		t.Fatalf("capacity-denied probe = %t, %v; want reachable", reachable, err)
+	attempt := probe.Probe(context.Background(), reachability.Target{Port: listener.Listener.Addr().(*net.TCPAddr).Port})
+	if attempt.Disposition != reachability.DispositionInconclusive || attempt.Err == nil {
+		t.Fatalf("capacity-denied probe = %+v, want inconclusive with a denial reason", attempt)
 	}
 	if len(transport.statuses) != 1 || transport.statuses[0] != http.StatusTooManyRequests {
 		t.Fatalf("capacity-denied HTTP statuses = %v, want [%d]", transport.statuses, http.StatusTooManyRequests)

@@ -183,8 +183,8 @@ func TestPortManagerReachabilityStoreIsNilSafe(t *testing.T) {
 func TestPerServerHealthReportsReachableServerAsHealthy(t *testing.T) {
 	store := reachability.NewStore()
 	store.RecordProbe("reachable", reachability.ProbeResult{
-		Depth:   reachability.DepthListener,
-		Success: true,
+		Depth:       reachability.DepthListener,
+		Disposition: reachability.DispositionSuccess,
 	})
 
 	pm := NewPortManager(nil)
@@ -210,8 +210,9 @@ func TestPerServerHealthReportsUnreachableServerWithReason(t *testing.T) {
 	store := reachability.NewStore()
 	for range reachability.FailureThreshold {
 		store.RecordProbe("unreachable", reachability.ProbeResult{
-			Depth: reachability.DepthListener,
-			Error: "connection refused",
+			Depth:       reachability.DepthListener,
+			Disposition: reachability.DispositionFailure,
+			Error:       "connection refused",
 		})
 	}
 

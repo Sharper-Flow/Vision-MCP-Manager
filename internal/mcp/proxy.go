@@ -531,6 +531,10 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				if cfg.Metrics != nil {
 					cfg.Metrics.IncAdmissionDenied()
 				}
+				// This response is written by Vision's gateway before any
+				// downstream is spawned, so it carries the gateway-owned denial
+				// marker; a refusal from the backend itself never does.
+				w.Header().Set(gatewayDenialHeader, gatewayDenialAdmissionCapacity)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusTooManyRequests)
 				_ = json.NewEncoder(w).Encode(map[string]any{
@@ -2018,7 +2022,7 @@ func (ps *proxySession) startHealthProbe() {
 					store.RecordProbe(ps.serverName, reachability.ProbeResult{
 						Depth:       reachability.DepthSession,
 						AttemptedAt: attemptedAt,
-						Success:     err == nil,
+						Disposition: reachability.DispositionFromError(err),
 						Error:       errorString(err),
 					})
 				}

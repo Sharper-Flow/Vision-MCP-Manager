@@ -302,6 +302,9 @@ func TestProxyHandler_UsesSelectorAdmissionStatusForInitialize(t *testing.T) {
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusTooManyRequests)
 	}
+	if got := w.Header().Get(gatewayDenialHeader); got != gatewayDenialAdmissionCapacity {
+		t.Fatalf("denied initialize provenance = %q, want deterministic marker %q", got, gatewayDenialAdmissionCapacity)
+	}
 	respBody, err := io.ReadAll(w.Result().Body)
 	if err != nil {
 		t.Fatalf("ReadAll() error: %v", err)

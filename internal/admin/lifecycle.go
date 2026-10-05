@@ -44,7 +44,9 @@ type EffectiveStatus struct {
 }
 
 // ReachabilityDetails is the additive, flat projection shared by every admin
-// status response. A nil last_probe_at is encoded as JSON null when no probe
+// status response. LastProbeAt is the completed-outcome time: when the standing
+// success or failure completed, never when a later inconclusive or in-flight
+// attempt merely ran. A nil LastProbeAt is encoded as JSON null when no probe
 // has completed yet; the remaining fields retain stable zero values.
 type ReachabilityDetails struct {
 	Reachability             string     `json:"reachability"`
@@ -132,9 +134,9 @@ func projectReachability(value reachability.Reachability) ReachabilityDetails {
 		return details
 	}
 	details.ProbeDepth = string(evidence.Depth)
-	if !evidence.LastProbeAttempt.IsZero() {
-		attempt := evidence.LastProbeAttempt
-		details.LastProbeAt = &attempt
+	if !evidence.LastOutcomeAt.IsZero() {
+		completed := evidence.LastOutcomeAt
+		details.LastProbeAt = &completed
 	}
 	details.LastProbeOutcome = string(evidence.LastProbeOutcome)
 	details.LastProbeError = scrubSecrets(evidence.LastProbeError)
@@ -146,6 +148,13 @@ func selectProbeEvidence(value reachability.Reachability) (reachability.ProbeEvi
 	var selected reachability.ProbeEvidence
 	selectedSet := false
 	for _, evidence := range value.Evidence {
+		// An entry with no completed outcome is an attempt that proved
+		// nothing (for example a capacity-denied deep probe). It must not be
+		// projected as the server's probe status: select the actual completed
+		// evidence instead, matching the store's completed-depth selection.
+		if evidence.LastProbeOutcome == "" {
+			continue
+		}
 		if !selectedSet || probeEvidencePreferred(value.State, evidence, selected) {
 			selected = evidence
 			selectedSet = true
@@ -160,8 +169,12 @@ func probeEvidencePreferred(state reachability.State, candidate, selected reacha
 	if candidateFailure != selectedFailure {
 		return candidateFailure
 	}
-	if !candidate.LastProbeAttempt.Equal(selected.LastProbeAttempt) {
-		return candidate.LastProbeAttempt.After(selected.LastProbeAttempt)
+	// Preference orders completed evidence by when each outcome completed.
+	// The latest attempt time is deliberately not used here: an inconclusive
+	// or in-flight attempt moves only the attempt time, and letting it
+	// participate would pair a fresh timestamp with stale completed evidence.
+	if !candidate.LastOutcomeAt.Equal(selected.LastOutcomeAt) {
+		return candidate.LastOutcomeAt.After(selected.LastOutcomeAt)
 	}
 	return candidate.Depth.Rank() > selected.Depth.Rank()
 }

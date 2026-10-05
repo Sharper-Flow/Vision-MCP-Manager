@@ -27,7 +27,7 @@ func TestHandleHealthUsesEffectiveReachabilityStatus(t *testing.T) {
 	for range reachability.FailureThreshold {
 		store.RecordProbe("unreachable", reachability.ProbeResult{
 			Depth:       reachability.DepthListener,
-			Success:     false,
+			Disposition: reachability.DispositionFailure,
 			Error:       "connection refused",
 			AttemptedAt: time.Now(),
 		})
@@ -80,7 +80,7 @@ func TestHandleHealthEffectiveStatusCasesAndResponseShape(t *testing.T) {
 			if tc.reachability.State == reachability.StateReachable {
 				store.RecordProbe("server", reachability.ProbeResult{
 					Depth:       reachability.DepthListener,
-					Success:     true,
+					Disposition: reachability.DispositionSuccess,
 					AttemptedAt: time.Now(),
 				})
 			}
@@ -182,12 +182,14 @@ func assertJSONKeys(t *testing.T, body map[string]any, want []string) {
 }
 
 func reachableHealthTestValue() reachability.Reachability {
+	attempt := time.Now()
 	return reachability.Reachability{
 		State: reachability.StateReachable,
 		Evidence: map[reachability.Depth]reachability.ProbeEvidence{
 			reachability.DepthListener: {
 				Depth:            reachability.DepthListener,
-				LastProbeAttempt: time.Now(),
+				LastProbeAttempt: attempt,
+				LastOutcomeAt:    attempt,
 				LastProbeOutcome: reachability.OutcomeSuccess,
 			},
 		},

@@ -91,6 +91,7 @@ func reachableTestValue() reachability.Reachability {
 			reachability.DepthListener: {
 				Depth:            reachability.DepthListener,
 				LastProbeAttempt: attempt,
+				LastOutcomeAt:    attempt,
 				LastProbeOutcome: reachability.OutcomeSuccess,
 			},
 		},
@@ -105,6 +106,7 @@ func unreachableTestValue() reachability.Reachability {
 			reachability.DepthListener: {
 				Depth:               reachability.DepthListener,
 				LastProbeAttempt:    attempt,
+				LastOutcomeAt:       attempt,
 				LastProbeOutcome:    reachability.OutcomeFailure,
 				LastProbeError:      "dial failed authorization=secret",
 				ConsecutiveFailures: reachability.FailureThreshold,
@@ -126,7 +128,7 @@ func TestEffectiveStatusParityAcrossListV1AndRestart(t *testing.T) {
 	for range reachability.FailureThreshold {
 		reachabilityStore.RecordProbe("managed", reachability.ProbeResult{
 			Depth:       reachability.DepthListener,
-			Success:     false,
+			Disposition: reachability.DispositionFailure,
 			Error:       "dial failed authorization=secret",
 			AttemptedAt: time.Unix(1700000000, 0).UTC(),
 		})

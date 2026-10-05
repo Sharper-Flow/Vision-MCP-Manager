@@ -70,26 +70,26 @@ func TestReachabilityReporting_AllTransportKinds(t *testing.T) {
 				reachabilityGrace: time.Minute,
 			}
 
-			reachable, err := probe.Probe(context.Background(), reachability.Target{Port: port})
-			if err != nil || !reachable {
-				t.Fatalf("reachable %s endpoint probe = %t, %v", tc.name, reachable, err)
+			attempt := probe.Probe(context.Background(), reachability.Target{Port: port})
+			if attempt.Disposition != reachability.DispositionSuccess || attempt.Err != nil {
+				t.Fatalf("reachable %s endpoint probe = %+v", tc.name, attempt)
 			}
 			store.RecordProbe(name, reachability.ProbeResult{
-				Depth:   reachability.DepthListener,
-				Success: true,
+				Depth:       reachability.DepthListener,
+				Disposition: reachability.DispositionSuccess,
 			})
 			assertTransportHealthy(t, adminServer, name, tc.transport)
 
 			endpoint.Close()
 			for range reachability.FailureThreshold {
-				reachable, err = probe.Probe(context.Background(), reachability.Target{Port: port})
-				if reachable || err == nil {
-					t.Fatalf("closed %s endpoint probe = %t, %v; want failure", tc.name, reachable, err)
+				attempt = probe.Probe(context.Background(), reachability.Target{Port: port})
+				if attempt.Disposition != reachability.DispositionFailure || attempt.Err == nil {
+					t.Fatalf("closed %s endpoint probe = %+v; want failure", tc.name, attempt)
 				}
 				store.RecordProbe(name, reachability.ProbeResult{
-					Depth:   reachability.DepthListener,
-					Error:   err.Error(),
-					Success: false,
+					Depth:       reachability.DepthListener,
+					Error:       attempt.Err.Error(),
+					Disposition: reachability.DispositionFailure,
 				})
 			}
 			assertTransportUnhealthy(t, adminServer, name, tc.transport)
