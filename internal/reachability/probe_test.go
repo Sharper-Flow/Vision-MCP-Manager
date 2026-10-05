@@ -13,23 +13,39 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 )
 
+// recordingProbe is a fake Probe whose disposition can change while the
+// manager worker runs. Every field read and write holds the mutex: the
+// manager calls Probe from its worker goroutine while the test mutates and
+// inspects the fake from the test goroutine.
 type recordingProbe struct {
-	mu     sync.Mutex
-	result bool
-	starts []time.Time
+	mu          sync.Mutex
+	disposition reachability.Disposition
+	starts      []time.Time
 }
 
-func (p *recordingProbe) Probe(_ context.Context, _ reachability.Target) (bool, error) {
+func (p *recordingProbe) Probe(_ context.Context, _ reachability.Target) reachability.Attempt {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.starts = append(p.starts, time.Now())
-	p.mu.Unlock()
-	return p.result, nil
+	return reachability.Attempt{Disposition: p.disposition}
 }
 
 func (p *recordingProbe) count() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.starts)
+}
+
+func (p *recordingProbe) setDisposition(disposition reachability.Disposition) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.disposition = disposition
+}
+
+func (p *recordingProbe) firstStart() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.starts[0]
 }
 
 func waitFor(t *testing.T, condition func() bool) {
@@ -64,7 +80,7 @@ func TestListenerProbeRecordsReachable(t *testing.T) {
 
 func TestProbeFailuresUseStoreThreshold(t *testing.T) {
 	store := reachability.NewStore()
-	probe := &recordingProbe{}
+	probe := &recordingProbe{disposition: reachability.DispositionFailure}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(probe))
 	manager.StartWithProbe(context.Background(), reachability.Target{Name: "dead", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, 5*time.Millisecond, probe)
 	defer manager.Close()
@@ -80,7 +96,7 @@ func TestProbeFailuresUseStoreThreshold(t *testing.T) {
 
 func TestManagerRemoveStopsWorkerAndRemovesEvidence(t *testing.T) {
 	store := reachability.NewStore()
-	probe := &recordingProbe{result: true}
+	probe := &recordingProbe{disposition: reachability.DispositionSuccess}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(probe))
 	manager.StartWithProbe(context.Background(), reachability.Target{Name: "removed", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, time.Millisecond, probe)
 	waitFor(t, func() bool { return probe.count() > 0 })
@@ -99,19 +115,15 @@ func TestManagerRemoveStopsWorkerAndRemovesEvidence(t *testing.T) {
 
 func TestFirstTickJitterDiffersByServer(t *testing.T) {
 	store := reachability.NewStore()
-	first := &recordingProbe{result: true}
-	second := &recordingProbe{result: true}
+	first := &recordingProbe{disposition: reachability.DispositionSuccess}
+	second := &recordingProbe{disposition: reachability.DispositionSuccess}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(first))
 	manager.StartWithProbe(context.Background(), reachability.Target{Name: "jitter-one", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, 100*time.Millisecond, first)
 	manager.StartWithProbe(context.Background(), reachability.Target{Name: "jitter-two", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, 100*time.Millisecond, second)
 	defer manager.Close()
 	waitFor(t, func() bool { return first.count() > 0 && second.count() > 0 })
-	first.mu.Lock()
-	firstAt := first.starts[0]
-	first.mu.Unlock()
-	second.mu.Lock()
-	secondAt := second.starts[0]
-	second.mu.Unlock()
+	firstAt := first.firstStart()
+	secondAt := second.firstStart()
 	if delta := firstAt.Sub(secondAt); delta < 5*time.Millisecond && delta > -5*time.Millisecond {
 		t.Fatalf("first ticks were synchronized: delta=%s", delta)
 	}
@@ -135,8 +147,8 @@ func TestVersionSelectorChoosesListenerProbeForSupportedRevisions(t *testing.T) 
 
 func TestManagerSkipsEndToEndProbeWhenSessionEvidenceIsRecent(t *testing.T) {
 	store := reachability.NewStore()
-	listener := &recordingProbe{result: true}
-	deep := &recordingProbe{result: true}
+	listener := &recordingProbe{disposition: reachability.DispositionSuccess}
+	deep := &recordingProbe{disposition: reachability.DispositionSuccess}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(listener, deep))
 	if err := manager.Start(context.Background(), reachability.Target{Name: "busy", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, 5*time.Millisecond); err != nil {
 		t.Fatal(err)
@@ -144,8 +156,8 @@ func TestManagerSkipsEndToEndProbeWhenSessionEvidenceIsRecent(t *testing.T) {
 	defer manager.Close()
 
 	controlStore := reachability.NewStore()
-	controlListener := &recordingProbe{result: true}
-	controlDeep := &recordingProbe{result: true}
+	controlListener := &recordingProbe{disposition: reachability.DispositionSuccess}
+	controlDeep := &recordingProbe{disposition: reachability.DispositionSuccess}
 	controlManager := reachability.NewManager(controlStore, reachability.NewVersionSelector(controlListener, controlDeep))
 	if err := controlManager.Start(context.Background(), reachability.Target{Name: "idle", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, 5*time.Millisecond); err != nil {
 		t.Fatal(err)
@@ -163,7 +175,7 @@ func TestManagerSkipsEndToEndProbeWhenSessionEvidenceIsRecent(t *testing.T) {
 			case <-refreshDone:
 				return
 			case <-ticker.C:
-				store.RecordProbe("busy", reachability.ProbeResult{Depth: reachability.DepthSession, Success: true})
+				store.RecordProbe("busy", reachability.ProbeResult{Depth: reachability.DepthSession, Disposition: reachability.DispositionSuccess})
 			}
 		}
 	}()
@@ -180,10 +192,70 @@ func TestManagerSkipsEndToEndProbeWhenSessionEvidenceIsRecent(t *testing.T) {
 	}
 }
 
+// A stale failed deep depth must be re-probed even while fresh session
+// evidence keeps arriving: real traffic answers at session depth, and only an
+// actual successful deep probe may clear the recorded deep failure. This is
+// the readiness-audit pattern where cold-start end-to-end deadline failures
+// left a server reported degraded despite every warm tool call succeeding.
+func TestManagerReprobesStaleDeepFailureDespiteFreshSessionEvidence(t *testing.T) {
+	store := reachability.NewStore()
+	for range reachability.FailureThreshold + 2 {
+		store.RecordProbe("degraded", reachability.ProbeResult{
+			Depth:       reachability.DepthEndToEnd,
+			AttemptedAt: time.Now(),
+			Disposition: reachability.DispositionFailure,
+			Error:       "end-to-end initialize: context deadline exceeded",
+		})
+	}
+	if value, _ := store.Get("degraded"); value.State != reachability.StateUnreachable {
+		t.Fatalf("seeded state = %v, want %v", value.State, reachability.StateUnreachable)
+	}
+
+	listener := &recordingProbe{disposition: reachability.DispositionSuccess}
+	deep := &recordingProbe{disposition: reachability.DispositionFailure}
+	manager := reachability.NewManager(store, reachability.NewVersionSelector(listener, deep))
+	if err := manager.Start(context.Background(), reachability.Target{Name: "degraded", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, 5*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+
+	refreshDone := make(chan struct{})
+	defer close(refreshDone)
+	go func() {
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-refreshDone:
+				return
+			case <-ticker.C:
+				store.RecordProbe("degraded", reachability.ProbeResult{Depth: reachability.DepthSession, Disposition: reachability.DispositionSuccess, AttemptedAt: time.Now()})
+			}
+		}
+	}()
+
+	// The deep probe must run despite continuously fresh session evidence.
+	waitFor(t, func() bool { return deep.count() >= 1 })
+	// Session-depth success alone must not clear the failed deep depth.
+	if value, _ := store.Get("degraded"); value.Evidence[reachability.DepthEndToEnd].LastProbeOutcome != reachability.OutcomeFailure {
+		t.Fatal("session evidence cleared the failed deep depth")
+	}
+
+	deep.setDisposition(reachability.DispositionSuccess)
+	waitFor(t, func() bool {
+		value, ok := store.Get("degraded")
+		if !ok || value.State != reachability.StateReachable {
+			return false
+		}
+		evidence := value.Evidence[reachability.DepthEndToEnd]
+		return evidence.LastProbeOutcome == reachability.OutcomeSuccess && evidence.ConsecutiveFailures == 0
+	})
+}
+
 func TestManagerRunsEndToEndProbeAtLowCadenceWithoutSessionEvidence(t *testing.T) {
 	store := reachability.NewStore()
-	listener := &recordingProbe{result: true}
-	deep := &recordingProbe{result: true}
+	listener := &recordingProbe{disposition: reachability.DispositionSuccess}
+	deep := &recordingProbe{disposition: reachability.DispositionSuccess}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(listener, deep))
 	if err := manager.Start(context.Background(), reachability.Target{Name: "idle", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, time.Millisecond); err != nil {
 		t.Fatal(err)
@@ -197,8 +269,8 @@ func TestManagerRunsEndToEndProbeAtLowCadenceWithoutSessionEvidence(t *testing.T
 
 func TestManagerScalesEndToEndCadenceFromConfiguredInterval(t *testing.T) {
 	store := reachability.NewStore()
-	listener := &recordingProbe{result: true}
-	deep := &recordingProbe{result: true}
+	listener := &recordingProbe{disposition: reachability.DispositionSuccess}
+	deep := &recordingProbe{disposition: reachability.DispositionSuccess}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(listener, deep))
 	interval := 20 * time.Millisecond
 	if err := manager.Start(context.Background(), reachability.Target{Name: "configured-cadence", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, interval); err != nil {
@@ -207,12 +279,8 @@ func TestManagerScalesEndToEndCadenceFromConfiguredInterval(t *testing.T) {
 	defer manager.Close()
 
 	waitFor(t, func() bool { return deep.count() >= 1 })
-	listener.mu.Lock()
-	firstListener := listener.starts[0]
-	listener.mu.Unlock()
-	deep.mu.Lock()
-	firstDeep := deep.starts[0]
-	deep.mu.Unlock()
+	firstListener := listener.firstStart()
+	firstDeep := deep.firstStart()
 	minimum := interval * reachability.EndToEndProbeIntervalMultiple
 	if elapsed := firstDeep.Sub(firstListener); elapsed < minimum-interval {
 		t.Fatalf("end-to-end probe started after %s, want at least about %s", elapsed, minimum)
@@ -222,7 +290,7 @@ func TestManagerScalesEndToEndCadenceFromConfiguredInterval(t *testing.T) {
 func TestManagerShutdownOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	store := reachability.NewStore()
-	probe := &recordingProbe{result: true}
+	probe := &recordingProbe{disposition: reachability.DispositionSuccess}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(probe))
 	manager.StartWithProbe(ctx, reachability.Target{Name: "cancelled", Port: 1, ProtocolVersion: reachability.ProtocolVersion2025_11_25}, time.Millisecond, probe)
 	waitFor(t, func() bool { return probe.count() > 0 })
@@ -249,7 +317,7 @@ func TestManagerConcurrentStartsLeaveOneWorker(t *testing.T) {
 	defer cancel()
 
 	store := reachability.NewStore()
-	probe := &recordingProbe{result: true}
+	probe := &recordingProbe{disposition: reachability.DispositionSuccess}
 	manager := reachability.NewManager(store, reachability.NewVersionSelector(probe))
 	defer manager.Close()
 

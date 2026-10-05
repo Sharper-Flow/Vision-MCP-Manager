@@ -50,6 +50,19 @@ const (
 	OutcomeFailure Outcome = "failure"
 )
 
+// Disposition is how one probe attempt completed. Success and failure are
+// completed outcomes at the probe's depth. Inconclusive means the attempt
+// ended without proving either — for example an admission denial that
+// answered before the backend was touched — so it must change no completed
+// evidence at that depth.
+type Disposition string
+
+const (
+	DispositionSuccess      Disposition = "success"
+	DispositionFailure      Disposition = "failure"
+	DispositionInconclusive Disposition = "inconclusive"
+)
+
 const (
 	// FailureThreshold prevents transient failures from reporting a server as
 	// unreachable. This is the daemon-wide established probe convention.
@@ -58,12 +71,18 @@ const (
 )
 
 // ProbeEvidence is the latest result and failure streak for one probe depth.
+// LastProbeAttempt is when the most recent attempt ran, whatever it proved;
+// attempts that prove nothing and attempts still in flight move only that
+// timestamp. LastOutcomeAt is when the standing completed outcome was
+// recorded, and only a completed success or failure may move it, so an
+// inconclusive or in-flight attempt can never redate completed evidence.
 // LastProbeError is deliberately a bounded, single-line string so it can be
 // rendered directly by administrative surfaces without exposing an error
 // object or control characters.
 type ProbeEvidence struct {
 	Depth               Depth     `json:"depth"`
 	LastProbeAttempt    time.Time `json:"last_probe_attempt"`
+	LastOutcomeAt       time.Time `json:"last_outcome_at,omitempty"`
 	LastProbeOutcome    Outcome   `json:"last_probe_outcome"`
 	LastProbeError      string    `json:"last_probe_error,omitempty"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
@@ -77,12 +96,15 @@ type Reachability struct {
 	Evidence map[Depth]ProbeEvidence `json:"evidence,omitempty"`
 }
 
-// ProbeResult records one completed probe. A zero AttemptedAt is replaced by
-// the store's current time. Error is ignored for successful probes.
+// ProbeResult records one probe attempt's completion. A zero AttemptedAt is
+// replaced by the store's current time. Error is ignored except for
+// failures. An inconclusive disposition joins the started probe but records
+// no completed outcome: the prior outcome, error, failure streak, and depth
+// state all stand.
 type ProbeResult struct {
 	Depth       Depth
 	AttemptedAt time.Time
-	Success     bool
+	Disposition Disposition
 	Error       string
 }
 
@@ -124,11 +146,14 @@ func (s *Store) StartProbe(serverName string, depth Depth, attemptedAt time.Time
 	return cloneReachability(record.reachability)
 }
 
-// RecordProbe records a completed probe and returns the resulting value.
-// Failures become unreachable only after FailureThreshold consecutive failures
-// at the same depth. A success resets that depth's failure streak.
+// RecordProbe records a completed probe attempt and returns the resulting
+// value. Failures become unreachable only after FailureThreshold consecutive
+// failures at the same depth. A success resets that depth's failure streak.
+// An inconclusive attempt consumes the started probe and preserves every
+// piece of completed evidence at that depth.
 func (s *Store) RecordProbe(serverName string, result ProbeResult) Reachability {
 	validateDepth(result.Depth)
+	validateDisposition(result.Disposition)
 	if result.AttemptedAt.IsZero() {
 		result.AttemptedAt = time.Now()
 	}
@@ -143,13 +168,25 @@ func (s *Store) RecordProbe(serverName string, result ProbeResult) Reachability 
 	evidence := record.reachability.Evidence[result.Depth]
 	evidence.Depth = result.Depth
 	evidence.LastProbeAttempt = result.AttemptedAt
-	if result.Success {
+	switch result.Disposition {
+	case DispositionInconclusive:
+		// The attempt proved neither reachability nor failure at this depth,
+		// so it must not touch the completed outcome, error, failure streak,
+		// or per-depth state; only the attempt timestamp records that it ran.
+		// A later recovery probe at the same cadence is still permitted
+		// because nothing here changes what the scheduler reacts to.
+		record.reachability.Evidence[result.Depth] = evidence
+		record.reachability.State = stateFor(record)
+		return cloneReachability(record.reachability)
+	case DispositionSuccess:
 		evidence.LastProbeOutcome = OutcomeSuccess
+		evidence.LastOutcomeAt = result.AttemptedAt
 		evidence.LastProbeError = ""
 		evidence.ConsecutiveFailures = 0
 		record.stateByDepth[result.Depth] = StateReachable
-	} else {
+	default:
 		evidence.LastProbeOutcome = OutcomeFailure
+		evidence.LastOutcomeAt = result.AttemptedAt
 		evidence.LastProbeError = safeError(result.Error)
 		evidence.ConsecutiveFailures++
 		if evidence.ConsecutiveFailures >= FailureThreshold {
@@ -192,6 +229,7 @@ func (s *Store) RecordDefinitiveFailure(serverName string, depth Depth, attempte
 	evidence.Depth = depth
 	evidence.LastProbeAttempt = attemptedAt
 	evidence.LastProbeOutcome = OutcomeFailure
+	evidence.LastOutcomeAt = attemptedAt
 	evidence.LastProbeError = safeError(cause)
 	// Report the single failure that actually occurred. Inflating this counter
 	// to trip the threshold would misreport how many attempts were made in the
@@ -265,12 +303,19 @@ func stateFor(record *serverRecord) State {
 		}
 	}
 
-	// No depth is failing; the deepest evidence is the most informative.
-	deepest := DepthListener
-	for depth := range record.reachability.Evidence {
+	// No depth is failing; the deepest completed evidence is the most
+	// informative. Selection runs over completed depths only: an entry whose
+	// attempt never completed — an inconclusive attempt — carries no outcome,
+	// so it must not outrank completed shallower evidence or replace the
+	// state with an empty value.
+	deepest := Depth("")
+	for depth := range record.stateByDepth {
 		if depth.Rank() > deepest.Rank() {
 			deepest = depth
 		}
+	}
+	if deepest == "" {
+		return StateUnprobed
 	}
 	return record.stateByDepth[deepest]
 }
@@ -286,6 +331,14 @@ func cloneReachability(value Reachability) Reachability {
 func validateDepth(depth Depth) {
 	if depth.Rank() == 0 {
 		panic("reachability: invalid probe depth")
+	}
+}
+
+func validateDisposition(disposition Disposition) {
+	switch disposition {
+	case DispositionSuccess, DispositionFailure, DispositionInconclusive:
+	default:
+		panic("reachability: invalid probe disposition")
 	}
 }
 

@@ -1,7 +1,11 @@
 [Unit]
 Description=Vision MCP Daemon (User)
 Documentation=https://github.com/Sharper-Flow/Vision-MCP-Manager
-After=default.target
+# No After= ordering against default.target: this unit is enabled into
+# default.target.wants, and systemd's default target dependency already orders
+# default.target after the services it wants. Adding After=default.target here
+# closes the cycle vision -> default.target -> penpot-mcp-bridge -> vision, and
+# boot then drops the penpot bridge start job to break it.
 
 [Service]
 Type=simple

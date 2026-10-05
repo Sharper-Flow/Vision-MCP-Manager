@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
+	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 )
 
 type testLifecycleAccessor struct {
@@ -77,5 +79,133 @@ func TestServerDiagnosticsExposeBoundedSafeLifecycleSnapshot(t *testing.T) {
 	}
 	if len(list.Servers) != 1 || list.Servers[0].SessionLifecycle == nil {
 		t.Fatalf("vision_list missing session lifecycle: %#v", list.Servers)
+	}
+}
+
+func TestProjectReachabilitySelectsCompletedEvidenceOverInconclusiveAttempt(t *testing.T) {
+	attempt := time.Unix(1700000000, 0).UTC()
+	value := reachability.Reachability{
+		State: reachability.StateReachable,
+		Evidence: map[reachability.Depth]reachability.ProbeEvidence{
+			reachability.DepthListener: {
+				Depth:            reachability.DepthListener,
+				LastProbeAttempt: attempt,
+				LastOutcomeAt:    attempt,
+				LastProbeOutcome: reachability.OutcomeSuccess,
+			},
+			reachability.DepthEndToEnd: {
+				// A denied deep probe: newer attempt, no completed outcome.
+				Depth:            reachability.DepthEndToEnd,
+				LastProbeAttempt: attempt.Add(time.Minute),
+			},
+		},
+	}
+
+	details := projectReachability(value)
+	if details.Reachability != string(reachability.StateReachable) {
+		t.Fatalf("reachability = %q, want %q", details.Reachability, reachability.StateReachable)
+	}
+	if details.ProbeDepth != string(reachability.DepthListener) {
+		t.Fatalf("probe depth = %q, want %q from completed evidence", details.ProbeDepth, reachability.DepthListener)
+	}
+	if details.LastProbeOutcome != string(reachability.OutcomeSuccess) {
+		t.Fatalf("last probe outcome = %q, want %q", details.LastProbeOutcome, reachability.OutcomeSuccess)
+	}
+
+	// With no completed evidence at all, no probe status may be projected.
+	onlyAttempt := reachability.Reachability{
+		State: reachability.StateUnprobed,
+		Evidence: map[reachability.Depth]reachability.ProbeEvidence{
+			reachability.DepthEndToEnd: {
+				Depth:            reachability.DepthEndToEnd,
+				LastProbeAttempt: attempt,
+			},
+		},
+	}
+	if details := projectReachability(onlyAttempt); details.ProbeDepth != "" || details.LastProbeOutcome != "" {
+		t.Fatalf("attempt-only evidence projected a probe status: %+v", details)
+	}
+}
+
+// An inconclusive attempt that ran after a completed deep success must not
+// redate that success: the projection carries the completed outcome and the
+// time that outcome completed, never the denied attempt's time.
+func TestProjectReachabilityInconclusiveAttemptDoesNotRedateCompletedOutcome(t *testing.T) {
+	store := reachability.NewStore()
+	successAt := time.Unix(1700000000, 0).UTC()
+	deniedAt := successAt.Add(time.Hour)
+	store.RecordProbe("backend", reachability.ProbeResult{Depth: reachability.DepthEndToEnd, AttemptedAt: successAt, Disposition: reachability.DispositionSuccess})
+	store.RecordProbe("backend", reachability.ProbeResult{Depth: reachability.DepthListener, AttemptedAt: deniedAt.Add(-time.Second), Disposition: reachability.DispositionSuccess})
+	store.StartProbe("backend", reachability.DepthEndToEnd, deniedAt)
+	store.RecordProbe("backend", reachability.ProbeResult{Depth: reachability.DepthEndToEnd, AttemptedAt: deniedAt, Disposition: reachability.DispositionInconclusive})
+
+	value, _ := store.Get("backend")
+	projected := projectReachability(value)
+	if projected.ProbeDepth == string(reachability.DepthEndToEnd) &&
+		projected.LastProbeOutcome == string(reachability.OutcomeSuccess) &&
+		projected.LastProbeAt != nil && projected.LastProbeAt.Equal(deniedAt) {
+		t.Fatalf("inconclusive attempt projected as a new successful deep check: %+v", projected)
+	}
+	if projected.LastProbeAt == nil || projected.LastProbeAt.Equal(deniedAt) {
+		t.Fatalf("projected probe time = %v, want the completed outcome time, not the denied attempt time", projected.LastProbeAt)
+	}
+	if projected.LastProbeOutcome != string(reachability.OutcomeSuccess) {
+		t.Fatalf("projected outcome = %q, want %q (completed outcome stands)", projected.LastProbeOutcome, reachability.OutcomeSuccess)
+	}
+}
+
+// An in-flight attempt must not redate the completed outcome either: while a
+// retry runs, the projection keeps the standing failure and its time.
+func TestProjectReachabilityInFlightAttemptDoesNotRedateCompletedOutcome(t *testing.T) {
+	store := reachability.NewStore()
+	failedAt := time.Unix(1700000000, 0).UTC()
+	retryAt := failedAt.Add(time.Hour)
+	for i := range reachability.FailureThreshold {
+		store.RecordProbe("backend", reachability.ProbeResult{
+			Depth:       reachability.DepthListener,
+			AttemptedAt: failedAt.Add(time.Duration(i) * time.Second),
+			Disposition: reachability.DispositionFailure,
+			Error:       "connection refused",
+		})
+	}
+	store.StartProbe("backend", reachability.DepthListener, retryAt)
+
+	value, _ := store.Get("backend")
+	projected := projectReachability(value)
+	if projected.ProbeDepth != string(reachability.DepthListener) {
+		t.Fatalf("projected depth = %q, want %q", projected.ProbeDepth, reachability.DepthListener)
+	}
+	if projected.LastProbeOutcome != string(reachability.OutcomeFailure) {
+		t.Fatalf("projected outcome = %q, want %q", projected.LastProbeOutcome, reachability.OutcomeFailure)
+	}
+	completedAt := failedAt.Add(time.Duration(reachability.FailureThreshold-1) * time.Second)
+	if projected.LastProbeAt == nil || !projected.LastProbeAt.Equal(completedAt) {
+		t.Fatalf("projected time = %v, want completed outcome time %v", projected.LastProbeAt, completedAt)
+	}
+}
+
+// A definitive failure projects as the standing failure at the time it was
+// proven, and a later inconclusive attempt does not redate it.
+func TestProjectReachabilityDefinitiveFailureKeepsProvenTime(t *testing.T) {
+	store := reachability.NewStore()
+	provenAt := time.Unix(1700000000, 0).UTC()
+	later := provenAt.Add(time.Hour)
+	store.RecordDefinitiveFailure("backend", reachability.DepthListener, provenAt, "bind failed")
+	store.StartProbe("backend", reachability.DepthEndToEnd, later)
+	store.RecordProbe("backend", reachability.ProbeResult{Depth: reachability.DepthEndToEnd, AttemptedAt: later, Disposition: reachability.DispositionInconclusive})
+
+	value, _ := store.Get("backend")
+	projected := projectReachability(value)
+	if projected.Reachability != string(reachability.StateUnreachable) {
+		t.Fatalf("projected reachability = %q, want %q", projected.Reachability, reachability.StateUnreachable)
+	}
+	if projected.ProbeDepth != string(reachability.DepthListener) {
+		t.Fatalf("projected depth = %q, want %q (definitive failure outranks the inconclusive deeper attempt)", projected.ProbeDepth, reachability.DepthListener)
+	}
+	if projected.LastProbeOutcome != string(reachability.OutcomeFailure) {
+		t.Fatalf("projected outcome = %q, want %q", projected.LastProbeOutcome, reachability.OutcomeFailure)
+	}
+	if projected.LastProbeAt == nil || !projected.LastProbeAt.Equal(provenAt) {
+		t.Fatalf("projected time = %v, want proven failure time %v", projected.LastProbeAt, provenAt)
 	}
 }

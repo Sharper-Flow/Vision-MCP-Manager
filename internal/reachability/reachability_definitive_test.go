@@ -33,7 +33,7 @@ func TestRecordDefinitiveFailureIsImmediateAndReportsOneAttempt(t *testing.T) {
 // that proves the threshold still protects against flaky probes.
 func TestRecordProbeSingleFailureStillBelowThreshold(t *testing.T) {
 	s := NewStore()
-	got := s.RecordProbe("srv", ProbeResult{Depth: DepthListener, AttemptedAt: time.Now(), Error: "timeout"})
+	got := s.RecordProbe("srv", ProbeResult{Depth: DepthListener, AttemptedAt: time.Now(), Disposition: DispositionFailure, Error: "timeout"})
 	if got.State == StateUnreachable {
 		t.Fatal("single transient failure reported unreachable; FailureThreshold no longer protects flaky probes")
 	}
@@ -43,7 +43,7 @@ func TestRecordProbeSingleFailureStillBelowThreshold(t *testing.T) {
 func TestRecordDefinitiveFailureRecoversOnSuccess(t *testing.T) {
 	s := NewStore()
 	s.RecordDefinitiveFailure("srv", DepthListener, time.Now(), "bind failed")
-	got := s.RecordProbe("srv", ProbeResult{Depth: DepthListener, AttemptedAt: time.Now(), Success: true})
+	got := s.RecordProbe("srv", ProbeResult{Depth: DepthListener, AttemptedAt: time.Now(), Disposition: DispositionSuccess})
 	if got.State != StateReachable {
 		t.Fatalf("state = %v, want %v (server must recover after repair)", got.State, StateReachable)
 	}

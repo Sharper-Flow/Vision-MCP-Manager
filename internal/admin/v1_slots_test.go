@@ -87,10 +87,10 @@ func TestSlotSurfacesReportEffectiveHealthAndAgree(t *testing.T) {
 	}
 
 	store := reachability.NewStore()
-	store.RecordProbe("healthy", reachability.ProbeResult{Depth: reachability.DepthListener, Success: true})
+	store.RecordProbe("healthy", reachability.ProbeResult{Depth: reachability.DepthListener, Disposition: reachability.DispositionSuccess})
 	for range reachability.FailureThreshold {
 		store.RecordProbe("broken", reachability.ProbeResult{
-			Depth: reachability.DepthListener, Error: "connection refused",
+			Depth: reachability.DepthListener, Disposition: reachability.DispositionFailure, Error: "connection refused",
 		})
 	}
 	s := &Server{
