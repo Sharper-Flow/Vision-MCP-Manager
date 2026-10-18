@@ -218,8 +218,9 @@ func TestSharedSessionTimeout_EndToEndInflightApplicationCallDelaysReap(t *testi
 	case <-deadline:
 		t.Fatal("application call did not reach the gate")
 	}
-	// The idle control proves the reaper actually ran past the lease while
-	// the downstream call stayed blocked. Startup time cannot consume it.
+	// The idle control's lease starts after the gated call's lease, so its
+	// expiry proves the reaper passed the call's lease while it stayed blocked.
+	sendSessionPost(t, client, server.URL, idleID, `{"jsonrpc":"2.0","id":3,"method":"tools/list"}`)
 	startReaper()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
@@ -234,10 +235,21 @@ func TestSharedSessionTimeout_EndToEndInflightApplicationCallDelaysReap(t *testi
 		}
 	}
 	waitCount(1)
-	status, body := postSessionStatus(t, client, server.URL, idleID,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/list"}`)
-	if status != http.StatusNotFound {
-		t.Fatalf("idle control status = %d, body = %q; want 404", status, body)
+	// Expiry closes the upstream session asynchronously. Ping does not
+	// refresh a lease, so polling cannot keep the control alive.
+	for {
+		status, body := postSessionStatus(t, client, server.URL, idleID, `{"jsonrpc":"2.0","id":4,"method":"ping"}`)
+		if status == http.StatusNotFound {
+			break
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatalf("idle control status = %d, body = %q; want 404", status, body)
+		}
+	}
+	if got := sm.SessionCount(); got != 1 {
+		t.Fatalf("in-flight session was reaped, count = %d", got)
 	}
 	select {
 	case err := <-result:
