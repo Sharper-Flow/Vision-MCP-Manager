@@ -1,3 +1,9 @@
+## 2026-10-18 (v1.5.15)
+
+### Fixed
+
+- refresh shared proxy catalogs after downstream changes (#32)
+
 ## 2026-10-05 (v1.5.14)
 
 ### Fixed
