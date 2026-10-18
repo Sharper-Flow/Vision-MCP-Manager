@@ -1,3 +1,9 @@
+## 2026-10-18 (v1.5.16)
+
+### Fixed
+
+- eliminate shared manager lock-order inversion (#33)
+
 ## 2026-10-18 (v1.5.15)
 
 ### Fixed
