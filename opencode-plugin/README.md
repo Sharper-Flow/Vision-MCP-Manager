@@ -174,7 +174,7 @@ npm run format
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 24+ for plugin development and checks
 - OpenCode with plugin support
 - Vision daemon running on port 6275 — required for the `vision_*` tools only.
   The `opencode_mcp_*` tools work with the daemon stopped.
