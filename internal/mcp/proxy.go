@@ -722,6 +722,7 @@ type proxySession struct {
 	downstreamClosed bool
 
 	// respawnMu serializes stateful respawn and shared catalog refresh.
+	// A holder never acquires the shared manager's mu or refMu.
 	respawnMu sync.Mutex
 
 	// shared indicates that this proxySession uses a SharedSessionManager
@@ -1186,7 +1187,15 @@ func newSharedModeServer(
 	}
 	ps.downstreamMu.Unlock()
 
-	// Serialize initial registration with shared catalog notifications.
+	// Serialize initial registration with shared catalog notifications. A
+	// downstream close under the manager lock waits for queued refreshes, so
+	// a failed discovery releases its lease only after respawnMu.
+	var listErr error
+	defer func() {
+		if listErr != nil {
+			ps.closeDownstream("initial tools/list failed")
+		}
+	}()
 	ps.respawnMu.Lock()
 	defer ps.respawnMu.Unlock()
 	refresh := func(ctx context.Context) {
@@ -1215,7 +1224,7 @@ func newSharedModeServer(
 	// Discover tools from downstream.
 	toolsResult, err := downstream.ListTools(ctx, nil)
 	if err != nil {
-		ps.closeDownstream("initial tools/list failed")
+		listErr = err
 		return nil, fmt.Errorf("failed to list downstream tools: %w", err)
 	}
 

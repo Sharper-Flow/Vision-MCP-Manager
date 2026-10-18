@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -218,6 +219,32 @@ func TestSharedRespawnDoesNotWaitOnProxyRefresh(t *testing.T) {
 		ps.respawnMu.Unlock()
 		<-done
 		t.Fatal("shared respawn waited on a proxy refresh while holding the manager lock")
+	}
+}
+
+func TestSharedFailedDiscoveryClosesAfterRefreshUnlock(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	logger := testLogger(t)
+	sm := session.NewSharedSessionManager("discovery-lock-order", testServerConfigWithScript(discoveryFailureMCPServerJS), logger, 0, nil)
+	defer sm.CloseAll()
+	var ps *proxySession
+	refreshUnlocked := false
+	_, err := newSharedModeServer(ctx, "discovery-lock-order", sm, logger,
+		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, nil, nil, nil,
+		func(p *proxySession) { ps = p }, nil, nil,
+		func(string) {
+			// A manager-lock holder can be waiting on respawnMu while this close releases the lease.
+			if refreshUnlocked = ps.respawnMu.TryLock(); refreshUnlocked {
+				ps.respawnMu.Unlock()
+			}
+		})
+	if err == nil || !strings.Contains(err.Error(), "failed to list downstream tools") {
+		t.Fatalf("shared registration error = %v, want failed initial tools/list", err)
+	}
+	if !refreshUnlocked {
+		t.Fatal("failed shared discovery closed its lease while holding respawnMu")
 	}
 }
 
