@@ -96,75 +96,7 @@ jobs:
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
           echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
 
-      - name: Generate CHANGELOG
-        if: steps.bump.outputs.skip != 'true'
-        id: changelog
-        run: |
-          LAST_TAG="${{ steps.last_tag.outputs.tag }}"
-          NEW_TAG="${{ steps.bump.outputs.new_tag }}"
-          TODAY=$(date +%Y-%m-%d)
-
-          # Generate categorized entries from conventional commits
-          FEAT_ENTRIES=""
-          FIX_ENTRIES=""
-          OTHER_ENTRIES=""
-
-          COMMITS=$(git log "${LAST_TAG}..HEAD" --pretty=format:"%s" 2>/dev/null || git log --pretty=format:"%s")
-
-          while IFS= read -r line; do
-            # Strip prefix for display
-            MSG=$(echo "$line" | sed -E 's/^[a-z]+(\(.+\))?:\s*//')
-
-            if echo "$line" | grep -qE '^feat(\(.+\))?:'; then
-              FEAT_ENTRIES="${FEAT_ENTRIES}
-          - ${MSG}"
-            elif echo "$line" | grep -qE '^fix(\(.+\))?:'; then
-              FIX_ENTRIES="${FIX_ENTRIES}
-          - ${MSG}"
-            elif echo "$line" | grep -qE '^(chore|ci|docs|refactor|test|perf|style|build)(\(.+\))?:'; then
-              SCOPE=$(echo "$line" | sed -E 's/^([a-z]+)(\((.+)\))?:.*/\3/' | head -1)
-              PREFIX=$(echo "$line" | sed -E 's/^([a-z]+)(\(.+\))?:.*/\1/')
-              if [ -n "$SCOPE" ] && [ "$SCOPE" != "$PREFIX" ]; then
-                OTHER_ENTRIES="${OTHER_ENTRIES}
-          - ${MSG} (${PREFIX}: ${SCOPE})"
-              else
-                OTHER_ENTRIES="${OTHER_ENTRIES}
-          - ${MSG} (${PREFIX})"
-              fi
-            fi
-          done <<< "$COMMITS"
-
-          # Build changelog entry
-          ENTRY="## ${TODAY} (${NEW_TAG})
-          "
-          if [ -n "$FEAT_ENTRIES" ]; then
-            ENTRY="${ENTRY}
-          ### Added
-          ${FEAT_ENTRIES}"
-          fi
-          if [ -n "$FIX_ENTRIES" ]; then
-            ENTRY="${ENTRY}
-          ### Fixed
-          ${FIX_ENTRIES}"
-          fi
-          if [ -n "$OTHER_ENTRIES" ]; then
-            ENTRY="${ENTRY}
-          ### Changed
-          ${OTHER_ENTRIES}"
-          fi
-
-          # Prepend to CHANGELOG.md
-          if [ -f CHANGELOG.md ]; then
-            EXISTING=$(cat CHANGELOG.md)
-            printf '%s\n\n%s\n' "$ENTRY" "$EXISTING" > CHANGELOG.md
-          else
-            printf '%s\n' "$ENTRY" > CHANGELOG.md
-          fi
-
-          echo "Changelog entry generated for ${NEW_TAG}"
-          head -30 CHANGELOG.md
-
-      - name: Commit CHANGELOG and push tag
+      - name: Tag and push release
         if: steps.bump.outputs.skip != 'true'
         run: |
           NEW_TAG="${{ steps.bump.outputs.new_tag }}"
@@ -172,11 +104,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add CHANGELOG.md
-          git diff --cached --quiet || git commit -m "docs: update changelog for ${NEW_TAG}"
-
           git tag -a "$NEW_TAG" -m "Release ${NEW_TAG}"
-          git push origin HEAD:"${{ github.event.workflow_run.head_branch }}"
           git push origin "$NEW_TAG"
 
           echo "Tagged and pushed ${NEW_TAG}."

@@ -1,3 +1,5 @@
+Releases after v1.5.16 are listed on GitHub Releases: https://github.com/Sharper-Flow/Vision-MCP-Manager/releases
+
 ## 2026-10-18 (v1.5.16)
 
 ### Fixed
