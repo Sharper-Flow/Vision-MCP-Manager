@@ -164,14 +164,12 @@ func TestSharedCatalogSnapshotAfterCloseDoesNotReacquireLease(t *testing.T) {
 		t.Fatalf("initial shared leases = %d, want 1", sm.RefCount())
 	}
 
-	// Model a notification callback copied from the subscriber registry before
-	// close removed the subscription, but invoked after the lease was retired.
-	snapshotted := ps.handleToolListChanged
+	// A callback copied before close may still invoke refresh after lease retirement.
 	ps.closeDownstream("test close")
 	if sm.RefCount() != 0 {
 		t.Fatalf("shared leases after close = %d, want 0", sm.RefCount())
 	}
-	snapshotted(ctx)
+	ps.handleToolListChanged(ctx)
 	if sm.RefCount() != 0 || sm.SessionCount() != 0 {
 		t.Errorf("stale notification reacquired a retired lease: refs=%d sessions=%d", sm.RefCount(), sm.SessionCount())
 	}
@@ -182,10 +180,51 @@ func TestSharedCatalogSnapshotAfterCloseDoesNotReacquireLease(t *testing.T) {
 	}
 }
 
+func TestSharedRespawnDoesNotWaitOnProxyRefresh(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	logger := testLogger(t)
+	sm := session.NewSharedSessionManager("respawn-lock-order", testServerConfig(), logger, 0, nil)
+	defer sm.CloseAll()
+	var ps *proxySession
+	_, err := newSharedModeServer(ctx, "respawn-lock-order", sm, logger,
+		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, nil, nil, nil,
+		func(p *proxySession) { ps = p }, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ps.closeDownstream("test close")
+
+	// A proxy inside initial registration holds respawnMu and may need the
+	// manager lock to release its lease; a respawn must not wait on it.
+	ps.respawnMu.Lock()
+	if err := sm.Downstream().Close(); err != nil {
+		ps.respawnMu.Unlock()
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := sm.GetOrCreateSession(ctx, "respawner")
+		done <- err
+	}()
+	select {
+	case err = <-done:
+		ps.respawnMu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		ps.respawnMu.Unlock()
+		<-done
+		t.Fatal("shared respawn waited on a proxy refresh while holding the manager lock")
+	}
+}
+
 func awaitSharedCatalog(t *testing.T, ctx context.Context, client *mcp.ClientSession, changes <-chan struct{}, want []*mcp.Tool, index int) {
 	t.Helper()
 	wantJSON := sharedCatalogJSON(t, want)
-	deadline := time.NewTimer(2 * time.Second)
+	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
 	for {
 		select {

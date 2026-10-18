@@ -1208,7 +1208,8 @@ func newSharedModeServer(
 		logger.Info("shared downstream respawned, updated local pointer",
 			slog.String("event", "shared_session.respawn"),
 		)
-		refresh(context.Background())
+		// The manager invokes this under its lock, which must not wait on respawnMu.
+		go refresh(context.Background())
 	}, refresh)
 
 	// Discover tools from downstream.
@@ -1263,23 +1264,22 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	ps.downstreamMu.RUnlock()
 
 	if closed || ds == nil {
-		if ps.shared && ps.sharedMgr != nil {
+		if ps.shared {
 			// Catalog traffic must not reacquire a retired upstream lease.
 			return
-		} else {
-			ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
-			_, err := ps.respawnDownstream(ctx, "notification_relay")
-			if err != nil {
-				ps.logger.Warn("respawn failed during tool list refresh",
-					slog.String("error", err.Error()),
-				)
-				return
-			}
-			// respawnDownstream already re-discovered tools and updated registrations,
-			// so we can return early — the tool list is already current.
-			ps.logger.Info("downstream respawned during tool list refresh")
+		}
+		ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
+		_, err := ps.respawnDownstream(ctx, "notification_relay")
+		if err != nil {
+			ps.logger.Warn("respawn failed during tool list refresh",
+				slog.String("error", err.Error()),
+			)
 			return
 		}
+		// respawnDownstream already re-discovered tools and updated registrations,
+		// so we can return early — the tool list is already current.
+		ps.logger.Info("downstream respawned during tool list refresh")
+		return
 	}
 
 	// Re-discover tools from downstream.
