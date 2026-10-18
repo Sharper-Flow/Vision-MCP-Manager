@@ -721,8 +721,8 @@ type proxySession struct {
 	downstream       *mcp.ClientSession
 	downstreamClosed bool
 
-	// respawnMu serializes respawn attempts so only one goroutine respawns
-	// at a time. Other callers wait for the result.
+	// respawnMu serializes stateful respawn and shared catalog refresh.
+	// A holder never acquires the shared manager's mu or refMu.
 	respawnMu sync.Mutex
 
 	// shared indicates that this proxySession uses a SharedSessionManager
@@ -1159,20 +1159,6 @@ func newSharedModeServer(
 	})
 	ps.server = server
 
-	// Build client options with notification relay handlers.
-	clientOpts := &mcp.ClientOptions{
-		ToolListChangedHandler: func(ctx context.Context, _ *mcp.ToolListChangedRequest) {
-			ps.handleToolListChanged(ctx)
-		},
-		LoggingMessageHandler: func(ctx context.Context, req *mcp.LoggingMessageRequest) {
-			ps.handleLoggingMessage(ctx, req.Params)
-		},
-		ProgressNotificationHandler: func(ctx context.Context, req *mcp.ProgressNotificationClientRequest) {
-			ps.handleProgress(ctx, req.Params)
-		},
-	}
-	ps.clientOpts = clientOpts
-
 	// Register the removal owner before the lease exists: the shared manager
 	// exposes the lease to its reaper the moment GetOrCreateSession tracks
 	// it, and an expiry that lands before an owner is registered cannot
@@ -1201,24 +1187,44 @@ func newSharedModeServer(
 	}
 	ps.downstreamMu.Unlock()
 
+	// Serialize initial registration with shared catalog notifications. A
+	// downstream close under the manager lock waits for queued refreshes, so
+	// a failed discovery releases its lease only after respawnMu.
+	var listErr error
+	defer func() {
+		if listErr != nil {
+			ps.closeDownstream("initial tools/list failed")
+		}
+	}()
+	ps.respawnMu.Lock()
+	defer ps.respawnMu.Unlock()
+	refresh := func(ctx context.Context) {
+		refreshCtx, cancel := context.WithTimeout(ctx, ps.requestTimeout)
+		defer cancel()
+		ps.handleToolListChanged(refreshCtx)
+	}
+
 	// Subscribe to respawn notifications so we update our local pointer. A
 	// respawn notification must not resurrect a closed proxy generation.
 	sm.Subscribe(sessionID, func(newDS *mcp.ClientSession) {
 		ps.downstreamMu.Lock()
-		if !ps.downstreamClosed {
-			ps.downstream = newDS
-			ps.downstreamClosed = false
+		if ps.downstreamClosed {
+			ps.downstreamMu.Unlock()
+			return
 		}
+		ps.downstream = newDS
 		ps.downstreamMu.Unlock()
 		logger.Info("shared downstream respawned, updated local pointer",
 			slog.String("event", "shared_session.respawn"),
 		)
-	})
+		// The manager invokes this under its lock, which must not wait on respawnMu.
+		go refresh(context.Background())
+	}, refresh)
 
 	// Discover tools from downstream.
 	toolsResult, err := downstream.ListTools(ctx, nil)
 	if err != nil {
-		ps.closeDownstream("initial tools/list failed")
+		listErr = err
 		return nil, fmt.Errorf("failed to list downstream tools: %w", err)
 	}
 
@@ -1254,6 +1260,10 @@ func newSharedModeServer(
 // and was the root cause of orphaned per-session subprocesses surviving
 // long after the upstream client process exited (see LEAK_REPORT.md).
 func (ps *proxySession) handleToolListChanged(ctx context.Context) {
+	if ps.shared {
+		ps.respawnMu.Lock()
+		defer ps.respawnMu.Unlock()
+	}
 	ps.logger.Info("downstream tools/list_changed, re-discovering tools")
 
 	// Snapshot downstream under read lock; attempt respawn if closed.
@@ -1263,34 +1273,22 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	ps.downstreamMu.RUnlock()
 
 	if closed || ds == nil {
-		if ps.shared && ps.sharedMgr != nil {
-			// In shared mode, get or respawn via SharedManager.
-			var err error
-			ds, err = ps.sharedMgr.GetOrCreateSession(ctx, ps.downstreamID())
-			if err != nil {
-				ps.logger.Warn("failed to get shared downstream during tool list refresh",
-					slog.String("error", err.Error()),
-				)
-				return
-			}
-			ps.downstreamMu.Lock()
-			ps.downstream = ds
-			ps.downstreamClosed = false
-			ps.downstreamMu.Unlock()
-		} else {
-			ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
-			_, err := ps.respawnDownstream(ctx, "notification_relay")
-			if err != nil {
-				ps.logger.Warn("respawn failed during tool list refresh",
-					slog.String("error", err.Error()),
-				)
-				return
-			}
-			// respawnDownstream already re-discovered tools and updated registrations,
-			// so we can return early — the tool list is already current.
-			ps.logger.Info("downstream respawned during tool list refresh")
+		if ps.shared {
+			// Catalog traffic must not reacquire a retired upstream lease.
 			return
 		}
+		ps.logger.Info("downstream closed during tool list refresh, attempting respawn")
+		_, err := ps.respawnDownstream(ctx, "notification_relay")
+		if err != nil {
+			ps.logger.Warn("respawn failed during tool list refresh",
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+		// respawnDownstream already re-discovered tools and updated registrations,
+		// so we can return early — the tool list is already current.
+		ps.logger.Info("downstream respawned during tool list refresh")
+		return
 	}
 
 	// Re-discover tools from downstream.

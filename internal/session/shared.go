@@ -63,7 +63,12 @@ type SharedSessionManager struct {
 	healthCancel context.CancelFunc
 
 	subMu       sync.RWMutex
-	subscribers map[string]func(*mcp.ClientSession)
+	subscribers map[string]sharedSubscriber
+}
+
+type sharedSubscriber struct {
+	onRespawn         func(*mcp.ClientSession)
+	onToolListChanged func(context.Context)
 }
 
 type sharedSession struct {
@@ -85,7 +90,7 @@ func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger
 		logger:           logger.With(slog.String("server", serverName)),
 		upstreamSessions: make(map[string]struct{}),
 		sessions:         make(map[string]*sharedSession),
-		subscribers:      make(map[string]func(*mcp.ClientSession)),
+		subscribers:      make(map[string]sharedSubscriber),
 		idleTimeout:      idleTimeout,
 		sessionTimeout:   time.Duration(cfg.SessionTimeout),
 		metrics:          m,
@@ -208,7 +213,11 @@ func (sm *SharedSessionManager) getOrCreateDownstream(ctx context.Context) (*mcp
 		return nil, sm.spawnErr
 	}
 
-	sm.notifySubscribers(sm.downstream)
+	sm.notifySubscribers(func(sub sharedSubscriber) {
+		if sub.onRespawn != nil {
+			sub.onRespawn(sm.downstream)
+		}
+	})
 
 	return sm.downstream, nil
 }
@@ -235,7 +244,15 @@ func (sm *SharedSessionManager) spawn(ctx context.Context) (*mcp.ClientSession, 
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    fmt.Sprintf("vision-proxy-%s", sm.serverName),
 		Version: "1.0.0",
-	}, nil)
+	}, &mcp.ClientOptions{
+		ToolListChangedHandler: func(ctx context.Context, _ *mcp.ToolListChangedRequest) {
+			sm.notifySubscribers(func(sub sharedSubscriber) {
+				if sub.onToolListChanged != nil {
+					sub.onToolListChanged(ctx)
+				}
+			})
+		},
+	})
 
 	clientSession, err := client.Connect(ctx, transport, nil)
 	if err != nil {
@@ -532,24 +549,28 @@ func (sm *SharedSessionManager) AdmissionStatus() (atCapacity bool, current int,
 	return atCapacity, current, max
 }
 
-// Subscribe registers a callback to be invoked when the downstream is respawned.
-func (sm *SharedSessionManager) Subscribe(sessionID string, onRespawn func(*mcp.ClientSession)) {
+// Subscribe registers callbacks for downstream replacement and tool-list changes.
+func (sm *SharedSessionManager) Subscribe(sessionID string, onRespawn func(*mcp.ClientSession), onToolListChanged func(context.Context)) {
 	sm.subMu.Lock()
 	defer sm.subMu.Unlock()
-	sm.subscribers[sessionID] = onRespawn
+	sm.subscribers[sessionID] = sharedSubscriber{onRespawn: onRespawn, onToolListChanged: onToolListChanged}
 }
 
-// Unsubscribe removes the respawn callback for the given session ID.
+// Unsubscribe removes the downstream callbacks for the given session ID.
 func (sm *SharedSessionManager) Unsubscribe(sessionID string) {
 	sm.subMu.Lock()
 	defer sm.subMu.Unlock()
 	delete(sm.subscribers, sessionID)
 }
 
-func (sm *SharedSessionManager) notifySubscribers(ds *mcp.ClientSession) {
+func (sm *SharedSessionManager) notifySubscribers(notify func(sharedSubscriber)) {
 	sm.subMu.RLock()
-	defer sm.subMu.RUnlock()
-	for _, cb := range sm.subscribers {
+	subscribers := make([]sharedSubscriber, 0, len(sm.subscribers))
+	for _, sub := range sm.subscribers {
+		subscribers = append(subscribers, sub)
+	}
+	sm.subMu.RUnlock()
+	for _, sub := range subscribers {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -559,7 +580,7 @@ func (sm *SharedSessionManager) notifySubscribers(ds *mcp.ClientSession) {
 					)
 				}
 			}()
-			cb(ds)
+			notify(sub)
 		}()
 	}
 }
