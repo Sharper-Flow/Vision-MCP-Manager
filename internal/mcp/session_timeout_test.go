@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -99,13 +101,12 @@ func openSessionSSE(t *testing.T, client *http.Client, endpoint, sessionID strin
 	}
 }
 
-func newSharedTimeoutTestServer(t *testing.T, script string, timeout time.Duration) (*session.SharedSessionManager, *httptest.Server) {
+func newSharedTimeoutTestServer(t *testing.T, script string, timeout time.Duration) (*session.SharedSessionManager, *httptest.Server, func()) {
 	t.Helper()
 	cfg := testServerConfigWithScript(script)
 	cfg.SessionTimeout = config.Duration(timeout)
 	sm := session.NewSharedSessionManager("shared-timeout", cfg, testLogger(t), 0, nil)
 	ctx, cancel := context.WithCancel(context.Background())
-	sm.StartReaper(ctx, 10*time.Millisecond)
 	handler := NewProxyHandler(ProxyConfig{
 		ServerName:    "shared-timeout",
 		SharedManager: sm,
@@ -117,12 +118,13 @@ func newSharedTimeoutTestServer(t *testing.T, script string, timeout time.Durati
 		server.Close()
 		sm.CloseAll()
 	})
-	return sm, server
+	return sm, server, func() { sm.StartReaper(ctx, 10*time.Millisecond) }
 }
 
 func TestSharedSessionTimeout_EndToEndProtocolTrafficDoesNotRefresh(t *testing.T) {
 	skipIfNoNode(t)
-	sm, server := newSharedTimeoutTestServer(t, echoMCPServerJS, 500*time.Millisecond)
+	sm, server, startReaper := newSharedTimeoutTestServer(t, echoMCPServerJS, 500*time.Millisecond)
+	startReaper()
 	client := server.Client()
 	sessionID := initializeRawSession(t, client, server.URL)
 	sendSessionPost(t, client, server.URL, sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
@@ -142,7 +144,8 @@ func TestSharedSessionTimeout_EndToEndProtocolTrafficDoesNotRefresh(t *testing.T
 
 func TestSharedSessionTimeout_EndToEndApplicationPostRefreshes(t *testing.T) {
 	skipIfNoNode(t)
-	sm, server := newSharedTimeoutTestServer(t, echoMCPServerJS, 500*time.Millisecond)
+	sm, server, startReaper := newSharedTimeoutTestServer(t, echoMCPServerJS, 500*time.Millisecond)
+	startReaper()
 	client := server.Client()
 	sessionID := initializeRawSession(t, client, server.URL)
 	sendSessionPost(t, client, server.URL, sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
@@ -162,10 +165,29 @@ func TestSharedSessionTimeout_EndToEndApplicationPostRefreshes(t *testing.T) {
 
 func TestSharedSessionTimeout_EndToEndInflightApplicationCallDelaysReap(t *testing.T) {
 	skipIfNoNode(t)
-	sm, server := newSharedTimeoutTestServer(t, slowEchoMCPServerJS, 100*time.Millisecond)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	releaseCall := func() { once.Do(func() { close(release) }) }
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		select {
+		case <-release:
+			w.WriteHeader(http.StatusNoContent)
+		case <-r.Context().Done():
+		}
+	}))
+	defer gate.Close()
+	defer releaseCall()
+	script := strings.Replace(echoMCPServerJS, "rl.on('line', (line) => {", "rl.on('line', async (line) => {", 1)
+	script = strings.Replace(script, "} else if (msg.method === 'tools/call') {",
+		fmt.Sprintf("} else if (msg.method === 'tools/call') { await fetch(%q);", gate.URL), 1)
+	sm, server, startReaper := newSharedTimeoutTestServer(t, script, 100*time.Millisecond)
 	client := server.Client()
+	client.Timeout = 5 * time.Second
 	sessionID := initializeRawSession(t, client, server.URL)
 	sendSessionPost(t, client, server.URL, sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	idleID := initializeRawSession(t, client, server.URL)
+	sendSessionPost(t, client, server.URL, idleID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
 	result := make(chan error, 1)
 	go func() {
 		req, err := http.NewRequest(http.MethodPost, server.URL, strings.NewReader(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"message":"slow"}}}`))
@@ -178,23 +200,60 @@ func TestSharedSessionTimeout_EndToEndInflightApplicationCallDelaysReap(t *testi
 		req.Header.Set("Mcp-Session-Id", sessionID)
 		resp, err := client.Do(req)
 		if err == nil {
-			_, err = io.Copy(io.Discard, resp.Body)
+			var body []byte
+			body, err = io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if err == nil && (resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "echo: slow")) {
+				err = fmt.Errorf("slow call status = %d, body = %q", resp.StatusCode, body)
+			}
 		}
 		result <- err
 	}()
 
-	time.Sleep(150 * time.Millisecond)
-	if got := sm.SessionCount(); got != 1 {
-		t.Fatalf("in-flight application call was reaped, count = %d", got)
+	deadline := time.After(5 * time.Second)
+	select {
+	case <-entered:
+	case err := <-result:
+		t.Fatalf("call completed before reaching the gate: %v", err)
+	case <-deadline:
+		t.Fatal("application call did not reach the gate")
 	}
-	if err := <-result; err != nil {
-		t.Fatalf("slow application call failed: %v", err)
+	// The idle control proves the reaper actually ran past the lease while
+	// the downstream call stayed blocked. Startup time cannot consume it.
+	startReaper()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	waitCount := func(want int) {
+		t.Helper()
+		for sm.SessionCount() != want {
+			select {
+			case <-ticker.C:
+			case <-deadline:
+				t.Fatalf("session count = %d, want %d", sm.SessionCount(), want)
+			}
+		}
 	}
-	time.Sleep(120 * time.Millisecond)
-	if got := sm.SessionCount(); got != 0 {
-		t.Fatalf("session did not expire after in-flight call completed, count = %d", got)
+	waitCount(1)
+	status, body := postSessionStatus(t, client, server.URL, idleID,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/list"}`)
+	if status != http.StatusNotFound {
+		t.Fatalf("idle control status = %d, body = %q; want 404", status, body)
 	}
+	select {
+	case err := <-result:
+		t.Fatalf("call completed before release: %v", err)
+	default:
+	}
+	releaseCall()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("slow application call failed: %v", err)
+		}
+	case <-deadline:
+		t.Fatal("application call did not complete after release")
+	}
+	waitCount(0)
 }
 
 // postSessionStatus sends one POST on sessionID and returns the HTTP status and body.
@@ -225,7 +284,8 @@ func postSessionStatus(t *testing.T, client *http.Client, endpoint, sessionID, b
 // on a session that can never recover leaves the client stuck.
 func TestSharedSessionTimeout_ReapedSessionReturnsNotFound(t *testing.T) {
 	skipIfNoNode(t)
-	sm, server := newSharedTimeoutTestServer(t, echoMCPServerJS, 300*time.Millisecond)
+	sm, server, startReaper := newSharedTimeoutTestServer(t, echoMCPServerJS, 300*time.Millisecond)
+	startReaper()
 	client := server.Client()
 	sessionID := initializeRawSession(t, client, server.URL)
 	sendSessionPost(t, client, server.URL, sessionID, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)

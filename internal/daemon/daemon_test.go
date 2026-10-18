@@ -7,8 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 	"time"
 
@@ -321,9 +323,15 @@ func TestPIDFile_StalePIDDetection(t *testing.T) {
 	tmpDir := t.TempDir()
 	pidPath := filepath.Join(tmpDir, "test.pid")
 
-	// Write a stale PID (non-existent process)
-	stalePID := 999999 // Unlikely to be a real process
-	if err := os.WriteFile(pidPath, []byte("999999"), 0644); err != nil {
+	child := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^$")
+	if err := child.Run(); err != nil {
+		t.Fatalf("run stale-PID fixture: %v", err)
+	}
+	stalePID := child.Process.Pid
+	if isProcessRunning(stalePID) {
+		t.Fatalf("completed child PID %d is still running", stalePID)
+	}
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(stalePID)), 0644); err != nil {
 		t.Fatalf("failed to write stale PID: %v", err)
 	}
 
@@ -331,11 +339,6 @@ func TestPIDFile_StalePIDDetection(t *testing.T) {
 
 	// Acquire should succeed because the PID is stale
 	if err := pf.Acquire(); err != nil {
-		// Note: This might fail if PID 999999 happens to exist
-		// In that case, skip the test
-		if os.IsPermission(err) {
-			t.Skipf("PID %d exists, skipping stale PID test", stalePID)
-		}
 		t.Fatalf("failed to acquire with stale PID: %v", err)
 	}
 	defer pf.Release()
