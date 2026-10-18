@@ -34,7 +34,6 @@ func TestSharedManagerLockOrder(t *testing.T) {
 }
 
 func runSharedManagerLockOrder(t *testing.T, schedule string) {
-	t.Helper()
 	sm := NewSharedSessionManager("lock-order", &config.ServerConfig{}, testLogger(t), time.Hour, nil)
 	retainedState := errors.New("downstream generation state")
 	sm.mu.Lock()
@@ -116,7 +115,7 @@ func runSharedManagerLockOrder(t *testing.T, schedule string) {
 	for range 2 {
 		select {
 		case err := <-done:
-			if err != nil && !errors.Is(err, ErrSessionNotFound) {
+			if err != nil {
 				t.Fatal(err)
 			}
 		case <-deadline.C:
