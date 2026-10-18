@@ -197,8 +197,7 @@ func TestSharedRespawnDoesNotWaitOnProxyRefresh(t *testing.T) {
 	}
 	defer ps.closeDownstream("test close")
 
-	// A proxy inside initial registration holds respawnMu and may need the
-	// manager lock to release its lease; a respawn must not wait on it.
+	// A respawn under the manager lock must not wait on a proxy's refresh lock.
 	ps.respawnMu.Lock()
 	if err := sm.Downstream().Close(); err != nil {
 		ps.respawnMu.Unlock()
