@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -393,6 +395,90 @@ func TestAddStreamable_RateLimit(t *testing.T) {
 }
 
 // --- Token Bucket Unit Tests ---
+
+func TestTokenBucket_FractionalRefill(t *testing.T) {
+	type call struct {
+		atMS int
+		want bool
+	}
+	tests := []struct {
+		name  string
+		burst int
+		calls []call
+	}{
+		{
+			name:  "allowed requests preserve elapsed time",
+			burst: 3,
+			calls: []call{
+				{0, true}, {25, true}, {50, true}, {100, true}, {100, false},
+			},
+		},
+		{
+			name:  "denied requests preserve elapsed time",
+			burst: 1,
+			calls: []call{
+				{0, true}, {25, false}, {50, false}, {75, false}, {100, true},
+			},
+		},
+		{
+			name:  "partial interval survives a refill",
+			burst: 3,
+			calls: []call{
+				{0, true}, {0, true}, {0, true}, {150, true}, {200, true},
+				{250, false}, {300, true},
+			},
+		},
+		{
+			name:  "refill discards credit above capacity",
+			burst: 2,
+			calls: []call{
+				{0, true}, {0, true}, {550, true}, {550, true}, {550, false},
+				{600, false}, {650, true},
+			},
+		},
+		{
+			name:  "full bucket does not bank idle time",
+			burst: 2,
+			calls: []call{
+				{1050, true}, {1050, true}, {1050, false}, {1100, false}, {1150, true},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			start := time.Unix(0, 0)
+			tb := newTokenBucket(tt.burst, 100*time.Millisecond)
+			tb.lastTime = start
+			for i, call := range tt.calls {
+				tb.mu.Lock()
+				got := tb.allowAt(start.Add(time.Duration(call.atMS) * time.Millisecond))
+				tb.mu.Unlock()
+				if got != call.want {
+					t.Fatalf("call %d at %dms: allowed=%v, want %v", i, call.atMS, got, call.want)
+				}
+			}
+		})
+	}
+}
+
+func TestTokenBucket_ConcurrentBurst(t *testing.T) {
+	tb := newTokenBucket(50, time.Hour)
+	var allowed atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if tb.allow() {
+				allowed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := allowed.Load(); got != 50 {
+		t.Fatalf("concurrent requests allowed=%d, want 50", got)
+	}
+}
 
 func TestTokenBucket_BasicFlow(t *testing.T) {
 	tb := newTokenBucket(3, time.Hour)

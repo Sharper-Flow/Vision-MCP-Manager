@@ -38,7 +38,7 @@ const (
 	DefaultRateBurst = 50
 
 	// DefaultRateInterval is the refill interval for the rate limiter bucket.
-	// One token per interval, so 50 burst / 50ms refill = ~1000 req/s sustained.
+	// One token per 50ms interval allows 20 req/s sustained, with a burst of 50.
 	DefaultRateInterval = 50 * time.Millisecond
 )
 
@@ -171,15 +171,21 @@ func (tb *tokenBucket) allow() bool {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 
-	now := time.Now()
+	return tb.allowAt(time.Now())
+}
+
+// allowAt consumes a token at now. The caller must hold mu.
+func (tb *tokenBucket) allowAt(now time.Time) bool {
 	elapsed := now.Sub(tb.lastTime)
-	tb.lastTime = now
 
 	// Refill tokens based on elapsed time.
 	refill := int(elapsed / tb.interval)
-	tb.tokens += refill
-	if tb.tokens > tb.burst {
+	if refill >= tb.burst-tb.tokens {
 		tb.tokens = tb.burst
+		tb.lastTime = now // Discard idle credit once the bucket is full.
+	} else {
+		tb.tokens += refill
+		tb.lastTime = tb.lastTime.Add(time.Duration(refill) * tb.interval)
 	}
 
 	if tb.tokens > 0 {
