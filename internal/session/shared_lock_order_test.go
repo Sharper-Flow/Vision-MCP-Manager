@@ -131,12 +131,13 @@ func runSharedManagerLockOrder(t *testing.T, schedule string) {
 		t.Errorf("session count = %d, want 0", got)
 	}
 	wantClosed := schedule != "remove_reap"
-	if got := sm.isClosed(); got != wantClosed {
-		t.Errorf("closed = %v, want %v", got, wantClosed)
-	}
 	sm.mu.RLock()
+	gotClosed := sm.closed
 	stateRetained := sm.spawnErr == retainedState
 	sm.mu.RUnlock()
+	if gotClosed != wantClosed {
+		t.Errorf("closed = %v, want %v", gotClosed, wantClosed)
+	}
 	if stateRetained {
 		t.Error("teardown retained downstream state")
 	}

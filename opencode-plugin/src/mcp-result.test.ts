@@ -192,6 +192,31 @@ describe("validated Vision proxy results", () => {
     expect(toolCalls).toBe(1)
   })
 
+  it("preserves code and data when a JSON-RPC error message is empty", async () => {
+    const data = { reason: "provider_refusal", retryable: false }
+    rpc = { jsonrpc: "2.0", id: 2, error: { code: -32000, message: "", data } }
+    expect(await call()).toMatchObject({
+      success: false,
+      kind: "json_rpc",
+      code: -32000,
+      data,
+      error: expect.any(String),
+    })
+    expect(toolCalls).toBe(1)
+  })
+
+  it("returns a declared failure when a transport error has no message", async () => {
+    transport = async () => {
+      throw new Error("")
+    }
+    expect(await call()).toMatchObject({
+      success: false,
+      kind: "transport",
+      error: expect.any(String),
+    })
+    expect(toolCalls).toBe(1)
+  })
+
   it.each([
     null,
     [],

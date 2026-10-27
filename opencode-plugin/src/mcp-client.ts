@@ -599,7 +599,7 @@ export async function callTool(name: string, args: Record<string, unknown> = {})
     if (rpcResponse.error) {
       return serializeOutcome({
         success: false,
-        error: rpcResponse.error.message,
+        error: rpcResponse.error.message || "Vision JSON-RPC error (empty message)",
         code: rpcResponse.error.code,
         data: rpcResponse.error.data,
         kind: "json_rpc",
@@ -665,7 +665,7 @@ export async function callTool(name: string, args: Record<string, unknown> = {})
       return serializeOutcome({
         success: false,
         kind: "transport",
-        error: err.message,
+        error: err.message || "Vision transport error (empty message)",
       })
     }
 

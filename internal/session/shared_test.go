@@ -457,7 +457,7 @@ func TestSharedManager_ApplicationIdleReaperHonorsActivityAndInflight(t *testing
 	sm.refMu.Lock()
 	sm.sessions["session-1"].lastActivity = time.Now().Add(-time.Second)
 	sm.refMu.Unlock()
-	release, err := sm.BeginRequest("session-1")
+	release, err := sm.BeginRequest(context.Background(), "session-1")
 	if err != nil {
 		t.Fatal(err)
 	}
