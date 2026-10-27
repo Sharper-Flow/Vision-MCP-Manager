@@ -518,7 +518,13 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	}, nil)
 
 	outerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" && isInitializeRequest(r) {
+		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" {
+			// The SDK's server factory allocates a downstream lease even for
+			// messages it later rejects. Only initialize may create a session.
+			if !isInitializeRequest(r) {
+				http.Error(w, "Mcp-Session-Id is required; send initialize without a session ID to start a new session", http.StatusBadRequest)
+				return
+			}
 			var admission AdmissionStatuser
 			if cfg.Selector != nil {
 				admission = cfg.Selector
