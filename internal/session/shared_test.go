@@ -39,6 +39,7 @@ func newTestServerMetricsReporter() *testServerMetricsReporter {
 func (r *testServerMetricsReporter) IncActiveSessions()  {}
 func (r *testServerMetricsReporter) DecActiveSessions()  {}
 func (r *testServerMetricsReporter) IncAdmissionDenied() {}
+func (r *testServerMetricsReporter) IncSpawned(string)   {}
 
 func (r *testServerMetricsReporter) IncReaped(reason string) {
 	r.mu.Lock()
@@ -456,7 +457,10 @@ func TestSharedManager_ApplicationIdleReaperHonorsActivityAndInflight(t *testing
 	sm.refMu.Lock()
 	sm.sessions["session-1"].lastActivity = time.Now().Add(-time.Second)
 	sm.refMu.Unlock()
-	release := sm.BeginRequest("session-1")
+	release, err := sm.BeginRequest("session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	sm.reapExpiredSessions()
 	select {
 	case sessionID := <-expired:

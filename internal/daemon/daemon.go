@@ -1347,6 +1347,17 @@ func (d *Daemon) ServerMetricsSnapshot(serverName string) *metrics.ServerMetrics
 		return nil
 	}
 	snap := m.Snapshot()
+	if d.portManager != nil {
+		if listener := d.portManager.Get(serverName); listener != nil {
+			if sm, ok := listener.SessionManager.(*session.SharedSessionManager); ok {
+				pid, startedAt := sm.ProcessStatus()
+				snap.SharedDownstream = &metrics.SharedDownstreamSnapshot{PID: pid}
+				if !startedAt.IsZero() {
+					snap.SharedDownstream.StartedAt = &startedAt
+				}
+			}
+		}
+	}
 	return &snap
 }
 

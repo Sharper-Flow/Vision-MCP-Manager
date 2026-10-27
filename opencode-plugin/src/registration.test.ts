@@ -23,7 +23,7 @@ import { tmpdir } from "node:os"
 
 const { visionInitMock, visionAddMock } = vi.hoisted(() => ({
   visionInitMock: vi.fn(async () => "mocked vision_init"),
-  visionAddMock: vi.fn(async () => "mocked vision_add"),
+  visionAddMock: vi.fn(async () => JSON.stringify({ success: true, name: "linear" })),
 }))
 
 vi.mock("./tools", async (importOriginal) => ({
@@ -518,7 +518,10 @@ describe("V2 setup registration", () => {
     // Raw input omitted `start`; the zod parse inside execute applied the
     // default before the handler ran.
     expect(visionAddMock).toHaveBeenCalledWith({ name: "linear", start: true })
-    expect(result).toEqual({ content: "mocked vision_add" })
+    expect(result).toEqual({
+      content: JSON.stringify({ success: true, name: "linear" }),
+      output: { success: true, name: "linear" },
+    })
   })
 
   it("connects a declared disabled server through the ctx.mcp domain", async () => {

@@ -67,6 +67,13 @@ function initResponse(
 }
 
 // JSON-RPC tools/call response payload
+const healthyStatusJson = JSON.stringify({
+  healthy: true,
+  uptime: "1m",
+  servers: { running: 0, stopped: 0, error: 0 },
+  memory_mb: 10,
+})
+
 function toolCallResponse(text: string, id = 2, asSse = false): FetchResponseInit {
   const payload = {
     jsonrpc: "2.0",
@@ -149,7 +156,7 @@ describe("MCP client session unit lifecycle", () => {
         return makeResponse({ status: 202, body: "" })
       }
       // tools/call returns SSE
-      return makeResponse(toolCallResponse('{"healthy":true}', 2, true))
+      return makeResponse(toolCallResponse(healthyStatusJson, 2, true))
     })
 
     const { callTool } = await loadClient()
@@ -225,7 +232,7 @@ describe("MCP client session unit lifecycle", () => {
       if (toolCallAttempt === 1) {
         return makeResponse({ status: 404, body: "session expired" })
       }
-      return makeResponse(toolCallResponse('{"healthy":true}'))
+      return makeResponse(toolCallResponse(healthyStatusJson))
     })
 
     const { callTool } = await loadClient()
@@ -268,7 +275,7 @@ describe("MCP client session unit lifecycle", () => {
           },
         })
       }
-      return makeResponse(toolCallResponse('{"healthy":true}'))
+      return makeResponse(toolCallResponse(healthyStatusJson))
     })
 
     const { callTool } = await loadClient()
@@ -317,7 +324,7 @@ describe("MCP client session unit lifecycle", () => {
       if (body.method === "notifications/initialized") {
         return makeResponse({ status: 202, body: "" })
       }
-      return makeResponse(toolCallResponse('{"healthy":true}'))
+      return makeResponse(toolCallResponse(healthyStatusJson))
     })
 
     const { callTool } = await loadClient()

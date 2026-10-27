@@ -15,6 +15,7 @@
  * All JSON-RPC 2.0 over HTTP POST to /mcp endpoint.
  */
 
+import { z } from "zod"
 import { getVisionBodyReadTimeoutMs, getVisionRequestTimeoutMs } from "./timeouts"
 
 const ADMIN_PORT = 6275
@@ -60,12 +61,204 @@ interface ToolCallParams {
   arguments: Record<string, unknown>
 }
 
-interface ToolCallResult {
-  content: Array<{
-    type: string
-    text: string
-  }>
-  isError?: boolean
+const ToolCallResultSchema = z.looseObject({
+  content: z
+    .array(
+      z
+        .looseObject({ type: z.string(), text: z.string().optional() })
+        .refine(
+          (block) => block.type !== "text" || typeof block.text === "string",
+          "Text content must have a string text field"
+        )
+    )
+    .optional(),
+  structuredContent: z.record(z.string(), z.unknown()).optional(),
+  isError: z.boolean().optional(),
+})
+
+const RpcResponseSchema = z
+  .looseObject({
+    jsonrpc: z.literal("2.0"),
+    id: z.union([z.number(), z.string(), z.null()]),
+    result: z.unknown().optional(),
+    error: z
+      .object({ code: z.number(), message: z.string(), data: z.unknown().optional() })
+      .optional(),
+  })
+  .refine((rpc) => "result" in rpc !== "error" in rpc, "Expected exactly one result or error")
+
+const VisionFailureSchema = z.looseObject({
+  success: z.literal(false),
+  error: z.string().min(1),
+  code: z.union([z.number(), z.string()]).optional(),
+  data: z.unknown().optional(),
+  suggestion: z.string().optional(),
+  // Daemon-owned failure identity and extension fields pass through unchanged.
+  kind: z.string().optional(),
+  isError: z.literal(true).optional(),
+})
+
+/**
+ * Plugin wire contract: JSON object with a success discriminator. Successful
+ * daemon fields stay at the root; failures keep error/code/data/suggestion and
+ * extension fields. A successful call can report healthy:false or a server error.
+ * V1 serializes this union; V2 returns it as output alongside the same JSON text.
+ * Tool-specific payload validation happens before this transport-level union.
+ */
+export const VisionOutcomeSchema = z.discriminatedUnion("success", [
+  z.looseObject({ success: z.literal(true) }),
+  VisionFailureSchema,
+])
+type VisionOutcome = z.infer<typeof VisionOutcomeSchema>
+
+function serializeOutcome(outcome: VisionOutcome): string {
+  return JSON.stringify(VisionOutcomeSchema.parse(outcome))
+}
+
+// These are the daemon's admin response shapes (internal/admin/tools.go), not
+// downstream vendor schemas. Keep additive fields, including nested extensions.
+const named = z.looseObject({ name: z.string() })
+const mutation = z.looseObject({
+  success: z.literal(true),
+  name: z.string(),
+  status: z.string().optional(),
+  error: z.string().nullable().optional(),
+  port: z.number().nullable().optional(),
+})
+const DaemonSuccessSchemas: Record<string, z.ZodObject> = {
+  vision_list: z.looseObject({
+    servers: z.array(named.extend({ status: z.string(), process_state: z.string() })),
+    slot_groups: z.array(
+      named.extend({ group_port: z.number(), slots: z.array(z.string()).nullable() })
+    ),
+  }),
+  vision_add: mutation,
+  vision_remove: mutation,
+  vision_restart: mutation,
+  vision_search: z.looseObject({
+    success: z.literal(true),
+    results: z.array(
+      named.extend({
+        description: z.string(),
+        capabilities: z.array(z.string()).nullable(),
+        installed: z.boolean(),
+      })
+    ),
+  }),
+  vision_init: z.looseObject({
+    success: z.literal(true),
+    path: z.string(),
+    servers: z.array(z.string()),
+  }),
+  vision_status: z.looseObject({
+    healthy: z.boolean(),
+    uptime: z.string(),
+    servers: z.looseObject({ running: z.number(), stopped: z.number(), error: z.number() }),
+    memory_mb: z.number(),
+    warnings: z.array(z.string()).optional(),
+  }),
+  vision_guidance: z.looseObject({
+    success: z.literal(true),
+    global_guidance: z.string().optional(),
+    servers: z.array(named).optional(),
+    tools: z.array(named).optional(),
+    context: z.string().optional(),
+    error: z.string().nullable().optional(),
+  }),
+  vision_slot_status: z.looseObject({
+    groups: z.array(
+      z.looseObject({
+        group_name: z.string(),
+        slot_count: z.number(),
+        slots: z
+          .array(
+            named.extend({
+              port: z.number(),
+              active_sessions: z.number(),
+              max_sessions: z.number(),
+              effective_status: z.string(),
+            })
+          )
+          .nullable(),
+      })
+    ),
+  }),
+  vision_metrics: z.looseObject({
+    sessions_active: z.number(),
+    tool_calls_total: z.number(),
+    errors_total: z.number(),
+    subprocesses_active: z.number(),
+  }),
+}
+
+class InvalidResultError extends Error {}
+
+class JsonRpcError extends Error {
+  constructor(
+    readonly detail: NonNullable<JsonRpcResponse["error"]>,
+    prefix: string
+  ) {
+    super(`${prefix}: ${detail.message}`)
+  }
+}
+
+function validate<T>(schema: z.ZodType<T>, value: unknown, context: string): T {
+  const parsed = schema.safeParse(value)
+  if (!parsed.success) {
+    throw new InvalidResultError(`Invalid Vision ${context}: ${parsed.error.message}`)
+  }
+  return parsed.data
+}
+
+function decodeToolResult(name: string, value: unknown): VisionOutcome {
+  const result = validate(ToolCallResultSchema, value, "MCP tool result")
+  const text =
+    result.content
+      ?.filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("\n") ?? ""
+  let payload: unknown = result.structuredContent
+  if (payload === undefined && text.trim()) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      if (!result.isError) throw new InvalidResultError("Invalid Vision tool text: expected JSON")
+      // The daemon's MCP handler also emits plain text on execution errors.
+    }
+  }
+  if (result.isError) {
+    const fields =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>)
+        : {}
+    return validate(
+      VisionFailureSchema,
+      {
+        ...fields,
+        success: false,
+        error: fields.error ?? (text.trim() || "Vision MCP tool reported an error"),
+        kind: fields.kind ?? "mcp_tool",
+        isError: true,
+      },
+      "MCP tool failure"
+    )
+  }
+  const fields = validate(z.record(z.string(), z.unknown()), payload, "tool payload")
+  if (fields.success === false) return validate(VisionFailureSchema, fields, "daemon failure")
+  if (fields.success !== undefined && fields.success !== true) {
+    throw new InvalidResultError("Invalid Vision success discriminator")
+  }
+  const schema = Object.hasOwn(DaemonSuccessSchemas, name) ? DaemonSuccessSchemas[name] : undefined
+  if (!schema)
+    throw new InvalidResultError(`Invalid Vision tool result: unsupported admin tool ${name}`)
+  return validate(
+    VisionOutcomeSchema,
+    {
+      ...validate(schema, fields, `${name} payload`),
+      success: true,
+    },
+    "outcome"
+  )
 }
 
 interface InitializeResult {
@@ -139,7 +332,7 @@ async function readSsePayload<T>(response: Response, timeoutMs: number): Promise
       return JSON.parse(payload) as T
     }
   }
-  throw new Error("SSE response had no non-empty data: frame")
+  throw new InvalidResultError("Invalid Vision SSE response: no non-empty data: frame")
 }
 
 /**
@@ -147,10 +340,16 @@ async function readSsePayload<T>(response: Response, timeoutMs: number): Promise
  */
 async function readRpcResponse(response: Response, timeoutMs: number): Promise<JsonRpcResponse> {
   const contentType = response.headers.get("content-type") || ""
-  if (contentType.includes("text/event-stream")) {
-    return readSsePayload<JsonRpcResponse>(response, timeoutMs)
+  try {
+    const payload = contentType.includes("text/event-stream")
+      ? await readSsePayload<unknown>(response, timeoutMs)
+      : await readJsonWithTimeout<unknown>(response, timeoutMs)
+    return validate(RpcResponseSchema, payload, "JSON-RPC response")
+  } catch (err) {
+    if (err instanceof SyntaxError)
+      throw new InvalidResultError(`Invalid Vision response JSON: ${err.message}`)
+    throw err
   }
-  return readJsonWithTimeout<JsonRpcResponse>(response, timeoutMs)
 }
 
 /**
@@ -209,7 +408,7 @@ async function performInitialize(): Promise<string> {
   const rpcResponse = await readRpcResponse(response, bodyTimeoutMs)
 
   if (rpcResponse.error) {
-    throw new Error(`initialize JSON-RPC error: ${rpcResponse.error.message}`)
+    throw new JsonRpcError(rpcResponse.error, "initialize JSON-RPC error")
   }
 
   const initResult = rpcResponse.result as InitializeResult | undefined
@@ -378,11 +577,12 @@ async function postToolCall(
  *
  * @param name - Tool name (e.g., "vision_list")
  * @param args - Tool arguments
- * @returns Tool result text (JSON string). Errors are returned as JSON
- *          objects with `{ success: false, error: ... }` — same shape as
- *          pre-refactor behavior so callers (tools.ts) don't change.
+ * @returns JSON serialization of VisionOutcomeSchema. structuredContent wins
+ *          over presentation text; without it, text blocks must form a valid
+ *          daemon JSON payload. Missing/malformed results fail without replay.
  */
 export async function callTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
+  let isToolError = false
   try {
     let sessionId = await ensureSession()
 
@@ -397,47 +597,81 @@ export async function callTool(name: string, args: Record<string, unknown> = {})
 
     // MCP-level errors are returned as JSON error objects per spec.
     if (rpcResponse.error) {
-      return JSON.stringify({
+      return serializeOutcome({
         success: false,
         error: rpcResponse.error.message,
         code: rpcResponse.error.code,
+        data: rpcResponse.error.data,
+        kind: "json_rpc",
       })
     }
 
-    const result = rpcResponse.result as ToolCallResult
-
-    // Extract text from content — this is the JSON response from the tool.
-    // Tool errors are returned as part of the JSON (success: false).
-    const text = result.content
-      ?.filter((c) => c.type === "text")
-      .map((c) => c.text)
-      .join("\n")
-
-    return text || "{}"
+    isToolError =
+      typeof rpcResponse.result === "object" &&
+      rpcResponse.result !== null &&
+      "isError" in rpcResponse.result &&
+      rpcResponse.result.isError === true
+    return serializeOutcome(decodeToolResult(name, rpcResponse.result))
   } catch (err) {
-    // Connection / transport errors as JSON error objects per spec.
+    // Validation never retries: a mutation may already have completed.
+    if (err instanceof InvalidResultError) {
+      return serializeOutcome({
+        success: false,
+        error: err.message,
+        kind: "invalid_result",
+        ...(isToolError ? { isError: true as const } : {}),
+        suggestion:
+          "Do not automatically repeat this call; a mutation may have completed. Inspect daemon state before deciding whether to retry.",
+      })
+    }
+    if (err instanceof JsonRpcError) {
+      return serializeOutcome({
+        success: false,
+        error: err.message,
+        code: err.detail.code,
+        data: err.detail.data,
+        kind: "json_rpc",
+      })
+    }
     if (err instanceof Error) {
-      if (err.name === "AbortError") {
-        return JSON.stringify({
+      if (err.name === "AbortError" || err.message === "Response body read timeout") {
+        return serializeOutcome({
           success: false,
-          error: `Vision daemon request timeout after ${getVisionRequestTimeoutMs()}ms`,
+          kind: "timeout",
+          error:
+            err.name === "AbortError"
+              ? `Vision daemon request timeout after ${getVisionRequestTimeoutMs()}ms`
+              : err.message,
         })
       }
       if (err.message.includes("ECONNREFUSED") || err.message.includes("fetch failed")) {
-        return JSON.stringify({
+        const cause = err.cause
+        return serializeOutcome({
           success: false,
+          kind: "connection",
           error: "Vision daemon is not running",
+          data: {
+            message: err.message,
+            ...(cause &&
+            typeof cause === "object" &&
+            "code" in cause &&
+            (typeof cause.code === "string" || typeof cause.code === "number")
+              ? { code: cause.code }
+              : {}),
+          },
           suggestion: "Restart it with: systemctl --user restart vision.service",
         })
       }
-      return JSON.stringify({
+      return serializeOutcome({
         success: false,
+        kind: "transport",
         error: err.message,
       })
     }
 
-    return JSON.stringify({
+    return serializeOutcome({
       success: false,
+      kind: "transport",
       error: "Unknown error calling Vision daemon",
     })
   }

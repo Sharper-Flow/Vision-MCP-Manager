@@ -17,6 +17,7 @@ import type { Plugin as V2Plugin } from "@opencode/plugin"
 import { access, stat } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path"
 import { z } from "zod"
+import { VisionOutcomeSchema } from "./mcp-client"
 import {
   visionList,
   visionAdd,
@@ -247,13 +248,20 @@ const visionSetup = async (context: V2Plugin.Context) => {
       name: string,
       description: string,
       schema: S,
-      run: (args: z.output<S>) => Promise<string>
+      run: (args: z.output<S>) => Promise<string>,
+      output?: typeof VisionOutcomeSchema
     ) => {
       editor.add({
         name,
         description,
         input: toolInputJsonSchema(schema),
-        execute: async (raw: unknown) => ({ content: await run(schema.parse(raw)) }),
+        ...(output ? { output } : {}),
+        execute: async (raw: unknown) => {
+          const content = await run(schema.parse(raw))
+          // V2's installed API calls the machine-value schema `output`, not
+          // outputSchema. V1 continues to return only the serialized outcome.
+          return output ? { content, output: output.parse(JSON.parse(content)) } : { content }
+        },
       })
     }
 
@@ -266,31 +274,36 @@ const visionSetup = async (context: V2Plugin.Context) => {
         VISION_PLUGIN_TOOL_NAMES.list,
         "List all registered MCP servers with their current effective status (running/starting/stopped/error)",
         VisionListArgsSchema,
-        async () => await visionList()
+        async () => await visionList(),
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.add,
         "Add and optionally start an MCP server from the Vision registry",
         VisionAddArgsSchema,
-        async (args) => await visionAdd(args)
+        async (args) => await visionAdd(args),
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.remove,
         "Stop and remove an MCP server from the active configuration",
         VisionRemoveArgsSchema,
-        async (args) => await visionRemove(args)
+        async (args) => await visionRemove(args),
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.restart,
         "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
         VisionRestartArgsSchema,
-        async (args) => await visionRestart(args)
+        async (args) => await visionRestart(args),
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.search,
         "Search the Vision registry for MCP servers by name, capability tags, or description",
         VisionSearchArgsSchema,
-        async (args) => await visionSearch(args)
+        async (args) => await visionSearch(args),
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.init,
@@ -299,31 +312,36 @@ const visionSetup = async (context: V2Plugin.Context) => {
         async (args) => {
           const path = await resolveInitPath(context.location.directory, args.path)
           return await visionInit({ ...args, path })
-        }
+        },
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.status,
         "Get Vision daemon status including uptime, memory usage, and server counts",
         VisionStatusArgsSchema,
-        async () => await visionStatus()
+        async () => await visionStatus(),
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.guidance,
         "Get ranked tool-selection guidance for a task or specific server",
         VisionGuidanceArgsSchema,
-        async (args) => await visionGuidance(args)
+        async (args) => await visionGuidance(args),
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.slotStatus,
         "Get slot-group routing status and per-slot session details",
         VisionSlotStatusArgsSchema,
-        async () => await visionSlotStatus()
+        async () => await visionSlotStatus(),
+        VisionOutcomeSchema
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.metrics,
         "Get Vision daemon metrics for sessions, tool calls, errors, and subprocesses",
         VisionMetricsArgsSchema,
-        async () => await visionMetrics()
+        async () => await visionMetrics(),
+        VisionOutcomeSchema
       )
     }
 

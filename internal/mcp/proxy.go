@@ -546,6 +546,17 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				})
 				return
 			}
+			if cfg.SharedManager != nil {
+				if err := cfg.SharedManager.EnsureReady(r.Context()); err != nil {
+					var starting *session.SharedStartingError
+					if errors.As(err, &starting) {
+						writeSharedStartingRefusal(w)
+					} else {
+						http.Error(w, "shared downstream unavailable", http.StatusServiceUnavailable)
+					}
+					return
+				}
+			}
 		}
 
 		sessionHeader := r.Header.Get("Mcp-Session-Id")
@@ -558,7 +569,16 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			if ps != nil && applicationActivity {
 				ps.touch()
 				if ps.shared && ps.sharedMgr != nil {
-					release := ps.sharedMgr.BeginRequest(ps.downstreamID())
+					release, err := ps.sharedMgr.BeginRequest(ps.downstreamID())
+					if err != nil {
+						var starting *session.SharedStartingError
+						if errors.As(err, &starting) {
+							writeSharedStartingRefusal(w)
+						} else {
+							http.Error(w, "session unavailable", http.StatusNotFound)
+						}
+						return
+					}
 					defer release()
 				}
 			}
@@ -606,6 +626,16 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	}
 
 	return resultHandler
+}
+
+// This refusal happens before SDK dispatch, so retrying it cannot duplicate a
+// completed mutation. No tool-result retry policy is changed here.
+func writeSharedStartingRefusal(w http.ResponseWriter) {
+	w.Header().Set(gatewayDenialHeader, "shared-starting")
+	w.Header().Set("Retry-After", "1")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": nil, "error": map[string]any{"code": -32000, "message": "shared downstream is starting; retry admission", "data": map[string]any{"type": "starting", "retryable": true}}})
 }
 
 func isInitializeRequest(r *http.Request) bool {
@@ -1217,7 +1247,7 @@ func newSharedModeServer(
 		logger.Info("shared downstream respawned, updated local pointer",
 			slog.String("event", "shared_session.respawn"),
 		)
-		// The manager invokes this under its lock, which must not wait on respawnMu.
+		// Publication must not wait on catalog refresh or respawnMu.
 		go refresh(context.Background())
 	}, refresh)
 
