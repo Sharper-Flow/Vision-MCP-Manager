@@ -25,19 +25,28 @@ type SharedSessionManager struct {
 
 	// When both locks are needed, acquire mu before refMu. A refMu holder
 	// must never acquire mu.
-	mu         sync.RWMutex
-	downstream *mcp.ClientSession
-	client     *mcp.Client
-	spawnErr   error
-	closed     bool      // Writes require mu and refMu; reads require either lock.
-	cmd        *exec.Cmd // stored at spawn for PID capture in reap events
+	mu              sync.RWMutex
+	downstream      *mcp.ClientSession
+	client          *mcp.Client
+	spawnErr        error
+	closed          bool      // Writes require mu and refMu; reads require either lock.
+	cmd             *exec.Cmd // stored at spawn for PID capture in reap events
+	downstreamDone  <-chan struct{}
+	startedAt       time.Time
+	lastSpawnReason string
+	starting        *sharedStartup
+	lifetimeCtx     context.Context
+	lifetimeCancel  context.CancelFunc
+	probeMu         sync.Mutex
 
-	// healthCheckFailures counts consecutive timed-out health probes against
+	// healthCheckFailures counts consecutive failed health probes against
 	// the current downstream for the respawn gate in healthCheck. Guarded by mu.
 	healthCheckFailures int
 
 	refMu            sync.Mutex
 	refCount         int
+	activeRequests   int
+	requestsDrained  chan struct{} // Closed when activeRequests reaches zero; guarded by refMu.
 	upstreamSessions map[string]struct{}
 	sessions         map[string]*sharedSession
 	onSessionExpired func(sessionID string)
@@ -77,7 +86,37 @@ type sharedSession struct {
 	lastActivity time.Time
 	inFlight     int
 	expiring     bool
+	pending      int
+	admitted     bool
 }
+
+type sharedStartup struct {
+	done chan struct{}
+	ds   *mcp.ClientSession
+	err  error
+}
+
+// SharedStartingError is a pre-dispatch refusal. Retrying admission is safe;
+// it says nothing about the outcome of a previously dispatched tool call.
+type SharedStartingError struct{ Cause error }
+
+func (e *SharedStartingError) Error() string {
+	return "shared downstream readiness wait ended; retry admission"
+}
+func (e *SharedStartingError) Unwrap() error { return e.Cause }
+
+// SharedStartupError preserves the startup cause without exposing command,
+// environment, or peer-provided error text at the HTTP admission boundary.
+type SharedStartupError struct{ Cause error }
+
+func (e *SharedStartupError) Error() string {
+	return "shared downstream startup failed; retry admission"
+}
+func (e *SharedStartupError) Unwrap() error { return e.Cause }
+
+var ErrSharedClosed = errors.New("shared session manager is closed")
+
+const sharedStartupTimeout = 15 * time.Second
 
 // NewSharedSessionManager creates a new shared session manager.
 // idleTimeout controls the idle reap behavior: when refCount drops to 0, the
@@ -86,7 +125,10 @@ func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger
 	if logger == nil {
 		logger = slog.Default()
 	}
+	lifetimeCtx, lifetimeCancel := context.WithCancel(context.Background())
 	return &SharedSessionManager{
+		lifetimeCtx:      lifetimeCtx,
+		lifetimeCancel:   lifetimeCancel,
 		serverName:       serverName,
 		config:           cfg,
 		logger:           logger.With(slog.String("server", serverName)),
@@ -113,13 +155,12 @@ func (sm *SharedSessionManager) SetReachabilityStore(store *reachability.Store) 
 // GetOrCreateSession returns the shared downstream session, lazily spawning it
 // on first use. The sessionID is tracked for admission control and refcounting.
 func (sm *SharedSessionManager) GetOrCreateSession(ctx context.Context, sessionID string) (*mcp.ClientSession, error) {
-	if sm.isClosed() {
-		return nil, errors.New("shared session manager is closed")
-	}
-
 	// Check admission and track session
-	newSession := false
 	sm.refMu.Lock()
+	if sm.closed {
+		sm.refMu.Unlock()
+		return nil, ErrSharedClosed
+	}
 	if _, exists := sm.upstreamSessions[sessionID]; !exists {
 		// Check max sessions
 		if sm.config.MaxSessions > 0 && sm.refCount >= sm.config.MaxSessions {
@@ -129,8 +170,9 @@ func (sm *SharedSessionManager) GetOrCreateSession(ctx context.Context, sessionI
 		sm.upstreamSessions[sessionID] = struct{}{}
 		sm.sessions[sessionID] = &sharedSession{lastActivity: time.Now()}
 		sm.refCount++
-		newSession = true
 	}
+	tracked := sm.sessions[sessionID]
+	tracked.pending++
 
 	// Cancel idle timer on new session arrival
 	if sm.idleTimer != nil {
@@ -145,94 +187,168 @@ func (sm *SharedSessionManager) GetOrCreateSession(ctx context.Context, sessionI
 
 	// Get or create downstream
 	ds, err := sm.getOrCreateDownstream(ctx)
-	if err != nil && newSession {
-		// Undo refcount increment on spawn failure to prevent leak
-		sm.refMu.Lock()
-		delete(sm.upstreamSessions, sessionID)
-		delete(sm.sessions, sessionID)
-		sm.refCount--
-		sm.refMu.Unlock()
+	sm.refMu.Lock()
+	if sm.sessions[sessionID] == tracked {
+		tracked.pending--
+		if err == nil {
+			tracked.admitted = true
+			tracked.lastActivity = time.Now()
+		} else if !tracked.admitted && tracked.pending == 0 {
+			delete(sm.upstreamSessions, sessionID)
+			delete(sm.sessions, sessionID)
+			sm.refCount--
+			sm.armIdleTimerLocked()
+		}
 	}
+	sm.refMu.Unlock()
 	return ds, err
 }
 
-func (sm *SharedSessionManager) isClosed() bool {
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.closed
-}
-
 func (sm *SharedSessionManager) getOrCreateDownstream(ctx context.Context) (*mcp.ClientSession, error) {
-	// Fast path: check if downstream is healthy
-	sm.mu.RLock()
-	ds := sm.downstream
-	err := sm.spawnErr
-	closed := sm.closed
-	sm.mu.RUnlock()
-
-	if closed {
-		return nil, errors.New("shared session manager is closed")
-	}
-
-	if ds != nil && err == nil {
-		// Quick health check
-		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		if _, pingErr := ds.ListTools(checkCtx, nil); pingErr == nil {
-			return ds, nil
-		}
-		// Dead, need respawn
-	}
-
-	// Slow path: spawn or respawn
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
-
 	if sm.closed {
-		return nil, errors.New("shared session manager is closed")
+		sm.mu.Unlock()
+		return nil, ErrSharedClosed
 	}
-
-	// Double-check
-	if sm.downstream != nil && sm.spawnErr == nil {
-		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-		if _, pingErr := sm.downstream.ListTools(checkCtx, nil); pingErr == nil {
-			return sm.downstream, nil
+	if sm.starting == nil && sm.downstream != nil && !channelClosed(sm.downstreamDone) {
+		ds := sm.downstream
+		sm.mu.Unlock()
+		return ds, nil
+	}
+	if sm.starting == nil {
+		reason := metrics.SpawnReasonFirstUse
+		if sm.downstream != nil {
+			reason = metrics.SpawnReasonLookupRespawn
+		} else if sm.lastSpawnReason != "" {
+			reason = sm.lastSpawnReason
 		}
+		sm.startDownstreamLocked(reason, nil)
 	}
-
-	// Close old downstream if exists
-	if sm.downstream != nil {
-		_ = sm.downstream.Close()
+	startup := sm.starting
+	sm.mu.Unlock()
+	if err := sm.waitForStartup(ctx, startup); err != nil {
+		return nil, err
 	}
-	// The consecutive-timeout count belongs to the session being replaced;
-	// the replacement starts with a clean gate.
-	sm.healthCheckFailures = 0
-
-	// Spawn new downstream
-	sm.downstream, sm.client, sm.spawnErr = sm.spawn(ctx)
-	if sm.spawnErr != nil {
-		return nil, sm.spawnErr
-	}
-
-	sm.notifySubscribers(func(sub sharedSubscriber) {
-		if sub.onRespawn != nil {
-			sub.onRespawn(sm.downstream)
-		}
-	})
-
-	return sm.downstream, nil
+	return startup.ds, nil
 }
 
-func (sm *SharedSessionManager) spawn(ctx context.Context) (*mcp.ClientSession, *mcp.Client, error) {
+// EnsureReady starts the same single-flight startup used by admission without
+// reserving an upstream session. Concurrent callers share its result, bounded
+// by their own contexts and the manager's startup deadline.
+func (sm *SharedSessionManager) EnsureReady(ctx context.Context) error {
+	_, err := sm.getOrCreateDownstream(ctx)
+	return err
+}
+
+func (sm *SharedSessionManager) waitForStartup(ctx context.Context, startup *sharedStartup) error {
+	select {
+	case <-sm.lifetimeCtx.Done():
+		return ErrSharedClosed
+	case <-ctx.Done():
+		return &SharedStartingError{Cause: ctx.Err()}
+	case <-startup.done:
+		return startup.err
+	}
+}
+
+func channelClosed(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// mu serializes publication and reserves the replacement before any close.
+// Neither process shutdown nor startup runs while holding manager locks.
+func (sm *SharedSessionManager) startDownstreamLocked(reason string, drain <-chan struct{}) {
+	old := sm.downstream
+	oldDone := sm.downstreamDone
+	startup := &sharedStartup{done: make(chan struct{})}
+	sm.starting = startup
+	sm.lastSpawnReason = reason
+	sm.healthCheckFailures = 0
+	go func() {
+		// A reserved replacement blocks new dispatches while existing calls
+		// finish under their own deadlines. Actual transport closure need not
+		// wait for those calls; no shorter drain timeout is introduced here.
+		if drain != nil {
+			select {
+			case <-drain:
+			case <-oldDone:
+			case <-sm.lifetimeCtx.Done():
+			}
+		}
+		sm.mu.Lock()
+		sm.downstream, sm.client, sm.cmd = nil, nil, nil
+		sm.downstreamDone = nil
+		sm.startedAt = time.Time{}
+		sm.mu.Unlock()
+		if old != nil {
+			if closeErr := old.Close(); closeErr != nil {
+				sm.logger.Warn("closing shared downstream failed, respawning anyway",
+					slog.String("event", "shared_session.close_failed"),
+					slog.String("reason", reason), slog.String("error", closeErr.Error()))
+			}
+		}
+		ctx, cancel := context.WithTimeout(sm.lifetimeCtx, sharedStartupTimeout)
+		defer cancel()
+		startedAt := time.Now()
+		ds, client, cmd, err := sm.spawn(ctx, reason)
+		sm.mu.Lock()
+		if sm.closed {
+			sm.mu.Unlock()
+			if ds != nil {
+				_ = ds.Close()
+			}
+			sm.mu.Lock()
+			err = ErrSharedClosed
+		} else if err == nil {
+			sm.downstream, sm.client, sm.cmd = ds, client, cmd
+			sm.startedAt = startedAt
+			done := make(chan struct{})
+			sm.downstreamDone = done
+			go func() { _ = ds.Wait(); close(done) }()
+		}
+		if !sm.closed {
+			sm.spawnErr = err
+		}
+		sm.mu.Unlock()
+		if err == nil {
+			sm.notifySubscribers(func(sub sharedSubscriber) {
+				if sub.onRespawn != nil {
+					sub.onRespawn(ds)
+				}
+			})
+		}
+		sm.mu.Lock()
+		if sm.closed {
+			ds, err = nil, ErrSharedClosed
+		} else if err != nil {
+			err = &SharedStartupError{Cause: err}
+		}
+		startup.ds, startup.err = ds, err
+		sm.starting = nil
+		close(startup.done)
+		sm.refMu.Lock()
+		sm.armIdleTimerLocked()
+		sm.refMu.Unlock()
+		sm.mu.Unlock()
+	}()
+}
+
+func (sm *SharedSessionManager) spawn(ctx context.Context, reason string) (*mcp.ClientSession, *mcp.Client, *exec.Cmd, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, err
+	}
 	cmd, err := sm.buildCommand()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build command: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to build command: %w", err)
 	}
-
-	// Store cmd for PID capture in reap events.
-	// Safe without lock: spawn() is always called under mu.Lock from getOrCreateDownstream.
-	sm.cmd = cmd
 
 	// Args resolve ${VAR} at config load and may hold credentials; the count
 	// identifies the spawn without writing their values to the journal.
@@ -240,6 +356,7 @@ func (sm *SharedSessionManager) spawn(ctx context.Context) (*mcp.ClientSession, 
 		slog.String("event", "shared_session.spawn"),
 		slog.String("command", sm.config.Command),
 		slog.Int("arg_count", len(sm.config.Args)),
+		slog.String("reason", reason),
 	)
 
 	transport := &mcp.CommandTransport{Command: cmd}
@@ -257,19 +374,24 @@ func (sm *SharedSessionManager) spawn(ctx context.Context) (*mcp.ClientSession, 
 	})
 
 	clientSession, err := client.Connect(ctx, transport, nil)
+	if cmd.Process != nil && sm.metrics != nil {
+		sm.metrics.IncSpawned(reason)
+	}
 	if err != nil {
 		sm.logger.Error("failed to connect to downstream",
 			slog.String("event", "shared_session.spawn_failed"),
 			slog.String("error", err.Error()),
 		)
-		return nil, nil, fmt.Errorf("failed to connect downstream: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to connect downstream: %w", err)
 	}
 
 	sm.logger.Info("shared downstream subprocess connected",
 		slog.String("event", "shared_session.connected"),
+		slog.Int("pid", cmd.Process.Pid),
+		slog.String("reason", reason),
 	)
 
-	return clientSession, client, nil
+	return clientSession, client, cmd, nil
 }
 
 func (sm *SharedSessionManager) buildCommand() (*exec.Cmd, error) {
@@ -309,7 +431,14 @@ func (sm *SharedSessionManager) RemoveSession(sessionID string) error {
 	delete(sm.sessions, sessionID)
 	sm.refCount--
 
-	// Start idle reap timer when refCount reaches 0
+	sm.armIdleTimerLocked()
+
+	return nil
+}
+
+// refMu must be held. Startup completion also arms the timer, so a cancelled
+// last waiter cannot leave an unreferenced subprocess running indefinitely.
+func (sm *SharedSessionManager) armIdleTimerLocked() {
 	if sm.refCount == 0 && sm.idleTimeout > 0 && !sm.closed {
 		if sm.idleTimer != nil {
 			sm.idleTimer.Stop()
@@ -321,8 +450,6 @@ func (sm *SharedSessionManager) RemoveSession(sessionID string) error {
 			slog.Duration("idle_timeout", sm.idleTimeout),
 		)
 	}
-
-	return nil
 }
 
 // SetOnSessionExpired registers the callback used when a shared upstream
@@ -345,27 +472,78 @@ func (sm *SharedSessionManager) TouchSession(sessionID string) {
 }
 
 // BeginRequest marks an application request as in flight until the returned
-// release function runs. Idle reaping never removes such a session.
-func (sm *SharedSessionManager) BeginRequest(sessionID string) func() {
+// release function runs, including its readiness wait. Only dispatched calls
+// contribute to activeRequests, so queued calls cannot starve a reserved drain.
+func (sm *SharedSessionManager) BeginRequest(ctx context.Context, sessionID string) (func(), error) {
 	sm.refMu.Lock()
+	if sm.closed {
+		sm.refMu.Unlock()
+		return nil, ErrSharedClosed
+	}
 	tracked := sm.sessions[sessionID]
 	if tracked == nil || tracked.expiring {
 		sm.refMu.Unlock()
-		return func() {}
+		return nil, ErrSessionNotFound
 	}
 	tracked.inFlight++
 	sm.refMu.Unlock()
-
+	admitted := false
 	var once sync.Once
-	return func() {
+	release := func() {
 		once.Do(func() {
 			sm.refMu.Lock()
-			if tracked := sm.sessions[sessionID]; tracked != nil && tracked.inFlight > 0 {
-				tracked.inFlight--
+			tracked.inFlight--
+			if admitted {
+				sm.activeRequests--
+				if sm.activeRequests == 0 && sm.requestsDrained != nil {
+					close(sm.requestsDrained)
+					sm.requestsDrained = nil
+				}
 			}
 			sm.refMu.Unlock()
 		})
 	}
+	defer func() {
+		if !admitted {
+			release()
+		}
+	}()
+	for {
+		sm.mu.RLock()
+		if sm.closed {
+			sm.mu.RUnlock()
+			return nil, ErrSharedClosed
+		}
+		if err := ctx.Err(); err != nil {
+			sm.mu.RUnlock()
+			return nil, &SharedStartingError{Cause: err}
+		}
+		if startup := sm.starting; startup != nil {
+			sm.mu.RUnlock()
+			if err := sm.waitForStartup(ctx, startup); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if sm.spawnErr != nil || channelClosed(sm.downstreamDone) {
+			sm.mu.RUnlock()
+			if _, err := sm.getOrCreateDownstream(ctx); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		break
+	}
+	defer sm.mu.RUnlock()
+	sm.refMu.Lock()
+	if sm.sessions[sessionID] != tracked || tracked.expiring {
+		sm.refMu.Unlock()
+		return nil, ErrSessionNotFound
+	}
+	admitted = true
+	sm.activeRequests++
+	sm.refMu.Unlock()
+	return release, nil
 }
 
 // StartReaper starts the shared upstream-session idle reaper.
@@ -445,23 +623,36 @@ func (sm *SharedSessionManager) reapDownstream() {
 	if sm.refCount != 0 || sm.closed {
 		return
 	}
+	if sm.starting != nil || sm.activeRequests != 0 {
+		sm.armIdleTimerLocked()
+		return
+	}
+	if sm.idleTimer != nil {
+		sm.idleTimer.Stop()
+		sm.idleTimer = nil
+	}
+	sm.spawnErr = nil
+	// A failed startup leaves no process to reap; keep its spawn reason.
+	if sm.downstream == nil {
+		return
+	}
 
 	pid := 0
 	if sm.cmd != nil && sm.cmd.Process != nil {
 		pid = sm.cmd.Process.Pid
 	}
 
-	if sm.downstream != nil {
-		_ = sm.downstream.Close()
-	}
+	ds := sm.downstream
 	sm.downstream = nil
-	sm.spawnErr = nil
 	sm.cmd = nil
-	if sm.idleTimer != nil {
-		sm.idleTimer.Stop()
-		sm.idleTimer = nil
-	}
+	sm.client = nil
+	sm.downstreamDone = nil
+	sm.startedAt = time.Time{}
+	sm.lastSpawnReason = metrics.SpawnReasonIdleReapRespawn
 
+	// Idle teardown has no active requests. Retain the locks through Close so
+	// an arriving admission cannot start a replacement before teardown finishes.
+	_ = ds.Close()
 	sm.logger.Info("idle timeout expired, downstream subprocess reaped",
 		slog.String("event", "shared_session.idle_reaped"),
 		slog.Int("pid", pid),
@@ -476,11 +667,12 @@ func (sm *SharedSessionManager) reapDownstream() {
 // CloseAll terminates the shared downstream subprocess and clears all state.
 func (sm *SharedSessionManager) CloseAll() {
 	sm.mu.Lock()
-	defer sm.mu.Unlock()
 
 	if sm.closed {
+		sm.mu.Unlock()
 		return
 	}
+	sm.lifetimeCancel()
 
 	// Cancel health probe
 	if sm.healthCancel != nil {
@@ -504,15 +696,20 @@ func (sm *SharedSessionManager) CloseAll() {
 	sm.refCount = 0
 	sm.refMu.Unlock()
 
-	// Close downstream
-	if sm.downstream != nil {
-		_ = sm.downstream.Close()
-		sm.downstream = nil
-	}
-
+	ds, startup := sm.downstream, sm.starting
+	sm.downstream = nil
 	sm.client = nil
 	sm.spawnErr = nil
 	sm.cmd = nil
+	sm.startedAt = time.Time{}
+	sm.downstreamDone = nil
+	sm.mu.Unlock()
+	if ds != nil {
+		_ = ds.Close()
+	}
+	if startup != nil {
+		<-startup.done
+	}
 }
 
 // AdmissionStatus returns current admission-control state.
@@ -568,7 +765,12 @@ func (sm *SharedSessionManager) StartHealthProbe(ctx context.Context) {
 	if sm.healthCancel != nil {
 		sm.healthCancel()
 	}
-	sm.healthCtx, sm.healthCancel = context.WithCancel(ctx)
+	if sm.closed {
+		sm.mu.Unlock()
+		return
+	}
+	healthCtx, cancel := context.WithCancel(ctx)
+	sm.healthCtx, sm.healthCancel = healthCtx, cancel
 	sm.mu.Unlock()
 
 	interval := time.Duration(sm.config.HealthCheckInterval)
@@ -582,9 +784,7 @@ func (sm *SharedSessionManager) StartHealthProbe(ctx context.Context) {
 
 		for {
 			select {
-			case <-sm.healthCtx.Done():
-				return
-			case <-ctx.Done():
+			case <-healthCtx.Done():
 				return
 			case <-ticker.C:
 				sm.healthCheck()
@@ -593,18 +793,25 @@ func (sm *SharedSessionManager) StartHealthProbe(ctx context.Context) {
 	}()
 }
 
-// maxConsecutiveHealthCheckTimeouts is the number of consecutive timed-out
-// probes that must fail before a timed-out probe respawns the downstream.
+// maxConsecutiveHealthCheckTimeouts is the consecutive-failure gate for live
+// transports. Threshold recovery still waits for active requests to drain.
 const maxConsecutiveHealthCheckTimeouts = 3
 
 func (sm *SharedSessionManager) healthCheck() {
+	sm.probeMu.Lock()
+	defer sm.probeMu.Unlock()
 	sm.mu.RLock()
 	ds := sm.downstream
 	closed := sm.closed
 	store := sm.reachabilityStore
+	starting := sm.starting
+	healthCtx := sm.healthCtx
+	if healthCtx == nil {
+		healthCtx = sm.lifetimeCtx
+	}
 	sm.mu.RUnlock()
 
-	if closed || ds == nil {
+	if closed || ds == nil || starting != nil || healthCtx.Err() != nil {
 		return
 	}
 
@@ -613,90 +820,73 @@ func (sm *SharedSessionManager) healthCheck() {
 		store.StartProbe(sm.serverName, reachability.DepthSession, attemptedAt)
 	}
 
-	checkCtx, cancel := context.WithTimeout(sm.healthCtx, 5*time.Second)
+	checkCtx, cancel := context.WithTimeout(healthCtx, 5*time.Second)
 	defer cancel()
 
-	if _, err := ds.ListTools(checkCtx, nil); err != nil {
-		if store != nil {
-			store.RecordProbe(sm.serverName, reachability.ProbeResult{
-				Depth:       reachability.DepthSession,
-				AttemptedAt: attemptedAt,
-				Disposition: reachability.DispositionFailure,
-				Error:       err.Error(),
-			})
-		}
-
-		// A probe deadline against a live subprocess is usually transient host
-		// pressure, not a dead downstream. Respawning on the first timeout
-		// would kill in-flight calls across all upstream sessions, so a
-		// timeout respawns only after maxConsecutiveHealthCheckTimeouts
-		// consecutive timed-out probes.
-		if errors.Is(err, context.DeadlineExceeded) {
-			sm.mu.Lock()
-			sm.healthCheckFailures++
-			failures := sm.healthCheckFailures
-			sm.mu.Unlock()
-			if failures < maxConsecutiveHealthCheckTimeouts {
-				sm.logger.Warn("health check timed out, respawn deferred",
-					slog.String("event", "shared_session.health_check_failed"),
-					slog.Int("consecutive_failures", failures),
-					slog.Int("respawn_after", maxConsecutiveHealthCheckTimeouts),
-					slog.String("error", err.Error()),
-				)
-				return
-			}
-		}
-
-		sm.logger.Warn("health check failed, triggering respawn",
-			slog.String("event", "shared_session.health_check_failed"),
-			slog.String("error", err.Error()),
-		)
-
-		// Close the invalidated downstream outside sm.mu: Close drains stdin,
-		// waits, then escalates SIGTERM to SIGKILL and can block ~10s against
-		// a wedged subprocess, and holding mu through it would stall every
-		// session. A Close error does not skip the respawn: the session is
-		// unusable either way.
-		if closeErr := ds.Close(); closeErr != nil {
-			sm.logger.Warn("closing invalidated downstream failed, respawning anyway",
-				slog.String("event", "shared_session.health_check_close_failed"),
-				slog.String("error", closeErr.Error()),
-			)
-		}
-
-		// Invalidate downstream to force respawn
-		sm.mu.Lock()
-		if sm.downstream == ds {
-			sm.downstream = nil
-			sm.spawnErr = errors.New("health check failed")
-		}
-		sm.mu.Unlock()
-
-		// Trigger respawn
-		spawnCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_, _ = sm.getOrCreateDownstream(spawnCtx)
+	_, err := ds.ListTools(checkCtx, nil)
+	if healthCtx.Err() != nil {
 		return
 	}
-
-	sm.mu.Lock()
-	sm.healthCheckFailures = 0
-	sm.mu.Unlock()
-
 	if store != nil {
-		store.RecordProbe(sm.serverName, reachability.ProbeResult{
-			Depth:       reachability.DepthSession,
-			AttemptedAt: attemptedAt,
-			Disposition: reachability.DispositionSuccess,
-		})
+		result := reachability.ProbeResult{Depth: reachability.DepthSession, AttemptedAt: attemptedAt, Disposition: reachability.DispositionSuccess}
+		if err != nil {
+			result.Disposition, result.Error = reachability.DispositionFailure, err.Error()
+		}
+		store.RecordProbe(sm.serverName, result)
 	}
+	sm.mu.Lock()
+	if sm.closed || sm.downstream != ds || sm.starting != nil {
+		sm.mu.Unlock()
+		return
+	}
+	if err == nil {
+		sm.healthCheckFailures = 0
+		sm.mu.Unlock()
+		return
+	}
+	sm.healthCheckFailures++
+	failures := sm.healthCheckFailures
+	transportClosed := channelClosed(sm.downstreamDone) || errors.Is(err, mcp.ErrConnectionClosed)
+	sm.refMu.Lock()
+	active := sm.activeRequests
+	if !transportClosed && failures < maxConsecutiveHealthCheckTimeouts {
+		sm.refMu.Unlock()
+		sm.mu.Unlock()
+		sm.logger.Warn("health check failed, respawn deferred", slog.String("event", "shared_session.health_check_failed"), slog.Int("consecutive_failures", failures), slog.Int("active_requests", active), slog.String("error", err.Error()))
+		return
+	}
+	// Reserve recovery under the same locks as BeginRequest. New application
+	// calls wait for drain and replacement instead of extending the old load.
+	var drain <-chan struct{}
+	if !transportClosed && active != 0 {
+		if sm.requestsDrained == nil {
+			sm.requestsDrained = make(chan struct{})
+		}
+		drain = sm.requestsDrained
+	}
+	sm.startDownstreamLocked(metrics.SpawnReasonHealthRespawn, drain)
+	startup := sm.starting
+	sm.refMu.Unlock()
+	sm.mu.Unlock()
+	sm.logger.Warn("health check failed, recovery reserved", slog.String("event", "shared_session.health_check_failed"), slog.Int("consecutive_failures", failures), slog.Int("active_requests", active), slog.Bool("draining", drain != nil), slog.String("error", err.Error()))
+	<-startup.done
+}
+
+// ProcessStatus returns only live process identity, never arguments or env.
+func (sm *SharedSessionManager) ProcessStatus() (int, time.Time) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sm.downstream == nil || channelClosed(sm.downstreamDone) || sm.cmd == nil || sm.cmd.Process == nil {
+		return 0, time.Time{}
+	}
+	return sm.cmd.Process.Pid, sm.startedAt
 }
 
 // HasDownstream reports whether a downstream session is currently active.
 func (sm *SharedSessionManager) HasDownstream() bool {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
-	return sm.downstream != nil && sm.spawnErr == nil
+	return sm.downstream != nil && sm.spawnErr == nil && !channelClosed(sm.downstreamDone)
 }
 
 // RefCount returns the current upstream refcount.
@@ -710,6 +900,9 @@ func (sm *SharedSessionManager) RefCount() int {
 func (sm *SharedSessionManager) Downstream() *mcp.ClientSession {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
+	if channelClosed(sm.downstreamDone) {
+		return nil
+	}
 	return sm.downstream
 }
 

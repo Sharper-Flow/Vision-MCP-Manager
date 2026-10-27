@@ -84,9 +84,8 @@ func (s *Server) handleV1ServerDetail(w http.ResponseWriter, r *http.Request) {
 //   - registered_seconds: integer seconds since the server was admitted to the
 //     registry (srv.CreatedAt). This is always present.
 //   - uptime_seconds: integer seconds from the supervised process's own clock
-//     (srv.Process.Uptime()). It is JSON null when no managed process is
-//     currently attached (e.g. stdio/lazy-process servers), because the daemon
-//     does not have a single authoritative process age for those transports.
+//     or the shared manager's process start time. It is JSON null when neither
+//     owner has an attached process (including per-session stdio servers).
 func (s *Server) v1ServerEntry(srv *server.ManagedServer, st server.ServerStatus) map[string]any {
 	lifecycle := s.lifecycleSnapshot(st.Name)
 	effective := deriveEffectiveStatus(st.State, lifecycleBackendState(lifecycle), s.reachabilityFor(st.Name), st.Transport.IsReachabilityProbeable(), st.Uptime, s.reachabilityGrace, st.LastError)
@@ -115,6 +114,13 @@ func (s *Server) v1ServerEntry(srv *server.ManagedServer, st server.ServerStatus
 	if s.serverMetricsAccessor != nil {
 		if snap := s.serverMetricsAccessor.ServerMetricsSnapshot(st.Name); snap != nil {
 			entry["session_metrics"] = snap
+			if shared := snap.SharedDownstream; shared != nil {
+				entry["pid"] = shared.PID
+				entry["started_at"] = shared.StartedAt
+				if shared.StartedAt != nil {
+					entry["uptime_seconds"] = int64(time.Since(*shared.StartedAt).Seconds())
+				}
+			}
 		}
 	}
 	if lifecycle != nil {

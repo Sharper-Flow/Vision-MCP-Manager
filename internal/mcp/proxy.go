@@ -546,6 +546,12 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				})
 				return
 			}
+			if cfg.SharedManager != nil {
+				if err := cfg.SharedManager.EnsureReady(r.Context()); err != nil {
+					writeSharedAdmissionFailure(w, r, err)
+					return
+				}
+			}
 		}
 
 		sessionHeader := r.Header.Get("Mcp-Session-Id")
@@ -558,7 +564,15 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			if ps != nil && applicationActivity {
 				ps.touch()
 				if ps.shared && ps.sharedMgr != nil {
-					release := ps.sharedMgr.BeginRequest(ps.downstreamID())
+					release, err := ps.sharedMgr.BeginRequest(r.Context(), ps.downstreamID())
+					if err != nil {
+						if errors.Is(err, session.ErrSessionNotFound) {
+							http.Error(w, "session unavailable", http.StatusNotFound)
+						} else {
+							writeSharedAdmissionFailure(w, r, err)
+						}
+						return
+					}
 					defer release()
 				}
 			}
@@ -606,6 +620,48 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	}
 
 	return resultHandler
+}
+
+// This refusal happens before SDK dispatch, so retrying it cannot duplicate a
+// completed mutation. No tool-result retry policy is changed here.
+func writeSharedAdmissionFailure(w http.ResponseWriter, r *http.Request, err error) {
+	kind, message, retryable := "startup_failed", "shared downstream startup failed; retry admission", true
+	var starting *session.SharedStartingError
+	if errors.As(err, &starting) {
+		kind, message = "starting", starting.Error()
+	}
+	if errors.Is(err, session.ErrSharedClosed) {
+		kind, message, retryable = "closed", "shared session manager is closed", false
+	}
+	reason := "startup_failed"
+	if errors.Is(err, context.DeadlineExceeded) {
+		reason = "deadline_exceeded"
+	} else if errors.Is(err, context.Canceled) {
+		reason = "context_canceled"
+	} else if !retryable {
+		reason = "closed"
+	}
+	// Only the request ID and fixed classifications are exposed. Underlying
+	// startup causes remain wrapped for Go callers, never copied into HTTP.
+	var envelope struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if r.Body != nil {
+		body, readErr := io.ReadAll(r.Body)
+		if readErr == nil {
+			_ = json.Unmarshal(body, &envelope)
+		}
+	}
+	if len(envelope.ID) == 0 {
+		envelope.ID = json.RawMessage("null")
+	}
+	w.Header().Set(gatewayDenialHeader, "shared-"+kind)
+	if retryable {
+		w.Header().Set("Retry-After", "1")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": envelope.ID, "error": map[string]any{"code": -32000, "message": message, "data": map[string]any{"type": kind, "reason": reason, "retryable": retryable}}})
 }
 
 func isInitializeRequest(r *http.Request) bool {
@@ -1217,7 +1273,7 @@ func newSharedModeServer(
 		logger.Info("shared downstream respawned, updated local pointer",
 			slog.String("event", "shared_session.respawn"),
 		)
-		// The manager invokes this under its lock, which must not wait on respawnMu.
+		// Publication must not wait on catalog refresh or respawnMu.
 		go refresh(context.Background())
 	}, refresh)
 

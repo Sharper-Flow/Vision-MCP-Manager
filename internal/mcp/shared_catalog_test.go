@@ -132,6 +132,13 @@ func TestProxyHandler_SharedCatalogRefresh(t *testing.T) {
 				if err := sm.Downstream().Close(); err != nil {
 					t.Fatal(err)
 				}
+				// Closure reaches the manager through its asynchronous Wait observer.
+				for sm.HasDownstream() {
+					if ctx.Err() != nil {
+						t.Fatal("manager did not observe downstream closure")
+					}
+					time.Sleep(time.Millisecond)
+				}
 				if _, err := sm.GetOrCreateSession(ctx, "fixture"); err != nil {
 					t.Fatal(err)
 				}

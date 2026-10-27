@@ -5,6 +5,7 @@ package metrics
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Snapshot holds a point-in-time copy of daemon metrics.
@@ -69,11 +70,27 @@ func (m *DaemonMetrics) Snapshot() Snapshot {
 
 // ServerMetricsSnapshot holds a point-in-time copy of per-server metrics.
 type ServerMetricsSnapshot struct {
-	ActiveSessions       int64            `json:"active_sessions"`
-	ReapedByReason       map[string]int64 `json:"reaped_by_reason"`
-	AdmissionDenied      int64            `json:"admission_denied"`
-	BackendHeaderTimeout int64            `json:"backend_header_timeout"`
+	ActiveSessions       int64                     `json:"active_sessions"`
+	ReapedByReason       map[string]int64          `json:"reaped_by_reason"`
+	AdmissionDenied      int64                     `json:"admission_denied"`
+	BackendHeaderTimeout int64                     `json:"backend_header_timeout"`
+	SpawnedByReason      map[string]int64          `json:"spawned_by_reason"`
+	SharedDownstream     *SharedDownstreamSnapshot `json:"shared_downstream,omitempty"`
 }
+
+// SharedDownstreamSnapshot is a secret-safe read-time projection from the
+// shared manager. A stopped or starting process has PID 0 and a null start time.
+type SharedDownstreamSnapshot struct {
+	PID       int        `json:"pid"`
+	StartedAt *time.Time `json:"started_at"`
+}
+
+const (
+	SpawnReasonFirstUse        = "first_use"
+	SpawnReasonIdleReapRespawn = "idle_reap_respawn"
+	SpawnReasonHealthRespawn   = "health_respawn"
+	SpawnReasonLookupRespawn   = "lookup_respawn"
+)
 
 const (
 	ReapReasonClientDisconnected = "client_disconnected"
@@ -96,8 +113,9 @@ type ServerMetrics struct {
 	admissionDenied      atomic.Int64
 	backendHeaderTimeout atomic.Int64
 
-	mu             sync.Mutex
-	reapedByReason map[string]int64
+	mu              sync.Mutex
+	reapedByReason  map[string]int64
+	spawnedByReason map[string]int64
 }
 
 // ServerMetricsReporter decouples consumers from concrete ServerMetrics.
@@ -107,12 +125,14 @@ type ServerMetricsReporter interface {
 	DecActiveSessions()
 	IncAdmissionDenied()
 	IncReaped(reason string)
+	IncSpawned(reason string)
 }
 
 // NewServerMetrics creates a new zeroed ServerMetrics.
 func NewServerMetrics() *ServerMetrics {
 	return &ServerMetrics{
-		reapedByReason: make(map[string]int64),
+		reapedByReason:  make(map[string]int64),
+		spawnedByReason: map[string]int64{SpawnReasonFirstUse: 0, SpawnReasonIdleReapRespawn: 0, SpawnReasonHealthRespawn: 0, SpawnReasonLookupRespawn: 0},
 	}
 }
 
@@ -142,6 +162,19 @@ func (m *ServerMetrics) IncReaped(reason string) {
 	reason = NormalizeReapReason(reason)
 	m.mu.Lock()
 	m.reapedByReason[reason]++
+	m.mu.Unlock()
+}
+
+// IncSpawned counts actual shared process starts, including a process whose
+// initialization later fails. Fixed keys prevent credential/cardinality leaks.
+func (m *ServerMetrics) IncSpawned(reason string) {
+	switch reason {
+	case SpawnReasonFirstUse, SpawnReasonIdleReapRespawn, SpawnReasonHealthRespawn, SpawnReasonLookupRespawn:
+	default:
+		return
+	}
+	m.mu.Lock()
+	m.spawnedByReason[reason]++
 	m.mu.Unlock()
 }
 
@@ -181,6 +214,10 @@ func (m *ServerMetrics) Snapshot() ServerMetricsSnapshot {
 	for k, v := range m.reapedByReason {
 		reaped[k] = v
 	}
+	spawned := make(map[string]int64, len(m.spawnedByReason))
+	for k, v := range m.spawnedByReason {
+		spawned[k] = v
+	}
 	m.mu.Unlock()
 
 	return ServerMetricsSnapshot{
@@ -188,5 +225,6 @@ func (m *ServerMetrics) Snapshot() ServerMetricsSnapshot {
 		ReapedByReason:       reaped,
 		AdmissionDenied:      m.admissionDenied.Load(),
 		BackendHeaderTimeout: m.backendHeaderTimeout.Load(),
+		SpawnedByReason:      spawned,
 	}
 }

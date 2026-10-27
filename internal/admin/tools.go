@@ -1421,10 +1421,11 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 
 // MetricsResponse is the response for vision_metrics.
 type MetricsResponse struct {
-	SessionsActive     int64 `json:"sessions_active"`
-	ToolCallsTotal     int64 `json:"tool_calls_total"`
-	ErrorsTotal        int64 `json:"errors_total"`
-	SubprocessesActive int64 `json:"subprocesses_active"`
+	SessionsActive     int64                                     `json:"sessions_active"`
+	ToolCallsTotal     int64                                     `json:"tool_calls_total"`
+	ErrorsTotal        int64                                     `json:"errors_total"`
+	SubprocessesActive int64                                     `json:"subprocesses_active"`
+	Servers            map[string]*metrics.ServerMetricsSnapshot `json:"servers"`
 }
 
 // toolMetrics implements vision_metrics.
@@ -1434,11 +1435,20 @@ func (s *Server) toolMetrics(_ context.Context, _ json.RawMessage) (*ToolCallRes
 		snap = s.Metrics.Snapshot()
 	}
 
+	servers := make(map[string]*metrics.ServerMetricsSnapshot)
+	if s.registry != nil && s.serverMetricsAccessor != nil {
+		for _, srv := range s.registry.List() {
+			if snapshot := s.serverMetricsAccessor.ServerMetricsSnapshot(srv.Name); snapshot != nil {
+				servers[srv.Name] = snapshot
+			}
+		}
+	}
 	return jsonToolResult(MetricsResponse{
 		SessionsActive:     snap.SessionsActive,
 		ToolCallsTotal:     snap.ToolCallsTotal,
 		ErrorsTotal:        snap.ErrorsTotal,
 		SubprocessesActive: snap.SubprocessesActive,
+		Servers:            servers,
 	})
 }
 
