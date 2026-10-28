@@ -1,0 +1,12 @@
+{
+  "kind": "go_top_level_v1",
+  "package_cwd": "internal/admin",
+  "test_files": ["internal/admin/output_schema_test.go"],
+  "fixture_files": [],
+  "cases": {
+    "case:admin-schemas": ["TestAdminOutputSchemas"],
+    "case:admin-parity": ["TestAdminOutputParity"],
+    "case:admin-wire": ["TestAdminOutputWire"],
+    "case:admin-scrubbing": ["TestAdminOutputScrubbing"]
+  }
+}
