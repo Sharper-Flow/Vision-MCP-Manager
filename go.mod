@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.12
 
 require (
+	github.com/google/jsonschema-go v0.4.2
 	github.com/spf13/cobra v1.10.2
 	github.com/tailscale/hujson v0.0.0-20260718110524-10d7940d4c87
 	github.com/thejerf/suture/v4 v4.0.6
@@ -12,7 +13,6 @@ require (
 )
 
 require (
-	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.3 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect

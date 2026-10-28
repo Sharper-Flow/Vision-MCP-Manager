@@ -20,6 +20,7 @@ import (
 	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/tailscale/hujson"
 )
@@ -28,9 +29,10 @@ import (
 
 // Tool represents an MCP tool definition.
 type Tool struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	InputSchema InputSchema `json:"inputSchema"`
+	Name         string             `json:"name"`
+	Description  string             `json:"description"`
+	InputSchema  InputSchema        `json:"inputSchema"`
+	OutputSchema *jsonschema.Schema `json:"outputSchema"`
 }
 
 // InputSchema defines the JSON schema for tool inputs.
@@ -57,6 +59,7 @@ func (s *Server) getTools() []Tool {
 				Type:       "object",
 				Properties: map[string]Property{},
 			},
+			OutputSchema: outputSchemaFor[ListResponse](),
 		},
 		{
 			Name:        "vision_add",
@@ -76,6 +79,7 @@ func (s *Server) getTools() []Tool {
 				},
 				Required: []string{"name"},
 			},
+			OutputSchema: outputSchemaFor[AddResponse](),
 		},
 		{
 			Name:        "vision_remove",
@@ -90,6 +94,7 @@ func (s *Server) getTools() []Tool {
 				},
 				Required: []string{"name"},
 			},
+			OutputSchema: outputSchemaFor[RemoveResponse](),
 		},
 		{
 			Name:        "vision_restart",
@@ -104,6 +109,7 @@ func (s *Server) getTools() []Tool {
 				},
 				Required: []string{"name"},
 			},
+			OutputSchema: outputSchemaFor[RestartResponse](),
 		},
 		{
 			Name:        "vision_search",
@@ -121,6 +127,7 @@ func (s *Server) getTools() []Tool {
 					},
 				},
 			},
+			OutputSchema: outputSchemaFor[SearchResponse](),
 		},
 		{
 			Name:        "vision_init",
@@ -139,6 +146,7 @@ func (s *Server) getTools() []Tool {
 				},
 				Required: []string{"path"},
 			},
+			OutputSchema: outputSchemaFor[InitResponse](),
 		},
 		{
 			Name:        "vision_status",
@@ -147,6 +155,7 @@ func (s *Server) getTools() []Tool {
 				Type:       "object",
 				Properties: map[string]Property{},
 			},
+			OutputSchema: outputSchemaFor[StatusResponse](),
 		},
 		{
 			Name:        "vision_guidance",
@@ -164,6 +173,7 @@ func (s *Server) getTools() []Tool {
 					},
 				},
 			},
+			OutputSchema: outputSchemaFor[GuidanceResponse](),
 		},
 		{
 			Name:        "vision_slot_status",
@@ -172,6 +182,7 @@ func (s *Server) getTools() []Tool {
 				Type:       "object",
 				Properties: map[string]Property{},
 			},
+			OutputSchema: outputSchemaFor[SlotStatusResponse](),
 		},
 		{
 			Name:        "vision_metrics",
@@ -180,14 +191,16 @@ func (s *Server) getTools() []Tool {
 				Type:       "object",
 				Properties: map[string]Property{},
 			},
+			OutputSchema: outputSchemaFor[MetricsResponse](),
 		},
 	}
 }
 
 // ToolCallResult is the response to tools/call.
 type ToolCallResult struct {
-	Content []ToolContent `json:"content"`
-	IsError bool          `json:"isError,omitempty"`
+	Content           []ToolContent `json:"content"`
+	StructuredContent any           `json:"structuredContent,omitempty"`
+	IsError           bool          `json:"isError,omitempty"`
 }
 
 // ToolContent is a single piece of content in a tool result.
@@ -209,9 +222,10 @@ func (s *Server) registerTools(server *mcp.Server) {
 		}
 
 		server.AddTool(&mcp.Tool{
-			Name:        tool.Name,
-			Description: tool.Description,
-			InputSchema: schema,
+			Name:         tool.Name,
+			Description:  tool.Description,
+			InputSchema:  schema,
+			OutputSchema: tool.OutputSchema,
 		}, s.toolHandler(tool.Name))
 	}
 }
@@ -257,8 +271,9 @@ func toMCPToolResult(result *ToolCallResult) *mcp.CallToolResult {
 	}
 
 	return &mcp.CallToolResult{
-		Content: content,
-		IsError: result.IsError,
+		Content:           content,
+		StructuredContent: result.StructuredContent,
+		IsError:           result.IsError,
 	}
 }
 
@@ -408,17 +423,7 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 	// Populate slot_groups from daemon config (additive — does not alter servers).
 	response.SlotGroups = s.buildSlotGroups()
 
-	// Serialize to JSON
-	jsonBytes, err := json.Marshal(response)
-	if err != nil {
-		return nil, fmt.Errorf("failed to serialize response: %w", err)
-	}
-
-	return &ToolCallResult{
-		Content: []ToolContent{
-			{Type: "text", Text: string(jsonBytes)},
-		},
-	}, nil
+	return jsonToolResult(response)
 }
 
 func (s *Server) lifecycleSnapshot(name string) *SessionLifecycleSnapshot {
@@ -718,6 +723,7 @@ func jsonToolResult(v interface{}) (*ToolCallResult, error) {
 		Content: []ToolContent{
 			{Type: "text", Text: string(jsonBytes)},
 		},
+		StructuredContent: json.RawMessage(jsonBytes),
 	}, nil
 }
 
