@@ -1,3 +1,14 @@
+---
+{
+  "id": "VSN-0001",
+  "title": "Vision streamable MCP transport contract",
+  "authority": {"tier": "derived"},
+  "home_domain_id": "product-root:vision",
+  "applies_to_domain_ids": [],
+  "product_wide_rationale": "The specification governs the transport boundary shared by Vision's daemon, session manager, supervisor, and agent-facing proxy. No child Domain exists yet to own this cross-cutting contract."
+}
+---
+
 # Mcp Streamable Transport
 
 > **Version:** 1.0.2
