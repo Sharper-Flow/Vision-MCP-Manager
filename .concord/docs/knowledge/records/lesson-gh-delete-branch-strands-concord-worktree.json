@@ -2,7 +2,7 @@
   "date": "2026-09-19T00:00:00Z",
   "id": "lesson-gh-delete-branch-strands-concord-worktree",
   "kind": "lesson",
-  "path": "docs/lessons/2026-09-19-never-pass-delete-branch-to-gh-pr-merge-while-a.md",
+  "path": ".concord/docs/lessons/2026-09-19-never-pass-delete-branch-to-gh-pr-merge-while-a.md",
   "scopes": {
     "domain_ids": [],
     "mode": "explicit",
