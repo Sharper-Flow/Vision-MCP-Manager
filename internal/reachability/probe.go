@@ -20,6 +20,8 @@ const (
 	// relative to the free listener probe.
 	EndToEndProbeIntervalMultiple = 10
 	probeTimeout                  = 5 * time.Second
+	// A deep probe may cold-start an idle-reaped backend and discover its tools.
+	endToEndProbeTimeout = 30 * time.Second
 )
 
 // Target identifies the local Vision listener to probe. ProtocolVersion is
@@ -320,7 +322,11 @@ func runEndToEndProbe(ctx context.Context, store *Store, logger *slog.Logger, ta
 func runProbeAtDepth(ctx context.Context, store *Store, logger *slog.Logger, target Target, probe Probe, depth Depth) {
 	attemptedAt := time.Now()
 	store.StartProbe(target.Name, depth, attemptedAt)
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	timeout := probeTimeout
+	if depth == DepthEndToEnd {
+		timeout = endToEndProbeTimeout
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	attempt := probe.Probe(probeCtx, target)
 	cancel()
 	switch attempt.Disposition {
