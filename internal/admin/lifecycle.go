@@ -186,3 +186,30 @@ func (s *Server) reachabilityFor(name string) reachability.Reachability {
 	value, _ := s.reachabilityStore.Get(name)
 	return value
 }
+
+// fleetProblems is the one fleet verdict behind /health and vision_status:
+// "name: reason" for every server whose effective status is error or
+// starting. A stopped server is off by operator choice — failures project to
+// error — so it does not make the fleet unhealthy.
+func (s *Server) fleetProblems() []string {
+	if s.registry == nil {
+		return nil
+	}
+	var problems []string
+	for _, srv := range s.registry.List() {
+		status := srv.Status()
+		effective := deriveEffectiveStatus(
+			status.State,
+			lifecycleBackendState(s.lifecycleSnapshot(status.Name)),
+			s.reachabilityFor(status.Name),
+			status.Transport.IsReachabilityProbeable(),
+			status.Uptime,
+			s.reachabilityGrace,
+			status.LastError,
+		)
+		if effective.Status == "error" || effective.Status == "starting" {
+			problems = append(problems, fmt.Sprintf("%s: %s", status.Name, effective.Reason))
+		}
+	}
+	return problems
+}

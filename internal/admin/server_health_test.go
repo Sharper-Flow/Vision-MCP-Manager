@@ -195,3 +195,58 @@ func reachableHealthTestValue() reachability.Reachability {
 		},
 	}
 }
+
+// /health and vision_status share one verdict: only error and starting
+// servers make the fleet unhealthy; a deliberately stopped server does not.
+func TestHealthAndToolStatusAgreeOnFleetVerdict(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       server.State
+		wantHealthy bool
+	}{
+		{name: "stopped", state: server.StateStopped, wantHealthy: true},
+		{name: "failed", state: server.StateFailed, wantHealthy: false},
+		{name: "starting", state: server.StateStarting, wantHealthy: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newTestRegistry()
+			for _, name := range []string{"up", "subject"} {
+				if err := reg.Add(name, &config.ServerConfig{Transport: config.TransportStdio}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			up := reg.Get("up")
+			up.State = server.StateRunning
+			up.StartedAt = time.Now()
+			reg.Get("subject").State = tc.state
+
+			store := reachability.NewStore()
+			store.RecordProbe("up", reachability.ProbeResult{
+				Depth:       reachability.DepthListener,
+				Disposition: reachability.DispositionSuccess,
+				AttemptedAt: time.Now(),
+			})
+			s := &Server{registry: reg, running: true, reachabilityStore: store, reachabilityGrace: time.Minute}
+
+			body := callHealth(t, s)
+			wantStatus := "degraded"
+			if tc.wantHealthy {
+				wantStatus = "ok"
+			}
+			if body["status"] != wantStatus {
+				t.Fatalf("/health status=%v, want %q; body=%v", body["status"], wantStatus, body)
+			}
+
+			result, err := s.toolStatus(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response StatusResponse
+			decodeToolJSON(t, result, &response)
+			if response.Healthy != tc.wantHealthy {
+				t.Fatalf("vision_status healthy=%v, want %v; /health=%v", response.Healthy, tc.wantHealthy, body)
+			}
+		})
+	}
+}

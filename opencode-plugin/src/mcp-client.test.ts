@@ -21,10 +21,10 @@ describe("MCP client session lifecycle (integration, live daemon required)", () 
       // rejecting, so a failed round-trip must be caught explicitly.
       expect(parsed.error).toBeUndefined()
 
-      // vision_status returns StatusResponse. `healthy` is a readiness flag: it
-      // is false whenever any registered server is not running, including one
-      // deliberately configured autostart:false. Assert the payload shape the
-      // round-trip must produce, not a particular health verdict.
+      // vision_status returns StatusResponse. `healthy` is false while any
+      // server is in error or starting, which depends on the live fleet.
+      // Assert the payload shape the round-trip must produce, not a
+      // particular health verdict.
       expect(typeof parsed.healthy).toBe("boolean")
       expect(typeof parsed.uptime).toBe("string")
       expect(typeof parsed.memory_mb).toBe("number")

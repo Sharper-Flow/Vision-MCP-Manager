@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -233,26 +234,35 @@ func showDaemonStatus() error {
 		_ = json.NewEncoder(os.Stdout).Encode(daemonStatusPayload(running, pid, health))
 		return nil
 	}
-
-	if running {
-		fmt.Printf("Daemon is running (PID %d)\n", pid)
-		if health != nil {
-			fmt.Printf("  Status: %v\n", health["status"])
-			// Presence-guarded so version skew (new CLI, old daemon whose
-			// /health lacks the field) renders no line at all rather than
-			// the fabricated "Uptime: <nil>".
-			if up, ok := health["uptime"]; ok && up != nil {
-				fmt.Printf("  Uptime: %v\n", up)
-			}
-			if memory, ok := health["memory_mb"]; ok && memory != nil {
-				fmt.Printf("  Memory: %.1f MB\n", memory)
-			}
-		}
-	} else {
-		fmt.Println("Daemon is not running")
-	}
-
+	writeDaemonStatus(os.Stdout, running, pid, health)
 	return nil
+}
+
+// writeDaemonStatus renders the text form of `vision daemon status`. Each
+// /health field prints only when present, so a newer CLI against an older
+// daemon omits a line instead of printing "<nil>".
+func writeDaemonStatus(w io.Writer, running bool, pid int, health map[string]interface{}) {
+	if !running {
+		_, _ = fmt.Fprintln(w, "Daemon is not running")
+		return
+	}
+	_, _ = fmt.Fprintf(w, "Daemon is running (PID %d)\n", pid)
+	if health == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "  Status: %v\n", health["status"])
+	if up, ok := health["uptime"]; ok && up != nil {
+		_, _ = fmt.Fprintf(w, "  Uptime: %v\n", up)
+	}
+	if memory, ok := health["memory_mb"]; ok && memory != nil {
+		_, _ = fmt.Fprintf(w, "  Memory: %.1f MB\n", memory)
+	}
+	if problems, ok := health["errors"].([]interface{}); ok && len(problems) > 0 {
+		_, _ = fmt.Fprintln(w, "  Servers needing attention:")
+		for _, problem := range problems {
+			_, _ = fmt.Fprintf(w, "    %v\n", problem)
+		}
+	}
 }
 
 func daemonStatusPayload(running bool, pid int, health map[string]interface{}) map[string]interface{} {
@@ -271,6 +281,9 @@ func daemonStatusPayload(running bool, pid int, health map[string]interface{}) m
 	}
 	if memory, ok := health["memory_mb"]; ok && memory != nil {
 		payload["memory_mb"] = memory
+	}
+	if problems, ok := health["errors"]; ok && problems != nil {
+		payload["errors"] = problems
 	}
 	return payload
 }

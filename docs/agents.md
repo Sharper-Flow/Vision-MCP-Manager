@@ -16,7 +16,7 @@ By giving an agent access to Vision's Admin port, you empower it to maintain its
 | Tool | Purpose |
 | :--- | :--- |
 | `vision_list` | Shows all configured servers and their effective status: `running`, `starting`, `stopped`, or `error`. See [Configuration Reference](CONFIGURATION.md) for lifecycle configuration. |
-| `vision_status` | Returns daemon uptime and memory usage. |
+| `vision_status` | Returns daemon uptime, memory usage, server counts, and `healthy`, which is false while any server is `error` or `starting`. |
 | `vision_remove` | Decommissions an existing server. |
 | `vision_restart` | Restarts a configured server without changing its port assignment. |
 | `vision_guidance` | Provides hints on which tools to prefer for specific tasks. |

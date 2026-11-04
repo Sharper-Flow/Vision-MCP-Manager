@@ -1087,23 +1087,8 @@ func (s *Server) toolStatus(ctx context.Context, args json.RawMessage) (*ToolCal
 		registryStatus = s.registry.Status()
 	}
 
-	// A live process is not sufficient evidence of health. Keep this aggregate
-	// aligned with the per-server precedence table so unprobed and probing
-	// servers cannot be reported healthy by vision_status.
-	healthy := true
-	if s.registry != nil {
-		for _, srv := range s.registry.List() {
-			status := srv.Status()
-			effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
-			if effective.Status != "running" {
-				healthy = false
-				break
-			}
-		}
-	}
-
 	response := StatusResponse{
-		Healthy: healthy,
+		Healthy: len(s.fleetProblems()) == 0,
 		Uptime:  uptime.Round(time.Second).String(),
 		Servers: StatusServers{
 			Running: registryStatus.RunningServers,
