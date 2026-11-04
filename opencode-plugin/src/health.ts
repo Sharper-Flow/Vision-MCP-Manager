@@ -4,16 +4,14 @@
  * Provides health checking for the Vision daemon on port 6275.
  * Used to determine if the daemon is running before attempting MCP calls.
  *
- * Contract source: internal/admin/server.go handleHealth (lines 207-251).
- * Port 6275 serves the Admin MCP. It replaced a legacy REST API that returned
- * {"status":"healthy","uptime":...}; the removal is recorded in
- * internal/daemon/daemon.go:194. Responses are:
+ * Contract source: internal/admin/server.go handleHealth. Responses are:
  *
- *   200 {"status":"ok"}                          daemon up, all servers fine
- *   200 {"status":"degraded","errors":[...]}     daemon up, servers failed or await first probe
- *   503 {"status":"unhealthy"}                   daemon not running
+ *   200 {"status":"ok",...}                       no server in error or starting
+ *   200 {"status":"degraded","errors":[...],...}  some server in error or starting
+ *   503 {"status":"unhealthy"}                    admin server not running
  *
- * Neither `uptime` nor `port` is ever returned.
+ * 200 responses also carry `uptime` and `memory_mb`; this check reads only
+ * `status` and `errors`.
  */
 
 import { getVisionHealthTimeoutMs } from "./timeouts"
