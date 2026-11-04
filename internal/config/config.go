@@ -233,41 +233,37 @@ func Save(cfg *Config, path string) error {
 	header := "# Vision Server Registry\n# See: https://github.com/Sharper-Flow/Vision-MCP-Manager\n\n"
 	fullData := []byte(header + string(data))
 
-	// Write atomically: create temp file, write, rename
-	dir := filepath.Dir(path)
-	tmpFile, err := os.CreateTemp(dir, ".vision-config-*.yaml")
+	return writeFileAtomic(path, fullData, 0600)
+}
+
+// writeFileAtomic writes data to a temp file in path's directory with perm,
+// then renames it over path.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), ".vision-config-*.yaml")
 	if err != nil {
 		return fmt.Errorf("config: create temp file: %w", err)
 	}
 	tmpPath := tmpFile.Name()
-
-	// Clean up temp file on error
 	defer func() {
-		_ = os.Remove(tmpPath)
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
 	}()
 
-	if _, err := tmpFile.Write(fullData); err != nil {
+	if _, err := tmpFile.Write(data); err != nil {
 		_ = tmpFile.Close()
 		return fmt.Errorf("config: write temp file: %w", err)
 	}
-
 	if err := tmpFile.Close(); err != nil {
 		return fmt.Errorf("config: close temp file: %w", err)
 	}
-
-	// Set appropriate permissions
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := os.Chmod(tmpPath, perm); err != nil {
 		return fmt.Errorf("config: chmod temp file: %w", err)
 	}
-
-	// Atomic rename
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("config: rename temp file: %w", err)
 	}
-
-	// Clear tmpPath so deferred cleanup doesn't remove the final file
 	tmpPath = ""
-
 	return nil
 }
 
