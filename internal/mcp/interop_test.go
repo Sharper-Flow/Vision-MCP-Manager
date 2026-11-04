@@ -119,7 +119,7 @@ func TestInterop_StructuredErrorOnDownstreamFailure(t *testing.T) {
 		mgr.CloseAll()
 	})
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "structured-fallback-test", Version: "1.0.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "structured-error-test", Version: "1.0.0"}, nil)
 	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
