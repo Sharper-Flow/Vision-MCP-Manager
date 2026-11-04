@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDaemonStatusPayloadIncludesHealthUptime(t *testing.T) {
 	payload := daemonStatusPayload(true, 1234, map[string]interface{}{
@@ -40,16 +43,40 @@ func TestDaemonStatusPayloadOmitsMissingHealthMemory(t *testing.T) {
 	}
 }
 
-func TestShowDaemonStatusTextNeverPrintsNilUptimeUnderVersionSkew(t *testing.T) {
-	// Old daemons predate the /health uptime field. The text renderer must
-	// omit the line entirely rather than print "Uptime: <nil>".
-	health := map[string]interface{}{"status": "ok"} // uptime key absent
-	if up, ok := health["uptime"]; ok && up != nil {
-		t.Fatalf("unexpected uptime %v for absent key", up)
+func TestWriteDaemonStatusOmitsAbsentFieldsUnderVersionSkew(t *testing.T) {
+	// Old daemons predate the /health uptime and memory fields.
+	var out strings.Builder
+	writeDaemonStatus(&out, true, 1234, map[string]interface{}{"status": "ok"})
+	want := "Daemon is running (PID 1234)\n  Status: ok\n"
+	if out.String() != want {
+		t.Fatalf("output = %q, want %q", out.String(), want)
 	}
-	// The guard expression itself is the contract: absent key -> no line.
-	// Exhaustiveness is enforced by the linter-free equivalence below.
-	if _, printed := func() (interface{}, bool) { up, ok := health["uptime"]; return up, ok && up != nil }(); printed {
-		t.Fatal("absent uptime key must not print")
+}
+
+func TestWriteDaemonStatusListsDegradedServers(t *testing.T) {
+	var out strings.Builder
+	writeDaemonStatus(&out, true, 1234, map[string]interface{}{
+		"status":    "degraded",
+		"uptime":    "5s",
+		"memory_mb": 40.7,
+		"errors":    []interface{}{"exa: probe failure at listener", "kagi: process failed"},
+	})
+	want := "Daemon is running (PID 1234)\n" +
+		"  Status: degraded\n" +
+		"  Uptime: 5s\n" +
+		"  Memory: 40.7 MB\n" +
+		"  Servers needing attention:\n" +
+		"    exa: probe failure at listener\n" +
+		"    kagi: process failed\n"
+	if out.String() != want {
+		t.Fatalf("output = %q, want %q", out.String(), want)
+	}
+}
+
+func TestDaemonStatusPayloadIncludesHealthErrors(t *testing.T) {
+	problems := []interface{}{"exa: probe failure at listener"}
+	payload := daemonStatusPayload(true, 1234, map[string]interface{}{"status": "degraded", "errors": problems})
+	if got, ok := payload["errors"].([]interface{}); !ok || len(got) != 1 || got[0] != problems[0] {
+		t.Fatalf("errors = %#v, want %#v", payload["errors"], problems)
 	}
 }

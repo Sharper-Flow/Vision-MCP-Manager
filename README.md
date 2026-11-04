@@ -319,7 +319,7 @@ High-agency doesn't mean black-box. Vision gives you:
 vision daemon start        # Start in foreground
 vision daemon start -d     # Start daemonized
 vision daemon stop         # Graceful shutdown
-vision daemon status       # Health, uptime, memory
+vision daemon status       # Health, uptime, memory, failing servers
 vision daemon reload       # Hot-reload config (SIGHUP)
 ```
 

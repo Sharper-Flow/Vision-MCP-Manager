@@ -200,7 +200,8 @@ func (s *Server) Port() int {
 
 // handleHealth handles GET /health - detailed health status.
 // Returns {"status": "ok", "uptime": ...} when healthy, or
-// {"status": "degraded", "errors": [...], "uptime": ...} when servers have errors.
+// {"status": "degraded", "errors": [...], "uptime": ...} when fleetProblems
+// reports any server.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	running := s.running
@@ -223,26 +224,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	memoryMB := daemonMemoryMB()
 
-	// Project every server through the shared effective-status precedence table.
-	var errors []string
-	if s.registry != nil {
-		for _, srv := range s.registry.List() {
-			status := srv.Status()
-			lifecycle := s.lifecycleSnapshot(status.Name)
-			effective := deriveEffectiveStatus(
-				status.State,
-				lifecycleBackendState(lifecycle),
-				s.reachabilityFor(status.Name),
-				status.Transport.IsReachabilityProbeable(),
-				status.Uptime,
-				s.reachabilityGrace,
-				status.LastError,
-			)
-			if effective.Status == "error" || effective.Status == "starting" {
-				errors = append(errors, fmt.Sprintf("%s: %s", status.Name, effective.Reason))
-			}
-		}
-	}
+	errors := s.fleetProblems()
 
 	w.Header().Set("Content-Type", "application/json")
 	if len(errors) > 0 {

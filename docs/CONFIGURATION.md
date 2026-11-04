@@ -320,6 +320,12 @@ Server and slot responses also include `reachability`, `probe_depth`,
 managed server awaits its first probe, aggregate `/health` reports `degraded`
 and `vision_status.healthy` is `false`.
 
+`/health`, `vision_status.healthy`, and `vision daemon status` share one fleet
+verdict: unhealthy exactly when some server's effective status is `error` or
+`starting`. A `stopped` server, such as one with `autostart: false`, does not
+count. When degraded, `vision daemon status` lists each such server with its
+reason.
+
 #### Native HTTP server (proxy mode)
 
 ```yaml
