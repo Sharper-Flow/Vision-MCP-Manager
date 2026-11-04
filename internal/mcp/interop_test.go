@@ -106,7 +106,7 @@ func TestInterop_StructuredErrorOnDownstreamFailure(t *testing.T) {
 		SessionTimeout: config.Duration(30 * time.Second),
 		MaxSessions:    5,
 	}
-	mgr := session.NewManager("interop-structured-fallback", cfg, logger)
+	mgr := session.NewManager("interop-structured-error", cfg, logger)
 
 	handler := NewProxyHandler(ProxyConfig{
 		ServerName:     "kagi",
@@ -132,7 +132,7 @@ func TestInterop_StructuredErrorOnDownstreamFailure(t *testing.T) {
 
 	// Force the next respawn to fail after the initial healthy subprocess has
 	// been closed. This creates a deterministic downstream availability failure.
-	cfg.Command = "vision-missing-command-for-structured-fallback-test"
+	cfg.Command = "vision-missing-command-for-structured-error-test"
 	for _, id := range mgr.Sessions() {
 		if err := mgr.RemoveSession(id); err != nil {
 			t.Fatalf("RemoveSession(%s): %v", id, err)

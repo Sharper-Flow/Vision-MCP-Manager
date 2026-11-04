@@ -179,7 +179,7 @@ servers:
 
 `--browser chromium` selects Playwright-managed Chrome for Testing; headless mode uses the matching headless shell. The default MCP browser channel is branded Chrome and fails when `/opt/google/chrome/chrome` is absent. Prefer channel selection over hardcoded `--executable-path`.
 
-### Structured Fallback Suggestions
+### Availability Failure Results
 
 Availability failures are returned as visible tool results, not JSON-RPC
 protocol errors. This follows the MCP SDK guidance that tool-originated errors
