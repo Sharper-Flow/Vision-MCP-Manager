@@ -45,6 +45,12 @@ func TestRemoveServer_EditsOnlyTheEntry(t *testing.T) {
 			want:   "servers:\r\n  b:\r\n    command: y\r\n",
 		},
 		{
+			name:   "later document and end marker stay",
+			remove: "b",
+			before: "servers:\n  a:\n    command: x\n  b:\n    command: y\n...\n---\nother: doc\n",
+			want:   "servers:\n  a:\n    command: x\n...\n---\nother: doc\n",
+		},
+		{
 			name:   "file without trailing newline",
 			remove: "b",
 			before: "servers:\n  a:\n    command: x\n  b:\n    command: y",
@@ -80,6 +86,7 @@ func TestRemoveServer_LeavesFileUntouched(t *testing.T) {
 	}{
 		{name: "absent entry", remove: "missing", content: "servers:\n  a:\n    command: x\n"},
 		{name: "no servers key", remove: "a", content: "security: {}\n"},
+		{name: "absent entry in flow servers mapping", remove: "missing", content: "servers: {a: {command: x}}\n"},
 		{name: "flow servers mapping", remove: "a", content: "servers: {a: {command: x}, b: {command: y}}\n", wantErr: ErrUnsupportedEdit},
 		{name: "entry anchors an alias used elsewhere", remove: "a", content: "servers:\n  a: &shared\n    command: x\n  b: *shared\n", wantErr: ErrUnsupportedEdit},
 	}

@@ -78,10 +78,6 @@ func removeServerLines(data []byte, name string) ([]byte, bool, error) {
 	if servers.Kind != yaml.MappingNode {
 		return nil, false, nil
 	}
-	if servers.Style&yaml.FlowStyle != 0 {
-		return nil, false, fmt.Errorf("%w: servers is a flow mapping", ErrUnsupportedEdit)
-	}
-
 	entryAt := -1
 	for i := 0; i+1 < len(servers.Content); i += 2 {
 		if servers.Content[i].Value == name {
@@ -91,6 +87,9 @@ func removeServerLines(data []byte, name string) ([]byte, bool, error) {
 	}
 	if entryAt < 0 {
 		return nil, false, nil
+	}
+	if servers.Style&yaml.FlowStyle != 0 {
+		return nil, false, fmt.Errorf("%w: servers is a flow mapping", ErrUnsupportedEdit)
 	}
 
 	lines := strings.SplitAfter(string(data), "\n")
@@ -106,6 +105,14 @@ func removeServerLines(data []byte, name string) ([]byte, bool, error) {
 		end = servers.Content[entryAt+2].Line - 1
 	case serversAt+2 < len(root.Content):
 		end = root.Content[serversAt+2].Line - 1
+	}
+	// The node tree holds only the first document; a later document or an
+	// explicit document end marker bounds the entry too.
+	for i := keyIdx + 1; i < end; i++ {
+		if isDocumentMarker(lines[i]) {
+			end = i
+			break
+		}
 	}
 	if end <= keyIdx {
 		return nil, false, fmt.Errorf("%w: entry %q shares a line with the next key", ErrUnsupportedEdit, name)
@@ -179,6 +186,17 @@ func isBlankLine(line string) bool {
 
 func isCommentLine(line string) bool {
 	return strings.HasPrefix(strings.TrimSpace(line), "#")
+}
+
+// isDocumentMarker reports a "---" or "..." line at column 0, which ends the
+// current YAML document wherever it appears in block context.
+func isDocumentMarker(line string) bool {
+	for _, marker := range []string{"---", "..."} {
+		if rest, ok := strings.CutPrefix(line, marker); ok && (isBlankLine(rest) || rest[0] == ' ' || rest[0] == '\t') {
+			return true
+		}
+	}
+	return false
 }
 
 func lineIndent(line string) int {
