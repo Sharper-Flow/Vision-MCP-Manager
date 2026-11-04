@@ -76,7 +76,7 @@ It provides:
 	rootCmd.AddCommand(configCmd())
 
 	// NOTE: Server management commands (server, init) have been removed.
-	// Use the Admin MCP tools (vision_list, vision_add, vision_remove, etc.)
+	// Use the Admin MCP tools (vision_list, vision_restart, vision_remove, etc.)
 	// through the OpenCode plugin or direct MCP calls to port 6275.
 
 	if err := rootCmd.Execute(); err != nil {
@@ -297,7 +297,7 @@ func reloadDaemon() error {
 
 // NOTE: Server commands (serverCmd, listServers, showServerInfo, serverAction)
 // have been removed. Server management is now handled via Admin MCP tools.
-// Use vision_list, vision_add, vision_remove, etc. through the OpenCode plugin
+// Use vision_list, vision_restart, vision_remove, etc. through the OpenCode plugin
 // or direct MCP calls to port 6275.
 
 // --- Config Commands ---

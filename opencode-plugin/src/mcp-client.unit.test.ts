@@ -307,7 +307,7 @@ describe("MCP client session unit lifecycle", () => {
     })
 
     const { callTool } = await loadClient()
-    const result = await callTool("vision_add", { name: "example", start: true })
+    const result = await callTool("vision_restart", { name: "example" })
 
     expect(JSON.parse(result).success).toBe(false)
     expect(countInitializeCalls(fetchMock)).toBe(1)

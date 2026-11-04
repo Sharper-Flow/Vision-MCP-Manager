@@ -580,7 +580,7 @@ func TestStatefulRemovalDuringPublicationReleasesCredit(t *testing.T) {
 		}
 	})
 	srv, err := newPerSessionServer(ctx, "metrics-init-race", mgr, logger,
-		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
 		owner, nil, nil,
 		nil,
 		func(_ string, ps *proxySession) {
@@ -947,7 +947,7 @@ func TestFailedSharedDiscoveryReleasesRemovalOwner(t *testing.T) {
 	byDownstream := make(map[string]*proxySession)
 	byUpstream := make(map[string]*proxySession)
 	_, err := newSharedModeServer(ctx, "shared-owner-release", sm, logger,
-		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, owner, nil, nil,
+		nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, owner, nil, nil,
 		func(ps *proxySession) { byDownstream[ps.downstreamID()] = ps },
 		func(id string, ps *proxySession) { byUpstream[id] = ps; byDownstream[ps.downstreamID()] = ps },
 		func(id string) {

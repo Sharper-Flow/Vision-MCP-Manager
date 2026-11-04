@@ -33,7 +33,7 @@ func TestLateStatefulInitializationDeleteCleansOwner(t *testing.T) {
 	mgr.SetOnSessionRemoved(idx.closeOwner)
 	var ps *proxySession
 	_, err := newPerSessionServer(ctx, "late-delete-cleanup", mgr, logger,
-		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
 		owner, nil, nil,
 		func(p *proxySession) { ps = p; idx.register(p) }, nil, nil, idx.rekey, idx.unregister)
 	if err != nil {
@@ -166,7 +166,7 @@ func TestSharedRemovalBeforePublicationCleansOwner(t *testing.T) {
 	idx := &lifecycleOwnerIndex{owners: map[string]*proxySession{}}
 	var ps *proxySession
 	_, err := newSharedModeServer(ctx, "shared-publish-cleanup", sm, logger,
-		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, owner, nil, nil,
+		nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, owner, nil, nil,
 		func(p *proxySession) { ps = p; idx.register(p) }, nil, nil, idx.unregister)
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +207,7 @@ func TestStatefulRemovalInsidePublicationWindowCleansOwner(t *testing.T) {
 	mgr.SetOnSessionRemoved(idx.closeOwner)
 	var ps *proxySession
 	_, err := newPerSessionServer(ctx, "stateful-publish-window", mgr, logger,
-		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
 		owner, nil, nil,
 		func(p *proxySession) { ps = p; idx.register(p) }, nil, nil, idx.rekey, idx.unregister)
 	if err != nil {

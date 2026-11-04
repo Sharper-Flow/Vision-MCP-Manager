@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
@@ -62,26 +61,6 @@ func (s *Server) getTools() []Tool {
 			OutputSchema: outputSchemaFor[ListResponse](),
 		},
 		{
-			Name:        "vision_add",
-			Description: "Add and optionally start an MCP server from the registry",
-			InputSchema: InputSchema{
-				Type: "object",
-				Properties: map[string]Property{
-					"name": {
-						Type:        "string",
-						Description: "Name of the server to add (must exist in registry)",
-					},
-					"start": {
-						Type:        "boolean",
-						Description: "Whether to start the server after adding (default: true)",
-						Default:     true,
-					},
-				},
-				Required: []string{"name"},
-			},
-			OutputSchema: outputSchemaFor[AddResponse](),
-		},
-		{
 			Name:        "vision_remove",
 			Description: "Stop and remove an MCP server from the active configuration",
 			InputSchema: InputSchema{
@@ -98,7 +77,7 @@ func (s *Server) getTools() []Tool {
 		},
 		{
 			Name:        "vision_restart",
-			Description: "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
+			Description: "Restart a configured MCP server in-place, preserving its port assignment.",
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -110,24 +89,6 @@ func (s *Server) getTools() []Tool {
 				Required: []string{"name"},
 			},
 			OutputSchema: outputSchemaFor[RestartResponse](),
-		},
-		{
-			Name:        "vision_search",
-			Description: "Search the registry for MCP servers by name, capability tags, or description",
-			InputSchema: InputSchema{
-				Type: "object",
-				Properties: map[string]Property{
-					"query": {
-						Type:        "string",
-						Description: "Search query (matches name, description, or capability tags)",
-					},
-					"capability": {
-						Type:        "string",
-						Description: "Filter by specific capability tag (e.g., 'documentation', 'web-scraping')",
-					},
-				},
-			},
-			OutputSchema: outputSchemaFor[SearchResponse](),
 		},
 		{
 			Name:        "vision_init",
@@ -302,14 +263,10 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 	switch name {
 	case "vision_list":
 		return s.toolList(ctx, args)
-	case "vision_add":
-		return s.toolAdd(ctx, args)
 	case "vision_remove":
 		return s.toolRemove(ctx, args)
 	case "vision_restart":
 		return s.toolRestart(ctx, args)
-	case "vision_search":
-		return s.toolSearch(ctx, args)
 	case "vision_init":
 		return s.toolInit(ctx, args)
 	case "vision_status":
@@ -329,11 +286,10 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 
 // ListServerEntry represents a server in the vision_list response.
 type ListServerEntry struct {
-	Name              string  `json:"name"`
-	CodemodeNamespace string  `json:"codemode_namespace"`
-	Status            string  `json:"status"`
-	EffectiveReason   *string `json:"effective_reason,omitempty"`
-	ProcessState      string  `json:"process_state"`
+	Name            string  `json:"name"`
+	Status          string  `json:"status"`
+	EffectiveReason *string `json:"effective_reason,omitempty"`
+	ProcessState    string  `json:"process_state"`
 	ReachabilityDetails
 	Port             *int                           `json:"port"`
 	PID              *int                           `json:"pid"`
@@ -373,7 +329,6 @@ func (s *Server) toolList(ctx context.Context, args json.RawMessage) (*ToolCallR
 		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(lifecycle), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
 		info := ListServerEntry{
 			Name:                status.Name,
-			CodemodeNamespace:   s.codemodeNamespace(status.Name),
 			Status:              effective.Status,
 			ProcessState:        string(status.State),
 			ReachabilityDetails: effective.Reachability,
@@ -438,15 +393,6 @@ func lifecycleBackendState(snapshot *SessionLifecycleSnapshot) string {
 		return ""
 	}
 	return snapshot.BackendState
-}
-
-func (s *Server) codemodeNamespace(name string) string {
-	if s.catalog != nil {
-		if entry := s.catalog.Get(name); entry != nil {
-			return entry.GetCodemodeNamespace()
-		}
-	}
-	return name
 }
 
 // buildSlotGroups produces the slot_groups section for vision_list. It reads
@@ -522,195 +468,6 @@ type SlotDetail struct {
 // toolSlotStatus implements vision_slot_status.
 func (s *Server) toolSlotStatus(_ context.Context, _ json.RawMessage) (*ToolCallResult, error) {
 	return jsonToolResult(SlotStatusResponse{Groups: s.buildSlotGroupStatuses()})
-}
-
-// AddResponse is the response for vision_add.
-type AddResponse struct {
-	Success         bool    `json:"success"`
-	Name            string  `json:"name"`
-	Status          string  `json:"status,omitempty"`
-	EffectiveReason *string `json:"effective_reason,omitempty"`
-	Port            *int    `json:"port,omitempty"`
-	Error           *string `json:"error,omitempty"`
-	ReachabilityDetails
-}
-
-// toolAdd implements vision_add.
-// Adds a server from the catalog and optionally starts it.
-func (s *Server) toolAdd(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
-	var params struct {
-		Name  string `json:"name"`
-		Start *bool  `json:"start"`
-	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return nil, NewValidationError("invalid arguments: " + err.Error())
-	}
-
-	if params.Name == "" {
-		return nil, NewValidationError("name is required")
-	}
-
-	// Default start to true
-	shouldStart := true
-	if params.Start != nil {
-		shouldStart = *params.Start
-	}
-
-	// Check if server is already configured in runtime registry
-	if s.registry != nil {
-		srv := s.registry.Get(params.Name)
-		if srv != nil {
-			// Server already configured
-			if !srv.IsRunning() && shouldStart {
-				// Start the stopped server
-				if err := s.registry.Start(params.Name); err != nil {
-					errMsg := fmt.Sprintf("Failed to start server: %s", err.Error())
-					response := AddResponse{
-						Success: false,
-						Name:    params.Name,
-						Error:   &errMsg,
-					}
-					return jsonToolResult(response)
-				}
-				// Refresh status
-				srv = s.registry.Get(params.Name)
-			}
-
-			if srv != nil {
-				status := srv.Status()
-				effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
-				port := status.Port
-				response := AddResponse{
-					Success:             true,
-					Name:                params.Name,
-					Status:              effective.Status,
-					Port:                &port,
-					ReachabilityDetails: effective.Reachability,
-				}
-				if effective.Reason != "" {
-					reason := effective.Reason
-					response.EffectiveReason = &reason
-				}
-				if status.LastError != "" {
-					errorText := scrubSecrets(status.LastError)
-					response.Error = &errorText
-				}
-				return jsonToolResult(response)
-			}
-
-			// Shouldn't happen, but handle it
-			errMsg := fmt.Sprintf("Server '%s' is already configured", params.Name)
-			response := AddResponse{
-				Success: false,
-				Name:    params.Name,
-				Error:   &errMsg,
-			}
-			return jsonToolResult(response)
-		}
-	}
-
-	// Check if server exists in catalog
-	if s.catalog == nil {
-		errMsg := fmt.Sprintf("Server '%s' not found in registry", params.Name)
-		response := AddResponse{
-			Success: false,
-			Name:    params.Name,
-			Error:   &errMsg,
-		}
-		return jsonToolResult(response)
-	}
-
-	entry := s.catalog.Get(params.Name)
-	if entry == nil {
-		errMsg := fmt.Sprintf("Server '%s' not found in registry", params.Name)
-		response := AddResponse{
-			Success: false,
-			Name:    params.Name,
-			Error:   &errMsg,
-		}
-		return jsonToolResult(response)
-	}
-
-	// Auto-add catalog server to runtime registry and persist to config.
-	serverCfg, err := s.catalogEntryToServerConfig(entry)
-	if err != nil {
-		errMsg := fmt.Sprintf("Failed to configure server: %s", err.Error())
-		response := AddResponse{
-			Success: false,
-			Name:    params.Name,
-			Error:   &errMsg,
-		}
-		return jsonToolResult(response)
-	}
-
-	// Add to runtime registry.
-	if err := s.registry.Add(params.Name, serverCfg); err != nil {
-		errMsg := fmt.Sprintf("Failed to add server to registry: %s", err.Error())
-		response := AddResponse{
-			Success: false,
-			Name:    params.Name,
-			Error:   &errMsg,
-		}
-		return jsonToolResult(response)
-	}
-
-	// Persist to config file (best-effort — server is already in runtime registry).
-	if s.daemonConfig != nil {
-		if s.daemonConfig.Servers == nil {
-			s.daemonConfig.Servers = make(map[string]*config.ServerConfig)
-		}
-		s.daemonConfig.Servers[params.Name] = serverCfg
-		if s.configPath != "" {
-			if err := config.Save(s.daemonConfig, s.configPath); err != nil {
-				s.logger.Warn("failed to persist config after adding server",
-					slog.String("server", params.Name),
-					slog.String("error", err.Error()),
-				)
-			}
-		}
-	}
-	// Start the server if requested (triggers Streamable HTTP proxy setup via EventServerStarted).
-	if shouldStart {
-		if err := s.registry.Start(params.Name); err != nil {
-			errMsg := fmt.Sprintf("Server added but failed to start: %s", err.Error())
-			port := serverCfg.Port
-			response := AddResponse{
-				Success: false,
-				Name:    params.Name,
-				Port:    &port,
-				Error:   &errMsg,
-			}
-			return jsonToolResult(response)
-		}
-	}
-
-	srv := s.registry.Get(params.Name)
-	if srv != nil {
-		status := srv.Status()
-		effective := deriveEffectiveStatus(status.State, lifecycleBackendState(s.lifecycleSnapshot(status.Name)), s.reachabilityFor(status.Name), status.Transport.IsReachabilityProbeable(), status.Uptime, s.reachabilityGrace, status.LastError)
-		port := status.Port
-		response := AddResponse{
-			Success:             true,
-			Name:                params.Name,
-			Status:              effective.Status,
-			Port:                &port,
-			ReachabilityDetails: effective.Reachability,
-		}
-		if effective.Reason != "" {
-			reason := effective.Reason
-			response.EffectiveReason = &reason
-		}
-		return jsonToolResult(response)
-	}
-
-	port := serverCfg.Port
-	response := AddResponse{
-		Success: true,
-		Name:    params.Name,
-		Status:  "stopped",
-		Port:    &port,
-	}
-	return jsonToolResult(response)
 }
 
 // jsonToolResult creates a ToolCallResult with JSON content.
@@ -826,8 +583,7 @@ type RestartResponse struct {
 
 // toolRestart implements vision_restart.
 // Restarts a server that is already configured in the runtime registry, preserving
-// its port assignment. Unlike vision_remove + vision_add, this never re-allocates
-// the port, so servers defined in servers.yaml keep their fixed port after restart.
+// its port assignment.
 func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
 	var params struct {
 		Name string `json:"name"`
@@ -885,66 +641,6 @@ func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCa
 	}
 
 	return jsonToolResult(RestartResponse{Success: true, Name: params.Name, Status: "stopped"})
-}
-
-// SearchResultEntry represents a server in search results.
-type SearchResultEntry struct {
-	Name              string   `json:"name"`
-	CodemodeNamespace string   `json:"codemode_namespace"`
-	Description       string   `json:"description"`
-	Capabilities      []string `json:"capabilities"`
-	Installed         bool     `json:"installed"`
-}
-
-// SearchResponse is the response for vision_search.
-type SearchResponse struct {
-	Success bool                `json:"success"`
-	Results []SearchResultEntry `json:"results"`
-	Error   *string             `json:"error,omitempty"`
-}
-
-// toolSearch implements vision_search.
-// Searches the catalog for available MCP servers by name, description, or capability.
-func (s *Server) toolSearch(ctx context.Context, args json.RawMessage) (*ToolCallResult, error) {
-	if s.catalog == nil {
-		return nil, fmt.Errorf("catalog not initialized")
-	}
-
-	var params struct {
-		Query      string `json:"query"`
-		Capability string `json:"capability"`
-	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return nil, NewValidationError("invalid arguments: " + err.Error())
-	}
-
-	// Search the catalog
-	results := s.catalog.Search(params.Query, params.Capability)
-
-	// Build response
-	response := SearchResponse{
-		Success: true,
-		Results: make([]SearchResultEntry, 0, len(results)),
-	}
-
-	for _, entry := range results {
-		// Check if server is configured in the registry
-		installed := false
-		if s.registry != nil {
-			srv := s.registry.Get(entry.Name)
-			installed = srv != nil
-		}
-
-		response.Results = append(response.Results, SearchResultEntry{
-			Name:              entry.Name,
-			CodemodeNamespace: entry.GetCodemodeNamespace(),
-			Description:       entry.Description,
-			Capabilities:      entry.Capabilities,
-			Installed:         installed,
-		})
-	}
-
-	return jsonToolResult(response)
 }
 
 // InitResponse is the response for vision_init.
@@ -1632,55 +1328,6 @@ func isToolRelevantToContext(inst *config.ToolInstructions, context string) bool
 		return true
 	}
 	return false
-}
-
-// catalogEntryToServerConfig converts a catalog entry into a runtime ServerConfig,
-// allocating the next available port from the daemon config.
-func (s *Server) catalogEntryToServerConfig(entry *catalog.Entry) (*config.ServerConfig, error) {
-	if s.daemonConfig == nil {
-		return nil, fmt.Errorf("daemon config not available for port allocation")
-	}
-
-	port, err := s.daemonConfig.NextAvailablePort()
-	if err != nil {
-		return nil, fmt.Errorf("port allocation failed: %w", err)
-	}
-
-	cfg := &config.ServerConfig{
-		Port:      port,
-		Autostart: true,
-	}
-
-	// Set transport-specific fields from catalog entry.
-	switch entry.GetTransport() {
-	case "stdio":
-		cfg.Transport = config.TransportStdio
-		cfg.Command = entry.Command
-		cfg.Args = entry.Args
-	case "http":
-		cfg.Transport = config.TransportHTTP
-		cfg.URL = entry.URL
-	case "sse":
-		cfg.Transport = config.TransportSSE
-		cfg.URL = entry.URL
-	}
-
-	// Build environment hints from catalog's required env vars.
-	// Only set env vars that are available in the current environment.
-	if len(entry.EnvVars) > 0 {
-		env := make(map[string]string)
-		for _, varName := range entry.EnvVars {
-			if val, ok := os.LookupEnv(varName); ok && val != "" {
-				env[varName] = val
-			}
-		}
-		if len(env) > 0 {
-			cfg.Env = env
-		}
-	}
-
-	cfg.ApplyDefaults()
-	return cfg, nil
 }
 
 // sortGuidanceByPriority sorts guidance entries by priority (high > medium > low > empty).

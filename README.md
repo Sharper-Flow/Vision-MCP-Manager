@@ -20,7 +20,6 @@ Using MCP servers with AI coding agents today means:
 - **Scattered configurations** — Each project has its own MCP setup, duplicated across machines
 - **Manual process management** — Servers crash silently, requiring manual restarts
 - **No visibility** — Which tools are running? What's failing? No central place to look
-- **Static tooling** — Agents can't adapt their capabilities; humans must edit configs
 - **Transport chaos** — stdio servers can't be shared across clients without a proxy layer
 
 ## The Solution
@@ -33,7 +32,7 @@ Vision is a Go-native daemon that provides:
 | **Process Supervision** | Erlang-style supervision with automatic restarts and exponential backoff |
 | **Streamable HTTP Proxy** | Per-session subprocess isolation—each client gets its own MCP process on a dedicated port |
 | **Automatic Respawn** | If a downstream subprocess is reaped or crashes, the next tool call transparently spawns a fresh one |
-| **Agent Self-Management** | AI agents can add, remove, and restart servers through the Admin MCP API |
+| **Agent Self-Management** | AI agents can inspect, restart, and remove configured servers through the Admin MCP API |
 | **Hot Reload** | Update configuration without restarting your coding session |
 
 ## Why Vision?
@@ -43,17 +42,16 @@ Vision turns any MCP-compatible agent into a **high-agency system with guardrail
 ```
 You: "Research best practices for React Server Components"
 
-Agent: [Calls vision_list — no documentation server available]
-Agent: [Calls vision_search("documentation") — finds context7]
-Agent: [Calls vision_add("context7", start=true)]
-Agent: [Now has Context7 available — proceeds with research]
+Agent: [Context7 call fails — calls vision_list, context7 reports error]
+Agent: [Calls vision_restart("context7")]
+Agent: [Context7 is running again — proceeds with research]
 ```
 
-No human intervention. No config file edits. The agent adapts to what it needs.
+No human intervention. No config file edits. The agent repairs the tools it was given.
 
 **But you stay in control:**
 - All servers are defined in your central config
-- The Admin API only exposes servers you've pre-approved in the catalog
+- Agents cannot install new servers; every server comes from your config
 - Every process is supervised and logged
 - One `vision daemon status` shows everything
 
@@ -247,19 +245,18 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 | Tool | What It Does |
 |------|--------------|
 | `vision_list` | Show all servers with effective status (`running`, `starting`, `stopped`, or `error`) |
-| `vision_add` | Provision and start a new server from the catalog |
+| `vision_restart` | Restart a configured server, keeping its port |
 | `vision_remove` | Stop and remove a server |
-| `vision_search` | Find servers by name or capability |
 | `vision_status` | Daemon health, uptime, memory usage |
 | `vision_guidance` | Get recommendations for which tool to use |
 
 **Example workflow:**
 
-1. Agent needs web search capability
-2. Calls `vision_search("web search")` → finds `kagi`
-3. Calls `vision_add("kagi", start=true)` → server starts
-4. Agent now has web search available
-5. You see it in `vision_list` — full visibility
+1. A `kagi` web search call fails
+2. Agent calls `vision_list` → `kagi` reports `error` with its cause
+3. Agent calls `vision_restart("kagi")` → server restarts on the same port
+4. Agent retries the search
+5. You see the same state in `vision_list` — full visibility
 
 ## Architecture
 
@@ -275,7 +272,7 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 │                                                                 │
 │   ┌─────────────────────────────────────────────────────────┐   │
 │   │           Admin MCP Server (:6275)                      │   │
-│   │   vision_list  vision_add  vision_status  vision_search │   │
+│   │   vision_list  vision_restart  vision_status  ...       │   │
 │   └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
 │   ┌─────────────────────────────────────────────────────────┐   │
@@ -329,7 +326,7 @@ vision daemon reload       # Hot-reload config (SIGHUP)
 ### Servers
 
 Server management is provided by the Admin MCP tools on port 6275. Use
-`vision_list`, `vision_add`, `vision_remove`, and `vision_restart` through the
+`vision_list`, `vision_remove`, and `vision_restart` through the
 OpenCode plugin or a direct MCP client.
 
 ### Configuration

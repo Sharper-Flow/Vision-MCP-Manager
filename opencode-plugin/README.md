@@ -40,20 +40,18 @@ These wrap Vision Admin MCP calls on port 6275. They return a structured error i
 the daemon is not running.
 
 **Registered only when Code Mode is off.** When
-`OPENCODE_EXPERIMENTAL_CODE_MODE=true`, the plugin omits all ten. They remain
+`OPENCODE_EXPERIMENTAL_CODE_MODE=true`, the plugin omits all eight. They remain
 reachable as `tools.vision.<name>()` through the `vision` MCP server, and Code
 Mode collapses MCP tool schemas into one `execute` tool plus a bounded catalog.
 Plugin-registered schemas get no such collapse, so registering them under Code
-Mode would carry ten full schemas in every prompt for capability the session can
+Mode would carry eight full schemas in every prompt for capability the session can
 already reach. The decision is made once, at plugin-factory time.
 
 | Tool                 | Description                                    |
 | -------------------- | ---------------------------------------------- |
 | `vision_list`        | List all registered MCP servers with status    |
-| `vision_add`         | Add and start an MCP server                    |
 | `vision_remove`      | Stop and remove a server                       |
 | `vision_restart`     | Restart a server in-place, preserving its port |
-| `vision_search`      | Search for servers by name or capability       |
 | `vision_init`        | Generate or reconcile an OpenCode config       |
 | `vision_status`      | Check daemon health and statistics             |
 | `vision_guidance`    | Get ranked tool-selection guidance             |

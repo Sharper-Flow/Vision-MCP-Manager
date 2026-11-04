@@ -330,7 +330,7 @@ JSON
     log_success "Created OpenCode config with Vision admin server at $opencode_jsonc"
     log_info "Restart OpenCode to load the new configuration."
     
-    log_info "Vision admin tools available: vision_list, vision_add, vision_remove, vision_status"
+    log_info "Vision admin tools available: vision_list, vision_restart, vision_remove, vision_status"
     log_info "Use vision_list to see available MCP servers and their ports"
 }
 

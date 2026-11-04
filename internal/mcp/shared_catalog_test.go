@@ -163,7 +163,7 @@ func TestSharedCatalogSnapshotAfterCloseDoesNotReacquireLease(t *testing.T) {
 	defer sm.CloseAll()
 	var ps *proxySession
 	_, err := newSharedModeServer(ctx, "closed-catalog", sm, logger,
-		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, nil, nil, nil,
+		nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, nil, nil, nil,
 		func(p *proxySession) { ps = p }, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +197,7 @@ func TestSharedRespawnDoesNotWaitOnProxyRefresh(t *testing.T) {
 	defer sm.CloseAll()
 	var ps *proxySession
 	_, err := newSharedModeServer(ctx, "respawn-lock-order", sm, logger,
-		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, nil, nil, nil,
+		nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, nil, nil, nil,
 		func(p *proxySession) { ps = p }, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +238,7 @@ func TestSharedFailedDiscoveryClosesAfterRefreshUnlock(t *testing.T) {
 	var ps *proxySession
 	refreshUnlocked := false
 	_, err := newSharedModeServer(ctx, "discovery-lock-order", sm, logger,
-		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, nil, nil, nil,
+		nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, nil, nil, nil,
 		func(p *proxySession) { ps = p }, nil, nil,
 		func(string) {
 			// A manager-lock holder can be waiting on respawnMu while this close releases the lease.

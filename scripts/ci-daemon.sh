@@ -10,7 +10,7 @@ set -uo pipefail
 #
 # The daemon runs with an empty-registry fixture ('servers: {}'):
 # config.Validate accepts zero servers, and the Admin MCP server registers its
-# ten management tools independent of operator config, so the fixture is
+# eight management tools independent of operator config, so the fixture is
 # deterministic and still exercises exactly the daemon-internal behaviour the
 # tests assert.
 #

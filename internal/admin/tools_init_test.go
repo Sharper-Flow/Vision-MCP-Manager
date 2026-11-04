@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/server"
@@ -626,42 +625,7 @@ func runningRegistry(t *testing.T, names ...string) *server.Registry {
 	return registry
 }
 
-func TestToolSearch_EmptyQueryReturnsAlphabetical(t *testing.T) {
-	c := catalog.New()
-	c.Add(&catalog.Entry{Name: "zebra", Description: "Last", CodemodeNamespace: "zebra-tools"})
-	c.Add(&catalog.Entry{Name: "alpha", Description: "First"})
-	c.Add(&catalog.Entry{Name: "beta", Description: "Second"})
-
-	srv := &Server{catalog: c}
-	result, err := srv.toolSearch(context.Background(), mustJSON(t, map[string]any{"query": ""}))
-	if err != nil {
-		t.Fatalf("toolSearch() error = %v", err)
-	}
-
-	var response SearchResponse
-	decodeToolJSON(t, result, &response)
-	if !response.Success {
-		t.Fatalf("toolSearch() success = false, error = %v", response.Error)
-	}
-	if len(response.Results) != 3 {
-		t.Fatalf("len(results) = %d, want 3", len(response.Results))
-	}
-	got := []string{response.Results[0].Name, response.Results[1].Name, response.Results[2].Name}
-	want := []string{"alpha", "beta", "zebra"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("results = %#v, want %#v", got, want)
-		}
-	}
-	if got := response.Results[2].CodemodeNamespace; got != "zebra-tools" {
-		t.Fatalf("zebra codemode_namespace = %q, want zebra-tools", got)
-	}
-	if got := response.Results[0].CodemodeNamespace; got != "alpha" {
-		t.Fatalf("alpha codemode_namespace = %q, want alpha", got)
-	}
-}
-
-func TestToolAddRemove_DoesNotSyncOpenCodeConfig(t *testing.T) {
+func TestToolRemove_DoesNotSyncOpenCodeConfig(t *testing.T) {
 	tmp := t.TempDir()
 	serversPath := filepath.Join(tmp, "servers.yaml")
 	explicitConfigPath := filepath.Join(tmp, "opencode.jsonc")
@@ -670,33 +634,17 @@ func TestToolAddRemove_DoesNotSyncOpenCodeConfig(t *testing.T) {
 		t.Fatalf("WriteFile(%q): %v", explicitConfigPath, err)
 	}
 
-	daemonCfg := &config.Config{Servers: make(map[string]*config.ServerConfig)}
+	kagi := &config.ServerConfig{Command: "uvx", Port: 6279}
+	daemonCfg := &config.Config{Servers: map[string]*config.ServerConfig{"kagi": kagi}}
 	registry := server.NewRegistry(nil, nil)
+	if err := registry.Add("kagi", kagi); err != nil {
+		t.Fatalf("Add(kagi): %v", err)
+	}
 	srv := &Server{
 		registry:     registry,
-		catalog:      catalog.Default(),
 		daemonConfig: daemonCfg,
 		configPath:   serversPath,
 	}
-	start := false
-
-	addResult, err := srv.toolAdd(context.Background(), mustJSON(t, map[string]any{"name": "kagi", "start": start}))
-	if err != nil {
-		t.Fatalf("toolAdd() error = %v", err)
-	}
-	var addResp AddResponse
-	decodeToolJSON(t, addResult, &addResp)
-	if !addResp.Success {
-		t.Fatalf("toolAdd() success = false, error = %v", addResp.Error)
-	}
-	if registry.Get("kagi") == nil {
-		t.Fatal("registry missing kagi after add")
-	}
-	if daemonCfg.Servers["kagi"] == nil {
-		t.Fatal("daemon config missing kagi after add")
-	}
-	assertOpenCodeConfigUnchanged(t, explicitConfigPath, sentinel)
-	assertNoUnintendedOpenCodeConfig(t, tmp, explicitConfigPath)
 
 	removeResult, err := srv.toolRemove(context.Background(), mustJSON(t, map[string]any{"name": "kagi"}))
 	if err != nil {

@@ -76,12 +76,12 @@ itself. On a host that runs many agent sessions at once, that costs:
 - Replacing the agent client's MCP support. Vision is a gateway between the
   client and servers, not a second client.
 - Retrying tool calls on the agent's behalf.
+- Letting agents install new servers. Every server comes from operator
+  configuration.
 - Serving clients on other hosts.
 
 ## Open questions
 
-- Whether agents may install new servers themselves from a built-in catalog,
-  or whether every server comes only from operator configuration.
 - Whether the OpenCode plugin should keep its own wrappers for the admin tools,
   or leave admin access entirely to Vision's own MCP endpoint.
 - Which server classes gain from Vision and which only pay the extra hop. No

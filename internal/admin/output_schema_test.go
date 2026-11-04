@@ -65,8 +65,8 @@ func outputTools(t *testing.T, session *mcp.ClientSession, ctx context.Context) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 10 {
-		t.Fatalf("got %d tools, want all ten", len(listed.Tools))
+	if len(listed.Tools) != 8 {
+		t.Fatalf("got %d tools, want all eight", len(listed.Tools))
 	}
 	tools := make(map[string]*mcp.Tool, len(listed.Tools))
 	for _, tool := range listed.Tools {
@@ -109,13 +109,11 @@ func outputPayloads() map[string][]any {
 	return map[string][]any{
 		"vision_list": {
 			ListResponse{}, ListResponse{Servers: []ListServerEntry{}, SlotGroups: []SlotGroupEntry{}},
-			ListResponse{Servers: []ListServerEntry{{Name: "fixture", CodemodeNamespace: "fixture", Status: "error", ProcessState: "failed", Port: &count, PID: &count, Uptime: &status, Error: &message, EffectiveReason: &message, ReachabilityDetails: reach, SessionMetrics: snapshot, SessionLifecycle: &SessionLifecycleSnapshot{BackendState: "ready", Sessions: []SessionLifecycleRow{{SafeID: "bounded", State: "active"}}, Closed: []SessionLifecycleRow{}}}}, SlotGroups: []SlotGroupEntry{{Name: "group", Slots: []string{"fixture"}}}},
+			ListResponse{Servers: []ListServerEntry{{Name: "fixture", Status: "error", ProcessState: "failed", Port: &count, PID: &count, Uptime: &status, Error: &message, EffectiveReason: &message, ReachabilityDetails: reach, SessionMetrics: snapshot, SessionLifecycle: &SessionLifecycleSnapshot{BackendState: "ready", Sessions: []SessionLifecycleRow{{SafeID: "bounded", State: "active"}}, Closed: []SessionLifecycleRow{}}}}, SlotGroups: []SlotGroupEntry{{Name: "group", Slots: []string{"fixture"}}}},
 			ListResponse{Servers: []ListServerEntry{{Name: "fixture", SessionMetrics: &metrics.ServerMetricsSnapshot{}}}},
 		},
-		"vision_add":         {AddResponse{}, AddResponse{Success: true, Name: "fixture", Status: "running", Port: &count, EffectiveReason: &message, ReachabilityDetails: reach}, AddResponse{Success: false, Name: "fixture", Error: &message}},
 		"vision_remove":      {RemoveResponse{}, RemoveResponse{Success: true, Name: "fixture"}, RemoveResponse{Success: false, Name: "fixture", Error: &message}},
 		"vision_restart":     {RestartResponse{}, RestartResponse{Success: true, Name: "fixture", Status: "running", ProcessState: "running", Port: &count, EffectiveReason: &message, ReachabilityDetails: reach}, RestartResponse{Success: false, Name: "fixture", Error: &message}},
-		"vision_search":      {SearchResponse{}, SearchResponse{Success: true, Results: []SearchResultEntry{}}, SearchResponse{Success: true, Results: []SearchResultEntry{{Name: "fixture", CodemodeNamespace: "fixture", Capabilities: []string{"search"}, Installed: true}}}},
 		"vision_init":        {InitResponse{}, InitResponse{Success: true, Path: "/fixture.jsonc", Servers: []string{"fixture"}, ReconciledServers: []string{"fixture"}, BackedUp: true, BackupPath: "/fixture.backup"}, InitResponse{Success: false, Path: "/fixture.jsonc", Error: &message}},
 		"vision_status":      {StatusResponse{}, StatusResponse{Healthy: true, Uptime: "1m0s", Servers: StatusServers{Running: 1}, MemoryMB: 1.5, Warnings: []string{"fixture warning"}}},
 		"vision_guidance":    {GuidanceResponse{}, GuidanceResponse{Success: true, Context: "search", GlobalGuidance: "fixture", Servers: []GuidanceEntry{{Name: "fixture", Priority: "high", PreferFor: []string{"search"}}}, Tools: []GuidanceEntry{{Name: "query", NamespacedName: "fixture_query", Guidance: "fixture", AvoidFor: []string{"other"}, Examples: []string{"query"}}}}, GuidanceResponse{Success: true, Error: &message}},
@@ -250,11 +248,8 @@ func TestAdminOutputWire(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			args := map[string]any{}
 			switch name {
-			case "vision_add", "vision_remove", "vision_restart":
+			case "vision_remove", "vision_restart":
 				args["name"] = "admin-acceptance-missing-server"
-				if name == "vision_add" {
-					args["start"] = false
-				}
 			case "vision_init":
 				args["path"] = filepath.Join(t.TempDir(), "client.jsonc")
 			}
@@ -271,14 +266,14 @@ func TestAdminOutputWire(t *testing.T) {
 			if err := schema.Validate(object); err != nil {
 				t.Fatalf("wire payload rejected by advertised schema: %v", err)
 			}
-			if name == "vision_remove" || name == "vision_restart" || name == "vision_add" || name == "vision_init" {
+			if name == "vision_remove" || name == "vision_restart" || name == "vision_init" {
 				if object["success"] != false {
 					t.Fatalf("business failure value changed: %#v", object)
 				}
 			}
 		})
 	}
-	for _, name := range []string{"vision_add", "vision_remove", "vision_restart", "vision_init"} {
+	for _, name := range []string{"vision_remove", "vision_restart", "vision_init"} {
 		if result, err := first.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: map[string]any{}}); err == nil || result != nil {
 			t.Errorf("%s validation no longer returns a protocol error: result=%#v err=%v", name, result, err)
 		}

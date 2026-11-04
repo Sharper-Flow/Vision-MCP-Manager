@@ -165,10 +165,6 @@ type ProxyConfig struct {
 	// Logger for proxy operations.
 	Logger *slog.Logger
 
-	// SuggestionProvider supplies alternative tool suggestions when downstream
-	// availability failures are returned to the upstream client as tool results.
-	SuggestionProvider FallbackSuggestionProvider
-
 	// HealthCheckInterval is how often to probe idle downstream sessions.
 	// 0 means no proactive health checking (reactive respawn only).
 	HealthCheckInterval time.Duration
@@ -363,7 +359,6 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				logger,
 				sharedTools,
 				inFlightLimiter,
-				cfg.SuggestionProvider,
 				cfg.RequestTimeout,
 				cfg.RetryConfig,
 				cfg.CircuitBreakerConfig,
@@ -438,7 +433,6 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 			logger,
 			sharedTools,
 			inFlightLimiter,
-			cfg.SuggestionProvider,
 			cfg.HealthCheckInterval,
 			cfg.RequestTimeout,
 			cfg.RetryConfig,
@@ -749,7 +743,6 @@ type proxySession struct {
 	circuitBreaker      *circuitBreaker
 	sharedTools         *sharedToolCoordinator
 	inFlightLimiter     *inFlightLimiter
-	suggestionProvider  FallbackSuggestionProvider
 
 	// healthProbeCancel stops the active health probe goroutine.
 	// nil when no probe is running.
@@ -975,7 +968,6 @@ func newPerSessionServer(
 	logger *slog.Logger,
 	sharedTools *sharedToolCoordinator,
 	inFlightLimiter *inFlightLimiter,
-	suggestionProvider FallbackSuggestionProvider,
 	healthCheckInterval time.Duration,
 	requestTimeout time.Duration,
 	retryConfig RetryConfig,
@@ -1004,7 +996,6 @@ func newPerSessionServer(
 		onDownstreamClosed:  onDownstreamClosed,
 		sharedTools:         sharedTools,
 		inFlightLimiter:     inFlightLimiter,
-		suggestionProvider:  suggestionProvider,
 		healthCheckInterval: healthCheckInterval,
 		requestTimeout:      requestTimeout,
 		retryConfig:         retryConfig,
@@ -1148,7 +1139,6 @@ func newSharedModeServer(
 	logger *slog.Logger,
 	sharedTools *sharedToolCoordinator,
 	inFlightLimiter *inFlightLimiter,
-	suggestionProvider FallbackSuggestionProvider,
 	requestTimeout time.Duration,
 	retryConfig RetryConfig,
 	circuitBreakerConfig CircuitBreakerConfig,
@@ -1173,7 +1163,6 @@ func newSharedModeServer(
 		sharedMgr:          sm,
 		sharedTools:        sharedTools,
 		inFlightLimiter:    inFlightLimiter,
-		suggestionProvider: suggestionProvider,
 		requestTimeout:     requestTimeout,
 		retryConfig:        retryConfig,
 		circuitBreaker:     newCircuitBreaker(circuitBreakerConfig, nil),
@@ -1486,11 +1475,7 @@ func (ps *proxySession) finishToolCall(ctx context.Context, toolName string, res
 		return nil, err
 	}
 
-	var suggestions []FallbackSuggestion
-	if ps.suggestionProvider != nil {
-		suggestions = ps.suggestionProvider.SuggestAlternatives(ctx, ps.serverName, toolName)
-	}
-	return availabilityErrorToResult(availabilityErr, ps.serverName, toolName, suggestions), nil
+	return availabilityErrorToResult(availabilityErr, ps.serverName, toolName), nil
 }
 
 // getDownstream returns the current downstream session and whether the session

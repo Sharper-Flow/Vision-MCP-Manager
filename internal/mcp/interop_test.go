@@ -91,7 +91,7 @@ func setupInteropProxyWithMaxSessions(t *testing.T, maxSessions int) (*httptest.
 	return ts, mgr
 }
 
-func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
+func TestInterop_StructuredErrorOnDownstreamFailure(t *testing.T) {
 	skipIfNoNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -106,26 +106,12 @@ func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
 		SessionTimeout: config.Duration(30 * time.Second),
 		MaxSessions:    5,
 	}
-	mgr := session.NewManager("interop-structured-fallback", cfg, logger)
-
-	provider := fallbackSuggestionProviderFunc(func(_ context.Context, failedServer, failedTool string) []FallbackSuggestion {
-		if failedServer != "kagi" {
-			t.Fatalf("failedServer = %q, want kagi", failedServer)
-		}
-		if failedTool != "echo" {
-			t.Fatalf("failedTool = %q, want echo", failedTool)
-		}
-		return []FallbackSuggestion{
-			{ServerName: "brave-search", Capabilities: []string{"web-search"}, Installed: true, Reason: "shares 1 capability: web-search"},
-			{ServerName: "tavily", Capabilities: []string{"web-search"}, Installed: false, Reason: "shares 1 capability: web-search"},
-		}
-	})
+	mgr := session.NewManager("interop-structured-error", cfg, logger)
 
 	handler := NewProxyHandler(ProxyConfig{
-		ServerName:         "kagi",
-		SessionManager:     mgr,
-		Logger:             logger,
-		SuggestionProvider: provider,
+		ServerName:     "kagi",
+		SessionManager: mgr,
+		Logger:         logger,
 	})
 	ts := httptest.NewServer(handler)
 	t.Cleanup(func() {
@@ -133,7 +119,7 @@ func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
 		mgr.CloseAll()
 	})
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "structured-fallback-test", Version: "1.0.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "structured-error-test", Version: "1.0.0"}, nil)
 	sess, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
@@ -146,7 +132,7 @@ func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
 
 	// Force the next respawn to fail after the initial healthy subprocess has
 	// been closed. This creates a deterministic downstream availability failure.
-	cfg.Command = "vision-missing-command-for-structured-fallback-test"
+	cfg.Command = "vision-missing-command-for-structured-error-test"
 	for _, id := range mgr.Sessions() {
 		if err := mgr.RemoveSession(id); err != nil {
 			t.Fatalf("RemoveSession(%s): %v", id, err)
@@ -172,9 +158,6 @@ func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
 	for _, want := range []string{
 		"config_drift",
 		"echo",
-		"brave-search",
-		"tavily",
-		"Vision did not retry on a different server",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("result text missing %q:\n%s", want, text)
