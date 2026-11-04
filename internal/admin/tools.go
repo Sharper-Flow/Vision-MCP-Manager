@@ -550,16 +550,18 @@ func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCal
 		return jsonToolResult(response)
 	}
 
-	// Persist removal to config file (best-effort — server is already removed from runtime registry).
-	if s.daemonConfig != nil && s.daemonConfig.Servers != nil {
+	if s.daemonConfig != nil {
 		delete(s.daemonConfig.Servers, params.Name)
-		if s.configPath != "" {
-			if err := config.Save(s.daemonConfig, s.configPath); err != nil {
-				s.logger.Warn("failed to persist config after removing server",
-					slog.String("server", params.Name),
-					slog.String("error", err.Error()),
-				)
-			}
+	}
+	// Persist removal to config file (best-effort — server is already removed
+	// from runtime registry). The file is edited in place, never re-serialized
+	// from the loaded config, whose ${VAR} references are already resolved.
+	if s.configPath != "" {
+		if err := config.RemoveServer(s.configPath, params.Name); err != nil {
+			s.logger.Warn("failed to persist config after removing server",
+				slog.String("server", params.Name),
+				slog.String("error", err.Error()),
+			)
 		}
 	}
 	response := RemoveResponse{
