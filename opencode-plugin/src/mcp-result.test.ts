@@ -126,7 +126,7 @@ describe("validated Vision proxy results", () => {
     ["null result", null],
   ])("rejects %s without replaying a potentially completed mutation", async (_label, fixture) => {
     result = fixture
-    const outcome = await call("vision_add")
+    const outcome = await call("vision_restart")
     expect(outcome).toMatchObject({ success: false, kind: "invalid_result" })
     expect(outcome.error).toMatch(/Invalid Vision/)
     expect(outcome.suggestion).toContain("Do not automatically repeat")
@@ -135,12 +135,12 @@ describe("validated Vision proxy results", () => {
 
   it("preserves structured daemon failure identity and recovery hints", async () => {
     result = { structuredContent: failure }
-    expect(await call("vision_add")).toEqual(failure)
+    expect(await call("vision_restart")).toEqual(failure)
   })
 
   it("preserves text-only daemon failure identity and recovery hints", async () => {
     result = { content: text(failure) }
-    expect(await call("vision_add")).toEqual(failure)
+    expect(await call("vision_restart")).toEqual(failure)
   })
 
   it("honors MCP isError even if the payload claims success", async () => {
@@ -149,15 +149,15 @@ describe("validated Vision proxy results", () => {
       structuredContent: { ...failure, success: true },
       content: text(status),
     }
-    expect(await call("vision_add")).toEqual({ ...failure, isError: true, kind: "mcp_tool" })
+    expect(await call("vision_restart")).toEqual({ ...failure, isError: true, kind: "mcp_tool" })
     expect(toolCalls).toBe(1)
   })
 
   it("turns plain MCP error text into a declared failure", async () => {
-    result = { isError: true, content: [{ type: "text", text: "catalog not initialized" }] }
+    result = { isError: true, content: [{ type: "text", text: "registry not initialized" }] }
     expect(await call()).toMatchObject({
       success: false,
-      error: "catalog not initialized",
+      error: "registry not initialized",
       isError: true,
       kind: "mcp_tool",
     })
@@ -165,7 +165,11 @@ describe("validated Vision proxy results", () => {
 
   it("preserves a daemon-owned error kind rather than replacing its identity", async () => {
     result = { isError: true, structuredContent: { ...failure, kind: "start_failed" } }
-    expect(await call("vision_add")).toEqual({ ...failure, kind: "start_failed", isError: true })
+    expect(await call("vision_restart")).toEqual({
+      ...failure,
+      kind: "start_failed",
+      isError: true,
+    })
   })
 
   it("keeps MCP error semantics when there is no message", async () => {
@@ -233,7 +237,7 @@ describe("validated Vision proxy results", () => {
   it("rejects malformed wire JSON without replay", async () => {
     transport = async () =>
       new Response("{broken", { headers: { "content-type": "application/json" } })
-    expect(await call("vision_add")).toMatchObject({ success: false, kind: "invalid_result" })
+    expect(await call("vision_restart")).toMatchObject({ success: false, kind: "invalid_result" })
     expect(toolCalls).toBe(1)
   })
 
@@ -291,10 +295,8 @@ describe("validated Vision proxy results", () => {
 
   it.each([
     ["vision_list", { servers: [], slot_groups: [] }],
-    ["vision_add", { success: true, name: "example", status: "running" }],
     ["vision_remove", { success: true, name: "example" }],
     ["vision_restart", { success: true, name: "example", status: "stopped" }],
-    ["vision_search", { success: true, results: [] }],
     ["vision_init", { success: true, path: "/tmp/opencode.jsonc", servers: ["example"] }],
     ["vision_status", status],
     ["vision_guidance", { success: true, global_guidance: "Use context7" }],
@@ -311,10 +313,8 @@ describe("validated Vision proxy results", () => {
 
   it.each([
     ["vision_list", { servers: "wrong", slot_groups: [] }],
-    ["vision_add", { success: true, name: 42 }],
     ["vision_remove", { success: true }],
     ["vision_restart", { success: true, name: "example", status: [] }],
-    ["vision_search", { success: true, results: {} }],
     ["vision_init", { success: true, path: "/tmp/opencode.jsonc", servers: "example" }],
     ["vision_status", { ...status, servers: { running: "one", stopped: 0, error: 0 } }],
     ["vision_guidance", { success: true, tools: "wrong" }],

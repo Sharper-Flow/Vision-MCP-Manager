@@ -53,7 +53,7 @@ Vision exposes **Streamable HTTP** to upstream clients (AI agents). Most servers
   |                                                          |
   |  Admin MCP Server (:6275)                                |
   |    go-sdk mcp.Server + StreamableHTTPHandler             |
-  |    Tools: vision_list, vision_add, vision_remove, ...    |
+  |    Tools: vision_list, vision_restart, vision_remove, ...|
   |                                                          |
   |  Per-Server Proxy (one port per configured server):      |
   |                                                          |
@@ -194,24 +194,8 @@ includes:
   `circuit_open`
 - failed server and tool name
 - human-readable cause/guidance
-- up to three fallback suggestions ranked by catalog capability overlap
 
-Fallback suggestions are advisory only. Vision **does not** retry on another
-server or auto-route the tool call. The agent must explicitly choose and invoke
-any alternative.
-
-Suggestions are supplied through `ProxyConfig.SuggestionProvider`. The daemon
-wires this to a catalog-backed provider that compares the failed server's
-capabilities with other catalog entries and annotates each suggestion with:
-
-- server name
-- overlapping capabilities
-- installed/configured status
-- catalog source URL when available
-- match reason
-
-If `SuggestionProvider` is nil, availability failures are still visible as
-`IsError` tool results, but the suggestions list is empty.
+Vision **does not** retry on another server or auto-route the tool call.
 
 ### Admission Control
 

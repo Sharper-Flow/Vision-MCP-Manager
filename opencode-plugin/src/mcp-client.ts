@@ -132,19 +132,8 @@ const DaemonSuccessSchemas: Record<string, z.ZodObject> = {
       named.extend({ group_port: z.number(), slots: z.array(z.string()).nullable() })
     ),
   }),
-  vision_add: mutation,
   vision_remove: mutation,
   vision_restart: mutation,
-  vision_search: z.looseObject({
-    success: z.literal(true),
-    results: z.array(
-      named.extend({
-        description: z.string(),
-        capabilities: z.array(z.string()).nullable(),
-        installed: z.boolean(),
-      })
-    ),
-  }),
   vision_init: z.looseObject({
     success: z.literal(true),
     path: z.string(),

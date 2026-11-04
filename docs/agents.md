@@ -7,7 +7,7 @@ Vision is designed to be the central hub for AI agents interacting with the Mode
 Agents typically interact with Vision in two ways:
 
 1.  **Consuming Tools**: The agent connects to Vision-managed HTTP endpoints (ports 6276-6325) to use specific MCP tools (e.g., Google Search, Filesystem, Time).
-2.  **Managing Infrastructure**: The agent connects to Vision's Admin MCP server (port 6275) to manage the toolset itself—adding new servers, restarting failed ones, or searching for new capabilities.
+2.  **Managing Infrastructure**: The agent connects to Vision's Admin MCP server (port 6275) to manage the toolset itself—inspecting status, restarting failed servers, or removing ones it no longer needs. Agents cannot install new servers; every server comes from operator configuration.
 
 ## Admin MCP Tools (Port 6275)
 
@@ -17,8 +17,6 @@ By giving an agent access to Vision's Admin port, you empower it to maintain its
 | :--- | :--- |
 | `vision_list` | Shows all configured servers and their effective status: `running`, `starting`, `stopped`, or `error`. See [Configuration Reference](CONFIGURATION.md) for lifecycle configuration. |
 | `vision_status` | Returns daemon uptime and memory usage. |
-| `vision_search` | Finds new MCP servers in the local catalog. |
-| `vision_add` | Provisions a new server from the catalog. |
 | `vision_remove` | Decommissions an existing server. |
 | `vision_restart` | Restarts a configured server without changing its port assignment. |
 | `vision_guidance` | Provides hints on which tools to prefer for specific tasks. |
@@ -53,7 +51,7 @@ the `vision` namespace:
 
 ```javascript
 const servers = await tools.vision.vision_list({})
-const matches = await tools.vision.vision_search({ query: "documentation" })
+const guidance = await tools.vision.vision_guidance({ context: "documentation" })
 ```
 
 Discover current signatures before calling an unfamiliar tool:
@@ -79,5 +77,5 @@ When an agent is unsure which tool to use (e.g., "Should I use Brave Search or K
 ## Best Practices for Agent Integration
 
 1.  **Always enable the Admin server**: It allows the agent to self-heal if a managed server crashes.
-2.  **Use descriptive names**: When adding servers via `vision_add`, use names that clearly indicate the tool's purpose to help the LLM's reasoning.
+2.  **Use descriptive names**: Name servers in `servers.yaml` so the name states the tool's purpose; it helps the LLM's reasoning.
 3.  **Monitor via `vision_status`**: If an agent feels "sluggish," checking memory usage via the admin tool can help diagnose resource constraints in the underlying MCP processes.

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/admin"
-	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
@@ -38,12 +37,9 @@ type Daemon struct {
 	registry    *server.Registry
 	portManager *mcp.PortManager
 	adminServer *admin.Server // Admin MCP server on port 6275
-	catalog     *catalog.Catalog
 
 	reachabilityStore *reachability.Store
 	probeManager      *reachability.Manager
-
-	suggestionProvider mcp.FallbackSuggestionProvider
 
 	logger *slog.Logger
 
@@ -152,8 +148,6 @@ func New(cfg Config) (*Daemon, error) {
 
 	// Create port manager for MCP HTTP endpoints
 	pm := mcp.NewPortManager(cfg.Logger)
-	cat := catalog.Default()
-	suggestionProvider := newCatalogSuggestionProvider(cat, reg)
 
 	// Create daemon-wide metrics and hand the same instance to the admin
 	// server so vision_metrics and GET /metrics read real counters.
@@ -162,7 +156,6 @@ func New(cfg Config) (*Daemon, error) {
 	// Create Admin MCP server (primary management interface)
 	adminSrv := admin.NewServer(admin.Config{
 		Registry:     reg,
-		Catalog:      cat,
 		Instructions: instructions,
 		DaemonConfig: visionCfg,
 		ConfigPath:   cfg.ConfigPath,
@@ -178,8 +171,6 @@ func New(cfg Config) (*Daemon, error) {
 		registry:                         reg,
 		portManager:                      pm,
 		adminServer:                      adminSrv,
-		catalog:                          cat,
-		suggestionProvider:               suggestionProvider,
 		logger:                           cfg.Logger,
 		ctx:                              ctx,
 		cancel:                           cancel,
@@ -722,7 +713,6 @@ func (d *Daemon) setupSlotGroupProxies() error {
 			Selector:              selector,
 			Logger:                d.logger,
 			ReachabilityStore:     d.reachabilityStore,
-			SuggestionProvider:    d.suggestionProvider,
 			HealthCheckInterval:   healthCheckInterval,
 			RequestTimeout:        requestTimeout,
 			SharedReadOnlyTools:   append([]string(nil), representative.SharedReadOnlyTools...),
@@ -882,7 +872,6 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		ServerName:            srv.Name,
 		Logger:                d.logger,
 		ReachabilityStore:     d.reachabilityStore,
-		SuggestionProvider:    d.suggestionProvider,
 		HealthCheckInterval:   srv.Config.HealthCheckInterval.Duration(),
 		RequestTimeout:        srv.Config.RequestTimeout.Duration(),
 		SharedReadOnlyTools:   append([]string(nil), srv.Config.SharedReadOnlyTools...),

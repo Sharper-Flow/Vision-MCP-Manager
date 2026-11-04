@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/catalog"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	visionmcp "github.com/Sharper-Flow/Vision-MCP-Manager/internal/mcp"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
@@ -26,7 +25,6 @@ const DefaultPort = 6275
 // Server is the Admin MCP server that provides management tools.
 type Server struct {
 	registry                 *server.Registry
-	catalog                  *catalog.Catalog
 	instructions             *config.Instructions
 	daemonConfig             *config.Config // Mutable reference for persisting changes
 	configPath               string         // Path to servers.yaml
@@ -50,7 +48,6 @@ type Server struct {
 // Config configures the Admin MCP server.
 type Config struct {
 	Registry                 *server.Registry
-	Catalog                  *catalog.Catalog
 	Instructions             *config.Instructions
 	DaemonConfig             *config.Config // Mutable reference for persisting changes
 	ConfigPath               string         // Path to servers.yaml for config persistence
@@ -75,11 +72,6 @@ func NewServer(cfg Config) *Server {
 	if cfg.ReachabilityGrace <= 0 {
 		cfg.ReachabilityGrace = DefaultReachabilityGrace
 	}
-	// Use default catalog if none provided
-	cat := cfg.Catalog
-	if cat == nil {
-		cat = catalog.Default()
-	}
 	// Use empty instructions if none provided
 	inst := cfg.Instructions
 	if inst == nil {
@@ -91,7 +83,6 @@ func NewServer(cfg Config) *Server {
 
 	return &Server{
 		registry:                 cfg.Registry,
-		catalog:                  cat,
 		instructions:             inst,
 		daemonConfig:             cfg.DaemonConfig,
 		configPath:               cfg.ConfigPath,

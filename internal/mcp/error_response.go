@@ -7,19 +7,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// sanitizeSource strips ASCII control characters (except space) from a
-// suggestion source string to prevent injection or rendering artifacts in
-// the error message shown to the LLM.
-func sanitizeSource(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
-			return -1
-		}
-		return r
-	}, s)
-}
-
-func availabilityErrorToResult(err *AvailabilityError, server, tool string, suggestions []FallbackSuggestion) *sdkmcp.CallToolResult {
+func availabilityErrorToResult(err *AvailabilityError, server, tool string) *sdkmcp.CallToolResult {
 	if err == nil {
 		return nil
 	}
@@ -27,16 +15,12 @@ func availabilityErrorToResult(err *AvailabilityError, server, tool string, sugg
 	result := &sdkmcp.CallToolResult{}
 	result.SetError(err)
 	result.Content = []sdkmcp.Content{
-		&sdkmcp.TextContent{Text: formatAvailabilityFailureWithCause(err.Category, server, tool, failureCause(err), suggestions)},
+		&sdkmcp.TextContent{Text: formatAvailabilityFailure(err.Category, server, tool, failureCause(err))},
 	}
 	return result
 }
 
-func formatAvailabilityFailure(category FailureCategory, server, tool string, suggestions []FallbackSuggestion) string {
-	return formatAvailabilityFailureWithCause(category, server, tool, "", suggestions)
-}
-
-func formatAvailabilityFailureWithCause(category FailureCategory, server, tool, cause string, suggestions []FallbackSuggestion) string {
+func formatAvailabilityFailure(category FailureCategory, server, tool, cause string) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Tool '%s' on server '%s' failed: %s", tool, server, category)
@@ -45,32 +29,6 @@ func formatAvailabilityFailureWithCause(category FailureCategory, server, tool, 
 	}
 	b.WriteString(".\n")
 	b.WriteString(failureCategoryGuidance(category))
-	b.WriteString("\n")
-	b.WriteString("Vision did not retry on a different server — agent must explicitly choose.\n\n")
-
-	if len(suggestions) == 0 {
-		b.WriteString("No fallback suggestions available.")
-		return b.String()
-	}
-
-	b.WriteString("Suggested alternatives (capability overlap):\n")
-	for i, suggestion := range suggestions {
-		fmt.Fprintf(&b, "  %d. %s", i+1, suggestion.ServerName)
-		if len(suggestion.Capabilities) > 0 {
-			fmt.Fprintf(&b, " — capabilities: %s", strings.Join(suggestion.Capabilities, ", "))
-		}
-		fmt.Fprintf(&b, "; installed: %t", suggestion.Installed)
-		if suggestion.Source != "" {
-			fmt.Fprintf(&b, "; source: %s", sanitizeSource(suggestion.Source))
-		}
-		if suggestion.Reason != "" {
-			fmt.Fprintf(&b, "; reason: %s", suggestion.Reason)
-		}
-		if i < len(suggestions)-1 {
-			b.WriteString("\n")
-		}
-	}
-
 	return b.String()
 }
 

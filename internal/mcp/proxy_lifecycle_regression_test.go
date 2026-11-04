@@ -143,7 +143,7 @@ func TestStatefulRemovalInsideSpawnWindowLeavesNoOwner(t *testing.T) {
 	mgr.SetOnSessionRemoved(idx.closeOwner)
 
 	_, err := newPerSessionServer(ctx, "lifecycle-spawn-window", mgr, logger,
-		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
 		metrics.NewServerMetrics(), nil, nil,
 		idx.register, nil, nil, idx.rekey, idx.unregister,
 	)
@@ -211,7 +211,7 @@ func TestSharedExpiryInsideSpawnWindowRefusesPhantomCredit(t *testing.T) {
 
 	var ps *proxySession
 	_, err := newSharedModeServer(ctx, "shared-expiry-window", sm, logger,
-		nil, nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, owner, nil, nil,
+		nil, nil, time.Second, RetryConfig{}, CircuitBreakerConfig{}, owner, nil, nil,
 		func(p *proxySession) { ps = p; idx.register(p) }, nil, nil, idx.unregister,
 	)
 	if err != nil {
@@ -266,7 +266,7 @@ func TestRespawnRemovalInsideSpawnWindowLeavesNoStaleOwner(t *testing.T) {
 	mgr.SetOnSessionRemoved(idx.closeOwner)
 	var ps *proxySession
 	_, err := newPerSessionServer(ctx, "generation-window", mgr, logger,
-		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
 		metrics.NewServerMetrics(), nil, nil,
 		func(p *proxySession) { ps = p; idx.register(p) }, nil, nil, idx.rekey, idx.unregister,
 	)
@@ -414,7 +414,7 @@ func TestAbandonedRespawnDetachesAndNextCallRespawns(t *testing.T) {
 	mgr.SetOnSessionRemoved(idx.closeOwner)
 	var ps *proxySession
 	_, err := newPerSessionServer(ctx, "lifecycle-abandoned-respawn", mgr, logger,
-		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
 		owner, nil, nil,
 		func(p *proxySession) { ps = p; idx.register(p) },
 		nil, nil, idx.rekey, idx.unregister,
@@ -634,7 +634,7 @@ func TestRemovalAfterRespawnKeysPublishedGeneration(t *testing.T) {
 	mgr.SetOnSessionRemoved(idx.closeOwner)
 	var ps *proxySession
 	_, err := newPerSessionServer(ctx, "respawn-keying", mgr, logger,
-		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
 		owner, nil, nil,
 		func(p *proxySession) { ps = p; idx.register(p) },
 		nil, nil, idx.rekey, idx.unregister,
@@ -723,7 +723,7 @@ func TestRemovalConcurrentWithRespawnPublicationLeavesNoStaleOwner(t *testing.T)
 	mgr.SetOnSessionRemoved(idx.closeOwner)
 	var ps *proxySession
 	_, err := newPerSessionServer(ctx, "respawn-publication-race", mgr, logger,
-		nil, nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, 0, time.Second, RetryConfig{}, CircuitBreakerConfig{},
 		owner, nil, nil,
 		func(p *proxySession) { ps = p; idx.register(p) },
 		nil, nil, idx.rekey, idx.unregister,

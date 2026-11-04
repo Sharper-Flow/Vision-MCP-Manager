@@ -160,19 +160,6 @@ func TestEffectiveStatusParityAcrossListV1AndRestart(t *testing.T) {
 		t.Fatalf("vision_list leaked probe error: %q", list.Servers[0].LastProbeError)
 	}
 
-	addResult, err := s.toolAdd(context.Background(), mustJSON(t, map[string]any{"name": "managed"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var add AddResponse
-	decodeToolJSON(t, addResult, &add)
-	if add.Status != "error" {
-		t.Fatalf("vision_add status=%q, want error", add.Status)
-	}
-	if add.Reachability != string(reachability.StateUnreachable) || add.LastProbeError == "" || strings.Contains(add.LastProbeError, "secret") {
-		t.Fatalf("vision_add missing scrubbed reachability evidence: %#v", add)
-	}
-
 	listReq := httptest.NewRequest(http.MethodGet, "/v1/servers", nil)
 	listRR := httptest.NewRecorder()
 	s.handleV1Servers(listRR, listReq)

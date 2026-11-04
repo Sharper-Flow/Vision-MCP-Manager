@@ -8,10 +8,8 @@
 
 export const VISION_DAEMON_TOOL_NAMES = {
   list: "vision_list",
-  add: "vision_add",
   remove: "vision_remove",
   restart: "vision_restart",
-  search: "vision_search",
   init: "vision_init",
   status: "vision_status",
   guidance: "vision_guidance",

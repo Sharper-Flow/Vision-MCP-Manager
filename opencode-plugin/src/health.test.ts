@@ -19,7 +19,7 @@ describe("checkHealth", () => {
   //
   // These cases exist because the previous suite tested only the body-timeout
   // path, so nothing ever exercised a successful response and the stale
-  // "healthy" literal survived unnoticed while gating all ten vision_* tools.
+  // "healthy" literal survived unnoticed while gating all eight vision_* tools.
 
   function stubHealthResponse(body: unknown, ok = true, status = 200) {
     vi.stubGlobal(

@@ -15,28 +15,12 @@ import { isDaemonRunning } from "./health"
 
 export const VisionListArgsSchema = z.object({}).describe("List all registered MCP servers")
 
-export const VisionAddArgsSchema = z.object({
-  name: z.string().describe("Name of the server to add (must exist in registry)"),
-  start: z.boolean().optional().default(true).describe("Whether to start the server after adding"),
-})
-
 export const VisionRemoveArgsSchema = z.object({
   name: z.string().describe("Name of the server to remove"),
 })
 
 export const VisionRestartArgsSchema = z.object({
   name: z.string().describe("Name of the server to restart"),
-})
-
-export const VisionSearchArgsSchema = z.object({
-  query: z
-    .string()
-    .optional()
-    .describe("Search query (matches name, description, or capability tags)"),
-  capability: z
-    .string()
-    .optional()
-    .describe("Filter by specific capability tag (e.g., 'documentation', 'web-scraping')"),
 })
 
 export const VisionInitArgsSchema = z.object({
@@ -105,18 +89,6 @@ export async function visionList(): Promise<string> {
 }
 
 /**
- * Add and optionally start an MCP server.
- */
-export async function visionAdd(args: z.infer<typeof VisionAddArgsSchema>): Promise<string> {
-  const err = await checkDaemonRunning()
-  if (err) return err
-  return callTool("vision_add", {
-    name: args.name,
-    start: args.start,
-  })
-}
-
-/**
  * Stop and remove an MCP server.
  */
 export async function visionRemove(args: z.infer<typeof VisionRemoveArgsSchema>): Promise<string> {
@@ -129,8 +101,6 @@ export async function visionRemove(args: z.infer<typeof VisionRemoveArgsSchema>)
 
 /**
  * Restart a configured MCP server in-place, preserving its port assignment.
- * Use this instead of vision_remove + vision_add to avoid port drift on
- * servers defined in servers.yaml.
  */
 export async function visionRestart(
   args: z.infer<typeof VisionRestartArgsSchema>
@@ -139,18 +109,6 @@ export async function visionRestart(
   if (err) return err
   return callTool("vision_restart", {
     name: args.name,
-  })
-}
-
-/**
- * Search the registry for MCP servers.
- */
-export async function visionSearch(args: z.infer<typeof VisionSearchArgsSchema>): Promise<string> {
-  const err = await checkDaemonRunning()
-  if (err) return err
-  return callTool("vision_search", {
-    query: args.query,
-    capability: args.capability,
   })
 }
 

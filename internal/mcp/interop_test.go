@@ -91,7 +91,7 @@ func setupInteropProxyWithMaxSessions(t *testing.T, maxSessions int) (*httptest.
 	return ts, mgr
 }
 
-func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
+func TestInterop_StructuredErrorOnDownstreamFailure(t *testing.T) {
 	skipIfNoNode(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -108,24 +108,10 @@ func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
 	}
 	mgr := session.NewManager("interop-structured-fallback", cfg, logger)
 
-	provider := fallbackSuggestionProviderFunc(func(_ context.Context, failedServer, failedTool string) []FallbackSuggestion {
-		if failedServer != "kagi" {
-			t.Fatalf("failedServer = %q, want kagi", failedServer)
-		}
-		if failedTool != "echo" {
-			t.Fatalf("failedTool = %q, want echo", failedTool)
-		}
-		return []FallbackSuggestion{
-			{ServerName: "brave-search", Capabilities: []string{"web-search"}, Installed: true, Reason: "shares 1 capability: web-search"},
-			{ServerName: "tavily", Capabilities: []string{"web-search"}, Installed: false, Reason: "shares 1 capability: web-search"},
-		}
-	})
-
 	handler := NewProxyHandler(ProxyConfig{
-		ServerName:         "kagi",
-		SessionManager:     mgr,
-		Logger:             logger,
-		SuggestionProvider: provider,
+		ServerName:     "kagi",
+		SessionManager: mgr,
+		Logger:         logger,
 	})
 	ts := httptest.NewServer(handler)
 	t.Cleanup(func() {
@@ -172,9 +158,6 @@ func TestInterop_StructuredFallbackOnDownstreamFailure(t *testing.T) {
 	for _, want := range []string{
 		"config_drift",
 		"echo",
-		"brave-search",
-		"tavily",
-		"Vision did not retry on a different server",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("result text missing %q:\n%s", want, text)

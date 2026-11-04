@@ -4,7 +4,7 @@
  * Every other test in this suite either calls a handler function directly
  * (mcp-control.test.ts, tools tests) or compares name constants
  * (parity.test.ts). None of them prove the tools are actually reachable by
- * OpenCode. All twelve could be unregistered with a fully green suite — and
+ * OpenCode. All ten could be unregistered with a fully green suite — and
  * that is exactly what happened: the plugin returned `tools: [...]` (an array)
  * while `Hooks` declares `tool?: { [key: string]: ToolDefinition }`, so
  * OpenCode silently registered nothing.
@@ -21,15 +21,15 @@ import { mkdir, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 
-const { visionInitMock, visionAddMock } = vi.hoisted(() => ({
+const { visionInitMock, visionRemoveMock } = vi.hoisted(() => ({
   visionInitMock: vi.fn(async () => "mocked vision_init"),
-  visionAddMock: vi.fn(async () => JSON.stringify({ success: true, name: "linear" })),
+  visionRemoveMock: vi.fn(async () => JSON.stringify({ success: true, name: "linear" })),
 }))
 
 vi.mock("./tools", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./tools")>()),
   visionInit: visionInitMock,
-  visionAdd: visionAddMock,
+  visionRemove: visionRemoveMock,
 }))
 
 import VisionPlugin from "./index"
@@ -90,7 +90,7 @@ const daemonNames = Object.values(VISION_DAEMON_TOOL_NAMES) as string[]
 const pluginLocalNames = Object.values(OPENCODE_MCP_TOOL_NAMES) as string[]
 
 /**
- * Under Code Mode the ten daemon-proxy tools are already reachable as
+ * Under Code Mode the eight daemon-proxy tools are already reachable as
  * `tools.vision.*` from the `vision` MCP server, so registering them here
  * duplicates them — and plugin schemas, unlike MCP schemas, are NOT collapsed
  * by Code Mode. The two `opencode_mcp_*` tools have no Code Mode equivalent
@@ -450,7 +450,7 @@ async function runV2Setup(
 describe("V2 setup registration", () => {
   beforeEach(() => {
     visionInitMock.mockClear()
-    visionAddMock.mockClear()
+    visionRemoveMock.mockClear()
   })
 
   afterEach(() => {
@@ -496,28 +496,24 @@ describe("V2 setup registration", () => {
     ).toEqual([])
   })
 
-  it("derives vision_add JSON Schema from the zod schema", async () => {
+  it("derives vision_remove JSON Schema from the zod schema", async () => {
     const fixture = await runV2Setup(false)
-    const input = fixture.added[VISION_PLUGIN_TOOL_NAMES.add].input
+    const input = fixture.added[VISION_PLUGIN_TOOL_NAMES.remove].input
 
     expect(input.properties.name.type).toBe("string")
-    expect(input.properties.start.type).toBe("boolean")
-    expect(input.required).toContain("name")
-    // `.default(true)` is an optional INPUT under io: "input" — the caller may
-    // omit it and the zod parse applies the default.
-    expect(input.required ?? []).not.toContain("start")
-    expect(input.properties.name.description).toContain("registry")
+    expect(input.required).toEqual(["name"])
+    expect(input.properties.name.description).toContain("remove")
   })
 
-  it("keeps zod as the internal parse layer, applying schema defaults", async () => {
+  it("keeps zod as the internal parse layer", async () => {
     const fixture = await runV2Setup(false)
-    const tool = fixture.added[VISION_PLUGIN_TOOL_NAMES.add]
+    const tool = fixture.added[VISION_PLUGIN_TOOL_NAMES.remove]
 
-    const result = (await tool.execute({ name: "linear" })) as { content: string }
+    const result = (await tool.execute({ name: "linear", extra: true })) as { content: string }
 
-    // Raw input omitted `start`; the zod parse inside execute applied the
-    // default before the handler ran.
-    expect(visionAddMock).toHaveBeenCalledWith({ name: "linear", start: true })
+    // The zod parse inside execute stripped the undeclared key before the
+    // handler ran.
+    expect(visionRemoveMock).toHaveBeenCalledWith({ name: "linear" })
     expect(result).toEqual({
       content: JSON.stringify({ success: true, name: "linear" }),
       output: { success: true, name: "linear" },

@@ -20,10 +20,8 @@ import { z } from "zod"
 import { VisionOutcomeSchema } from "./mcp-client"
 import {
   visionList,
-  visionAdd,
   visionRemove,
   visionRestart,
-  visionSearch,
   visionInit,
   visionStatus,
   visionGuidance,
@@ -31,10 +29,8 @@ import {
   visionMetrics,
   toolInputJsonSchema,
   VisionListArgsSchema,
-  VisionAddArgsSchema,
   VisionRemoveArgsSchema,
   VisionRestartArgsSchema,
-  VisionSearchArgsSchema,
   VisionInitArgsSchema,
   VisionGuidanceArgsSchema,
   VisionStatusArgsSchema,
@@ -90,11 +86,11 @@ const visionServer: Plugin = async ({ client, directory }) => {
     tool: {
       // Daemon-proxy tools — registered ONLY when Code Mode is off.
       //
-      // Under Code Mode these ten are already reachable as `tools.vision.*`
+      // Under Code Mode these eight are already reachable as `tools.vision.*`
       // from the `vision` MCP server declared in the OpenCode `mcp` block, and
       // Code Mode collapses MCP tool schemas into one `execute` tool plus a
       // bounded catalog. Plugin-registered schemas get no such collapse, so
-      // registering them here would carry ten full schemas in every prompt for
+      // registering them here would carry eight full schemas in every prompt for
       // capability the session can already reach.
       //
       // This creates a pairing invariant: the `vision` mcp block entry is now
@@ -109,11 +105,6 @@ const visionServer: Plugin = async ({ client, directory }) => {
               args: {},
               execute: async () => await visionList(),
             }),
-            [VISION_PLUGIN_TOOL_NAMES.add]: tool({
-              description: "Add and optionally start an MCP server from the Vision registry",
-              args: VisionAddArgsSchema.shape,
-              execute: async (args) => await visionAdd(args),
-            }),
             [VISION_PLUGIN_TOOL_NAMES.remove]: tool({
               description: "Stop and remove an MCP server from the active configuration",
               args: VisionRemoveArgsSchema.shape,
@@ -121,15 +112,9 @@ const visionServer: Plugin = async ({ client, directory }) => {
             }),
             [VISION_PLUGIN_TOOL_NAMES.restart]: tool({
               description:
-                "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
+                "Restart a configured MCP server in-place, preserving its port assignment.",
               args: VisionRestartArgsSchema.shape,
               execute: async (args) => await visionRestart(args),
-            }),
-            [VISION_PLUGIN_TOOL_NAMES.search]: tool({
-              description:
-                "Search the Vision registry for MCP servers by name, capability tags, or description",
-              args: VisionSearchArgsSchema.shape,
-              execute: async (args) => await visionSearch(args),
             }),
             [VISION_PLUGIN_TOOL_NAMES.init]: tool({
               description:
@@ -266,7 +251,7 @@ const visionSetup = async (context: V2Plugin.Context) => {
     }
 
     // Daemon-proxy tools — registered ONLY when Code Mode is off. Same
-    // reasoning as the V1 registration: under Code Mode these ten are already
+    // reasoning as the V1 registration: under Code Mode these eight are already
     // reachable as `tools.vision.*` from the `vision` MCP server, and
     // plugin-registered schemas get no Code Mode collapse.
     if (!codeMode) {
@@ -278,13 +263,6 @@ const visionSetup = async (context: V2Plugin.Context) => {
         VisionOutcomeSchema
       )
       register(
-        VISION_PLUGIN_TOOL_NAMES.add,
-        "Add and optionally start an MCP server from the Vision registry",
-        VisionAddArgsSchema,
-        async (args) => await visionAdd(args),
-        VisionOutcomeSchema
-      )
-      register(
         VISION_PLUGIN_TOOL_NAMES.remove,
         "Stop and remove an MCP server from the active configuration",
         VisionRemoveArgsSchema,
@@ -293,16 +271,9 @@ const visionSetup = async (context: V2Plugin.Context) => {
       )
       register(
         VISION_PLUGIN_TOOL_NAMES.restart,
-        "Restart a configured MCP server in-place, preserving its port assignment. Use this instead of vision_remove + vision_add to avoid port drift on servers defined in servers.yaml.",
+        "Restart a configured MCP server in-place, preserving its port assignment.",
         VisionRestartArgsSchema,
         async (args) => await visionRestart(args),
-        VisionOutcomeSchema
-      )
-      register(
-        VISION_PLUGIN_TOOL_NAMES.search,
-        "Search the Vision registry for MCP servers by name, capability tags, or description",
-        VisionSearchArgsSchema,
-        async (args) => await visionSearch(args),
         VisionOutcomeSchema
       )
       register(
