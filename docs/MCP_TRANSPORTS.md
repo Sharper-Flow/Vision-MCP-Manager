@@ -49,7 +49,7 @@ Vision exposes **Streamable HTTP** to upstream clients (AI agents). Most servers
                             | HTTP POST/GET/DELETE to :6276/mcp
                             v
   +----------------------------------------------------------+
-  |                    Vision Daemon                          |
+  |                    Vision Daemon                         |
   |                                                          |
   |  Admin MCP Server (:6275)                                |
   |    go-sdk mcp.Server + StreamableHTTPHandler             |
@@ -60,11 +60,12 @@ Vision exposes **Streamable HTTP** to upstream clients (AI agents). Most servers
   |  :6276/mcp ──[session A]──┐                              |
   |            ──[session B]──┴─> shared subprocess (stdio)  |
   |                                                          |
-  |  Default: shared; stateful: true: one process per session |
+  |  Default shared; stateful: true: one process per session |
   |                                                          |
   |  Components:                                             |
   |    StreamableHTTPHandler  (go-sdk, per-server port)      |
-  |    session.Manager        (per-server, spawns processes) |
+  |    session.Manager        (stateful sessions)            |
+  |    SharedSessionManager   (shared mode, default)         |
   |    proxy.NewProxyHandler  (wires it all together)        |
   +----------------------------------------------------------+
 ```
@@ -92,14 +93,14 @@ Playwright uses one shared browser process with one BrowserContext per MCP sessi
 
 ### Per-Session and Shared Subprocess Models
 
-Stateful servers (`stateful: true`) give every upstream MCP session a **dedicated downstream subprocess**. Shared-mode servers (`stateful: false`, the default) route multiple upstream sessions through one shared downstream subprocess and remove only the upstream session/refcount on session cleanup.
+Stateful servers (`stateful: true`) give every upstream MCP session a **dedicated downstream subprocess**. Shared-mode servers (`stateful: false`, the default) route multiple upstream sessions through one shared downstream subprocess and remove only the upstream session/refcount on session cleanup. Slot-group members always use per-session subprocesses; see [Slot Groups](CONFIGURATION.md#slot-groups).
 
 **Session lifecycle:**
 
 1. Client sends `initialize` POST to `:port/mcp`
 2. `StreamableHTTPHandler` invokes the `getServer` callback (runs synchronously before `server.Connect()`)
 3. Inside `getServer`:
-   - A new `mcp.Server` is created with `HasTools: true`
+   - A new `mcp.Server` is created, advertising tools (with list-changed) and logging capabilities
    - In stateful mode, `session.Manager.SpawnSession()` starts a dedicated subprocess and completes the MCP initialize handshake. In shared mode, `SharedSessionManager` obtains the shared subprocess, starting it if needed
    - `downstream.ListTools()` discovers available tools
    - Each tool is registered on the upstream `mcp.Server` via `Server.AddTool(tool, handler)` with a proxy handler that forwards `CallTool` to the downstream `ClientSession`
@@ -244,6 +245,7 @@ Vision branches lifecycle ownership by transport type to avoid duplicate or orph
 - `registry.Start()` skips the supervisor — no daemon-scoped subprocess is created
 - The session manager owns stdio subprocesses: `Manager` for stateful sessions and `SharedSessionManager` for shared sessions
 - Stateful sessions get a dedicated subprocess via `SpawnSession()`; shared sessions use one subprocess spawned lazily on first use
+- Vision's periodic end-to-end reachability probe also counts as use; it can cold-start a reaped downstream
 - Stateful subprocesses are spawned on session connect, not at daemon startup
 - The session reaper or session close cleans up stateful subprocesses; shared subprocesses are idle-reaped after the last session is removed when idle reaping is enabled
 

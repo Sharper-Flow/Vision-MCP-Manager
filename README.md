@@ -30,7 +30,7 @@ Vision is a Go-native daemon that provides:
 |------------|---------------|
 | **Centralized Registry** | One YAML file (`~/.config/vision/servers.yaml`) defines all your MCP servers |
 | **Process Supervision** | Managed HTTP children run under a suture supervisor with automatic restarts and backoff; the session manager owns and respawns stdio subprocesses without supervision |
-| **Streamable HTTP Proxy** | Each stdio server has a dedicated port. Sessions share one subprocess by default; `stateful: true` gives each session its own subprocess |
+| **Streamable HTTP Proxy** | Each stdio server has a dedicated port. Sessions share one subprocess by default; `stateful: true` or a `slot_groups` pool opts into per-session subprocesses |
 | **Automatic Respawn** | An unavailable stdio subprocess can be replaced before dispatch on the next request. Vision never replays a request after uncertain downstream execution; an expired shared-mode session returns 404 and the client must re-initialize |
 | **Stdio Forwarding** | Forwards tool listing and calls, tool-list changes, logging messages, and progress notifications; resources and prompts are not forwarded |
 | **Agent Self-Management** | AI agents can inspect, restart, and remove configured servers through the Admin MCP API |
@@ -53,7 +53,7 @@ No human intervention. No config file edits. The agent repairs the tools it was 
 **But you stay in control:**
 - All servers are defined in your central config
 - Agents cannot install new servers; every server comes from your config
-- Process lifecycle events are logged; managed HTTP children are supervisor-restarted, and stdio subprocesses can respawn on use
+- Process lifecycle events are logged; managed HTTP children are supervisor-restarted, and stdio subprocesses respawn on use or on a failed shared-mode health probe
 - One `vision daemon status` shows everything
 
 ## Comparison
@@ -66,7 +66,7 @@ No human intervention. No config file edits. The agent repairs the tools it was 
 | Hot reload | Yes | No | No |
 | Central config | Yes | Yes | No (per-project) |
 | Streamable HTTP proxy | Yes | Some | No |
-| Per-session isolation | Opt-in (`stateful: true`) | No | No |
+| Per-session isolation | Opt-in (`stateful: true` or slot groups) | No | Per client |
 | Admin MCP API | Yes | No | N/A |
 | Single binary | Yes | Varies | N/A |
 
@@ -304,7 +304,7 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 High-agency doesn't mean black-box. Vision gives you:
 
 - **Centralized config** — Know exactly what tools are available (`~/.config/vision/servers.yaml`)
-- **Process visibility** — Lifecycle events are logged. The supervisor restarts managed HTTP children; stdio subprocesses can respawn on use
+- **Process visibility** — Lifecycle events are logged. The supervisor restarts managed HTTP children; stdio subprocesses respawn on use or when a shared-mode health probe detects a dead subprocess
 - **Single daemon** — One place to check status: `vision daemon status`
 - **Dedicated ports** — Each stdio or managed HTTP server has its own port for security and debugging
 - **Hot reload** — Update config without disrupting active sessions: `vision daemon reload`
