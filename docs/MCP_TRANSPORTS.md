@@ -100,12 +100,13 @@ Stateful servers (`stateful: true`) give every upstream MCP session a **dedicate
 1. Client sends `initialize` POST to `:port/mcp`
 2. `StreamableHTTPHandler` invokes the `getServer` callback (runs synchronously before `server.Connect()`)
 3. Inside `getServer`:
-   - A new `mcp.Server` is created, advertising tools (with list-changed) and logging capabilities
+   - A new `mcp.Server` is created, advertising tools (with list-changed) and logging capabilities; resource and prompt capabilities are added automatically when the downstream serves them
    - In stateful mode, `session.Manager.SpawnSession()` starts a dedicated subprocess and completes the MCP initialize handshake. In shared mode, `SharedSessionManager` obtains the shared subprocess, starting it if needed
    - `downstream.ListTools()` discovers available tools
    - Each tool is registered on the upstream `mcp.Server` via `Server.AddTool(tool, handler)` with a proxy handler that forwards `CallTool` to the downstream `ClientSession`
-4. The upstream client can list the registered downstream tools
-5. Subsequent `tools/call` requests are proxied to the downstream subprocess
+   - When the downstream advertises resources or prompts, Vision lists its resources, resource templates, and prompts and registers each on the upstream `mcp.Server` with a proxy handler that forwards `resources/read` and `prompts/get`
+4. The upstream client can list the registered downstream tools, resources, resource templates, and prompts
+5. Subsequent `tools/call`, `resources/read`, and `prompts/get` requests are proxied to the downstream subprocess
 6. On `DELETE /mcp`, disconnect cleanup, or session timeout, Vision removes the upstream session. Stateful cleanup terminates that session's subprocess. Shared-mode cleanup decrements the shared refcount, closes the upstream session so later requests on its ID receive `404`, and leaves the downstream subprocess healthy for other sessions. Shared sessions expire after `session_timeout` without valid application activity, and expiry waits for zero in-flight calls.
 
 Shared-mode activity follows the same rule as managed HTTP: only structurally valid, non-`ping` JSON-RPC requests in POST bodies refresh the session. Notifications, responses, GET/SSE requests, and pings do not. The default `session_timeout` is 30 minutes.
@@ -134,13 +135,15 @@ Managed-http timing derives from these server settings:
 
 ### Notification Relay
 
-The stdio proxy forwards tool listing and calls, tool-list changes, logging messages, and progress notifications. It does not forward resources or prompts.
+The stdio proxy forwards tool listing and calls, tool-list changes, resource and resource-template listing and reads, prompt listing and gets, resource- and prompt-list changes, logging messages, and progress notifications. Resource subscriptions (`resources/subscribe`, `resources/updated`) and completions are not forwarded. A capability is advertised upstream only when the downstream lists at least one item for it.
 
 Downstream-to-upstream notifications are relayed via the `proxySession` struct:
 
 | Downstream Notification | Upstream Action |
 |------------------------|-----------------|
 | `tools/list_changed` | Re-discover tools via `ListTools`, re-register on upstream `mcp.Server` (auto-notifies clients) |
+| `resources/list_changed` | Re-list resources and resource templates, re-register on upstream `mcp.Server` (auto-notifies clients) |
+| `prompts/list_changed` | Re-list prompts, re-register on upstream `mcp.Server` (auto-notifies clients) |
 | `logging/message` | Relay via `ServerSession.Log()` |
 | `progress` | Relay via `ServerSession.NotifyProgress()` |
 
@@ -234,7 +237,7 @@ servers:
 Vision:
 1. Allocates the configured port for Streamable HTTP
 2. Starts a subprocess with `command` + `args` on use: one per session in stateful mode, or one shared by default
-3. Proxies tools, logging, and progress between the upstream HTTP sessions and the downstream stdio subprocess
+3. Proxies tools, resources, prompts, logging, and progress between the upstream HTTP sessions and the downstream stdio subprocess
 4. On teardown, terminates the stateful session's subprocess or decrements the shared refcount; the shared subprocess is idle-reaped after the refcount reaches zero when idle reaping is enabled
 
 ### Subprocess Lifecycle Ownership

@@ -295,7 +295,7 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 **Key components:**
 
 1. **Admin MCP Server** — Lets agents manage their own tooling without human intervention
-2. **Streamable HTTP Proxy** — Stdio sessions share a subprocess by default; `stateful: true` gives each session its own. Tools are discovered dynamically. An unavailable subprocess can be respawned before dispatch on a later request, without replaying uncertain operations
+2. **Streamable HTTP Proxy** — Stdio sessions share a subprocess by default; `stateful: true` gives each session its own. Tools, resources, and prompts are discovered dynamically. An unavailable subprocess can be respawned before dispatch on a later request, without replaying uncertain operations
 3. **Process Supervisor** — Uses [suture](https://github.com/thejerf/suture) for automatic restarts with backoff for managed HTTP children
 4. **Security Middleware** — Bearer auth, origin allowlist, rate limiting, body size caps, and session admission control
 
