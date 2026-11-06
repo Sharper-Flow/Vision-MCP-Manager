@@ -55,12 +55,12 @@ Vision exposes **Streamable HTTP** to upstream clients (AI agents). Most servers
   |    go-sdk mcp.Server + StreamableHTTPHandler             |
   |    Tools: vision_list, vision_restart, vision_remove, ...|
   |                                                          |
-  |  Per-Server Proxy (one port per configured server):      |
+  |  Per-Server Proxy (one port per stdio server):           |
   |                                                          |
-  |  :6276/mcp ──[session A]──> subprocess A (stdio)         |
-  |            ──[session B]──> subprocess B (stdio)          |
+  |  :6276/mcp ──[session A]──┐                              |
+  |            ──[session B]──┴─> shared subprocess (stdio)  |
   |                                                          |
-  |  :6277/mcp ──[session C]──> subprocess C (stdio)         |
+  |  Default: shared; stateful: true: one process per session |
   |                                                          |
   |  Components:                                             |
   |    StreamableHTTPHandler  (go-sdk, per-server port)      |
@@ -100,10 +100,10 @@ Stateful servers (`stateful: true`) give every upstream MCP session a **dedicate
 2. `StreamableHTTPHandler` invokes the `getServer` callback (runs synchronously before `server.Connect()`)
 3. Inside `getServer`:
    - A new `mcp.Server` is created with `HasTools: true`
-   - `session.Manager.SpawnSession()` creates a `CommandTransport` and calls `Client.Connect()` which starts the subprocess and completes the MCP initialize handshake
+   - In stateful mode, `session.Manager.SpawnSession()` starts a dedicated subprocess and completes the MCP initialize handshake. In shared mode, `SharedSessionManager` obtains the shared subprocess, starting it if needed
    - `downstream.ListTools()` discovers available tools
    - Each tool is registered on the upstream `mcp.Server` via `Server.AddTool(tool, handler)` with a proxy handler that forwards `CallTool` to the downstream `ClientSession`
-4. The upstream client sees all downstream tools in its initialize response
+4. The upstream client can list the registered downstream tools
 5. Subsequent `tools/call` requests are proxied to the downstream subprocess
 6. On `DELETE /mcp`, disconnect cleanup, or session timeout, Vision removes the upstream session. Stateful cleanup terminates that session's subprocess. Shared-mode cleanup decrements the shared refcount, closes the upstream session so later requests on its ID receive `404`, and leaves the downstream subprocess healthy for other sessions. Shared sessions expire after `session_timeout` without valid application activity, and expiry waits for zero in-flight calls.
 
@@ -132,6 +132,8 @@ Managed-http timing derives from these server settings:
 `disconnect_grace_period` and `request_timeout` were previously dead configuration on the managed-http path. They are now live: the former controls stream-disconnect lease cleanup, and the latter controls the outbound response-header bound.
 
 ### Notification Relay
+
+The stdio proxy forwards tool listing and calls, tool-list changes, logging messages, and progress notifications. It does not forward resources or prompts.
 
 Downstream-to-upstream notifications are relayed via the `proxySession` struct:
 
@@ -230,9 +232,9 @@ servers:
 
 Vision:
 1. Allocates the configured port for Streamable HTTP
-2. On each new client session, spawns a subprocess with `command` + `args`
-3. Proxies MCP requests between the upstream HTTP session and the downstream stdio subprocess
-4. On session teardown, terminates only that session's subprocess
+2. Starts a subprocess with `command` + `args` on use: one per session in stateful mode, or one shared by default
+3. Proxies tools, logging, and progress between the upstream HTTP sessions and the downstream stdio subprocess
+4. On teardown, terminates the stateful session's subprocess or decrements the shared refcount; the shared subprocess is idle-reaped after the refcount reaches zero when idle reaping is enabled
 
 ### Subprocess Lifecycle Ownership
 
@@ -240,10 +242,10 @@ Vision branches lifecycle ownership by transport type to avoid duplicate or orph
 
 **stdio transport:**
 - `registry.Start()` skips the supervisor — no daemon-scoped subprocess is created
-- `session.Manager` is the **sole lifecycle owner** for stdio subprocesses
-- Each upstream session gets its own isolated subprocess via `SpawnSession()`
-- Subprocesses are spawned **lazily** on first HTTP session connect, not at daemon startup
-- Subprocesses are cleaned up by the session reaper (idle timeout / TTL) or on session close
+- The session manager owns stdio subprocesses: `Manager` for stateful sessions and `SharedSessionManager` for shared sessions
+- Stateful sessions get a dedicated subprocess via `SpawnSession()`; shared sessions use one subprocess spawned lazily on first use
+- Stateful subprocesses are spawned on session connect, not at daemon startup
+- The session reaper or session close cleans up stateful subprocesses; shared subprocesses are idle-reaped after the last session is removed when idle reaping is enabled
 
 **managed-http transport:**
 - `registry.Start()` registers one daemon-scoped native HTTP child with the supervisor.
@@ -254,10 +256,10 @@ Vision branches lifecycle ownership by transport type to avoid duplicate or orph
 
 **HTTP/SSE transport:**
 - The configured URL identifies an externally owned service; Vision does not launch its command.
-- Registry/supervisor state represents the proxy service, not a child process.
-- Requests forward to the configured existing server endpoint.
+- Registry/supervisor state represents a placeholder service, not a child process.
+- The placeholder binds no listener and forwards nothing. Connect clients directly to the endpoint.
 
-This distinction matters for process accounting: stdio servers report `PID=0` in registry status because no daemon-scoped process exists. This is **correct and expected** — it means "the proxy endpoint is active, but subprocess lifecycle is managed per-session by the session manager."
+This distinction matters for process accounting: stdio servers report `PID=0` in registry status because no daemon-scoped process exists. Subprocess lifecycle is managed by the session manager, in shared or stateful mode.
 
 ### Transport Detection
 
@@ -270,14 +272,14 @@ When `transport` is not specified, Vision infers it from the config:
 | URL ending in `/mcp` | `http` |
 | other URL | `sse` |
 
-> **Current support:** Vision already supports HTTP and SSE proxy transports for remote/native MCP servers. Use `transport: http` or `transport: sse` with `url:` when you intentionally want Vision in front of an upstream MCP endpoint.
+> **Current support:** Config inference recognizes HTTP and SSE transports, but their proxy is not implemented. Do not use them to put Vision in front of a remote MCP endpoint.
 
 ## Internal Packages
 
 | Package | Responsibility |
 |---------|---------------|
 | `internal/server` | `Registry` — server registration; `Start()`/`Stop()` branch by transport type to skip supervisor for stdio servers; `ManagedServer` — per-server state |
-| `internal/session` | `Manager` — per-session subprocess lifecycle (spawn, track, teardown), reaper |
+| `internal/session` | Stateful and shared subprocess lifecycle (spawn, track, teardown), reaper |
 | `internal/mcp` | `NewProxyHandler` for stdio; `ManagedHTTPGateway` for native HTTP; lease/classification/security middleware; per-port listeners |
 | `internal/admin` | Admin MCP server on port 6275 with `vision_*` management tools |
 | `internal/reachability` | Probe-backed reachability evidence and probe-worker scheduling |

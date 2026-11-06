@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"></a>
 </p>
 
-Vision turns MCP servers from a configuration nightmare into a supervised, agent-accessible control plane. One daemon. One config. Full agent autonomy with complete operator oversight.
+Vision turns MCP servers from a configuration nightmare into a managed, agent-accessible control plane. One daemon. One config. Full agent autonomy with complete operator oversight.
 
 ## The Problem
 
@@ -29,9 +29,10 @@ Vision is a Go-native daemon that provides:
 | Capability | What It Means |
 |------------|---------------|
 | **Centralized Registry** | One YAML file (`~/.config/vision/servers.yaml`) defines all your MCP servers |
-| **Process Supervision** | Erlang-style supervision with automatic restarts and exponential backoff |
-| **Streamable HTTP Proxy** | Per-session subprocess isolation—each client gets its own MCP process on a dedicated port |
-| **Automatic Respawn** | If a downstream subprocess is reaped or crashes, the next tool call transparently spawns a fresh one |
+| **Process Supervision** | Managed HTTP children run under a suture supervisor with automatic restarts and backoff; the session manager owns and respawns stdio subprocesses without supervision |
+| **Streamable HTTP Proxy** | Each stdio server has a dedicated port. Sessions share one subprocess by default; `stateful: true` gives each session its own subprocess |
+| **Automatic Respawn** | An unavailable stdio subprocess can be replaced before dispatch on the next request. Vision never replays a request after uncertain downstream execution; an expired shared-mode session returns 404 and the client must re-initialize |
+| **Stdio Forwarding** | Forwards tool listing and calls, tool-list changes, logging messages, and progress notifications; resources and prompts are not forwarded |
 | **Agent Self-Management** | AI agents can inspect, restart, and remove configured servers through the Admin MCP API |
 | **Hot Reload** | Update configuration without restarting your coding session |
 
@@ -52,7 +53,7 @@ No human intervention. No config file edits. The agent repairs the tools it was 
 **But you stay in control:**
 - All servers are defined in your central config
 - Agents cannot install new servers; every server comes from your config
-- Every process is supervised and logged
+- Process lifecycle events are logged; managed HTTP children are supervisor-restarted, and stdio subprocesses can respawn on use
 - One `vision daemon status` shows everything
 
 ## Comparison
@@ -60,12 +61,12 @@ No human intervention. No config file edits. The agent repairs the tools it was 
 | Feature | Vision | MCP Gateway | Direct Config |
 |---------|--------|-------------|-------------------|
 | Agent self-management | Yes | No | No |
-| Process supervision | Yes (Erlang-style) | Varies | No |
-| Automatic restarts | Yes | Varies | No |
+| Process supervision | Managed HTTP children only | Varies | No |
+| Automatic restarts | Managed HTTP supervisor; stdio respawn on use | Varies | No |
 | Hot reload | Yes | No | No |
 | Central config | Yes | Yes | No (per-project) |
 | Streamable HTTP proxy | Yes | Some | No |
-| Per-session isolation | Yes | No | No |
+| Per-session isolation | Opt-in (`stateful: true`) | No | No |
 | Admin MCP API | Yes | No | N/A |
 | Single binary | Yes | Varies | N/A |
 
@@ -159,9 +160,9 @@ servers:
     autostart: true
 ```
 
-> **Session lifecycle:** Idle sessions are reaped after `session_timeout` (default 30m). For shared-mode stdio, only structurally valid, non-`ping` JSON-RPC requests refresh activity, and an expired upstream session requires a new initialize request. Stateful sessions respawn a fresh subprocess on the next tool call.
+> **Session lifecycle:** Idle sessions are reaped after `session_timeout` (default 30m). For shared-mode stdio, only structurally valid, non-`ping` JSON-RPC requests refresh activity, and an expired upstream session requires a new initialize request. A stateful session can respawn its subprocess before dispatch on a later tool call.
 
-> **Availability profiles:** Set `availability_profile: networked` for servers backed by upstream web/API providers. Vision applies stronger timeout, retry, circuit-breaker, cache, and in-flight limit defaults while still keeping per-session downstream isolation by default.
+> **Availability profiles:** Set `availability_profile: networked` for servers backed by upstream web/API providers. Vision applies availability defaults for timeouts, retries, circuit breakers, cache, and in-flight limits. The profile does not change the isolation model.
 
 > **Slot groups:** For servers that need concurrent process-per-session isolation (e.g. Playwright browser automation), declare a `slot_groups` pool in `servers.yaml`. Vision expands the pool into identical slots behind a single virtual port and transparently routes each session to the least-loaded healthy slot — agents connect to one endpoint and never see the underlying processes. See [Configuration Reference](docs/CONFIGURATION.md#slot-groups) for the full schema and examples.
 
@@ -185,7 +186,7 @@ Vision loads `.env` before parsing the config, so `${VAR}` expansion works regar
 
 > **Important:** After changing `.env`, reload is not always sufficient for already-running downstream subprocesses. New spawns will use the updated values, but long-lived MCP server processes may keep the old environment until they are restarted. After rotating API keys or tokens, prefer a full `vision daemon restart` flow (`vision daemon stop` → `vision daemon start`) or restart the affected server/session before validating the change.
 
-For producer-owned remote MCPs like Grep by Vercel, prefer configuring the official remote endpoint directly in your client instead of wrapping it in a local subprocess. If you intentionally want Vision to proxy a remote MCP, use `transport: http` with `url:` in `servers.yaml`.
+Configure producer-owned remote MCP endpoints directly in your client. Vision accepts `transport: http` and `transport: sse` entries in config validation, but their placeholder service binds no port and forwards nothing.
 
 ### Client Integration
 
@@ -278,18 +279,15 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 │   ┌─────────────────────────────────────────────────────────┐   │
 │   │          Streamable HTTP Proxy Layer                    │   │
 │   │                                                         │   │
-│   │  :6276/mcp ──[session A]──> subprocess A (stdio)        │   │
-│   │            ──[session B]──> subprocess B (stdio)         │   │
+│   │  :6276/mcp ──[session A]──┐                             │   │
+│   │            ──[session B]──┴─> shared subprocess         │   │
 │   │                                                         │   │
-│   │  :6284/mcp ──[session C]──> subprocess C (stdio)        │   │
-│   │                                                         │   │
-│   │  :6282/mcp ──[session D]──> subprocess D (stdio)  ...   │   │
+│   │  stdio default: shared; stateful: true: per session     │   │
 │   └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
 │   ┌─────────────────────────────────────────────────────────┐   │
-│   │         Process Supervisor (Erlang-style)               │   │
-│   │   Automatic restarts · Exponential backoff · Graceful   │   │
-│   │   teardown: stdin close → SIGTERM → SIGKILL             │   │
+│   │     Process Supervisor (managed HTTP children only)     │   │
+│   │          Automatic restarts · Backoff                   │   │
 │   └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -297,8 +295,8 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 **Key components:**
 
 1. **Admin MCP Server** — Lets agents manage their own tooling without human intervention
-2. **Streamable HTTP Proxy** — Each client session spawns an isolated subprocess; tools are discovered dynamically and proxied transparently. If a subprocess is reaped (idle timeout) or crashes, the proxy automatically respawns it on the next request
-3. **Process Supervisor** — Uses [suture](https://github.com/thejerf/suture) for automatic restarts with backoff
+2. **Streamable HTTP Proxy** — Stdio sessions share a subprocess by default; `stateful: true` gives each session its own. Tools are discovered dynamically. An unavailable subprocess can be respawned before dispatch on a later request, without replaying uncertain operations
+3. **Process Supervisor** — Uses [suture](https://github.com/thejerf/suture) for automatic restarts with backoff for managed HTTP children
 4. **Security Middleware** — Bearer auth, origin allowlist, rate limiting, body size caps, and session admission control
 
 ## Trust Through Visibility
@@ -306,9 +304,9 @@ The Admin MCP Server (port 6275) exposes these tools to your AI agent:
 High-agency doesn't mean black-box. Vision gives you:
 
 - **Centralized config** — Know exactly what tools are available (`~/.config/vision/servers.yaml`)
-- **Process supervision** — Every server is monitored; crashes trigger automatic restarts
+- **Process visibility** — Lifecycle events are logged. The supervisor restarts managed HTTP children; stdio subprocesses can respawn on use
 - **Single daemon** — One place to check status: `vision daemon status`
-- **Dedicated ports** — Each server isolated on its own port for security and debugging
+- **Dedicated ports** — Each stdio or managed HTTP server has its own port for security and debugging
 - **Hot reload** — Update config without disrupting active sessions: `vision daemon reload`
 
 ## CLI Reference
@@ -353,7 +351,7 @@ Admin MCP callers must provide an absolute path.
 
 - [Configuration Reference](docs/CONFIGURATION.md) — Complete server options
 - [AI Agents Guide](docs/agents.md) — Deep dive into agent integration
-- [MCP Transports](docs/MCP_TRANSPORTS.md) — Streamable HTTP proxy and per-session subprocess model
+- [MCP Transports](docs/MCP_TRANSPORTS.md) — Streamable HTTP proxy and subprocess models
 - [MCP 2026-07-28 Alignment Decision](docs/decisions/0001-mcp-2026-07-28-alignment.md) — Stateless transport migration and isolation stance
 - [Development Guide](DEVELOPMENT.md) — Building and contributing
 
