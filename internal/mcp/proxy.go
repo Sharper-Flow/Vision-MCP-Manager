@@ -750,12 +750,15 @@ type proxySession struct {
 
 	// mu guards upstreamSession, upstreamSessionID, and currentTools.
 	// InitializedHandler runs concurrently with getServer return.
-	mu                sync.Mutex
-	upstreamSession   *mcp.ServerSession
-	upstreamSessionID string
-	currentTools      map[string]struct{}
-	closeReason       string
-	reachabilityStore *reachability.Store
+	mu                       sync.Mutex
+	upstreamSession          *mcp.ServerSession
+	upstreamSessionID        string
+	currentTools             map[string]struct{}
+	currentResources         map[string]struct{}
+	currentResourceTemplates map[string]struct{}
+	currentPrompts           map[string]struct{}
+	closeReason              string
+	reachabilityStore        *reachability.Store
 
 	// sessionCounted reports whether this proxy session currently holds one
 	// active-session credit on ps.metrics. Guarded by mu. A session acquires
@@ -1050,6 +1053,8 @@ func newPerSessionServer(
 		ToolListChangedHandler: func(ctx context.Context, _ *mcp.ToolListChangedRequest) {
 			ps.handleToolListChanged(ctx)
 		},
+		ResourceListChangedHandler: func(ctx context.Context, _ *mcp.ResourceListChangedRequest) { ps.handleResourceListChanged(ctx) },
+		PromptListChangedHandler:   func(ctx context.Context, _ *mcp.PromptListChangedRequest) { ps.handlePromptListChanged(ctx) },
 		LoggingMessageHandler: func(ctx context.Context, req *mcp.LoggingMessageRequest) {
 			ps.handleLoggingMessage(ctx, req.Params)
 		},
@@ -1118,6 +1123,7 @@ func newPerSessionServer(
 	for _, tool := range toolsResult.Tools {
 		server.AddTool(tool, makeProxyToolHandler(ps, tool.Name))
 	}
+	ps.refreshCatalogs(ctx, downstream, server, true, true)
 
 	logger.Info("proxy session established",
 		slog.Int("tools", len(toolsResult.Tools)),
@@ -1249,15 +1255,20 @@ func newSharedModeServer(
 	}()
 	ps.respawnMu.Lock()
 	defer ps.respawnMu.Unlock()
-	refresh := func(ctx context.Context) {
-		refreshCtx, cancel := context.WithTimeout(ctx, ps.requestTimeout)
-		defer cancel()
-		ps.handleToolListChanged(refreshCtx)
+	boundedRefresh := func(fn func(context.Context)) func(context.Context) {
+		return func(ctx context.Context) {
+			refreshCtx, cancel := context.WithTimeout(ctx, ps.requestTimeout)
+			defer cancel()
+			fn(refreshCtx)
+		}
 	}
+	refreshTools := boundedRefresh(ps.handleToolListChanged)
+	refreshResources := boundedRefresh(ps.handleResourceListChanged)
+	refreshPrompts := boundedRefresh(ps.handlePromptListChanged)
 
 	// Subscribe to respawn notifications so we update our local pointer. A
 	// respawn notification must not resurrect a closed proxy generation.
-	sm.Subscribe(sessionID, func(newDS *mcp.ClientSession) {
+	sm.Subscribe(sessionID, session.SharedSubscriber{OnRespawn: func(newDS *mcp.ClientSession) {
 		ps.downstreamMu.Lock()
 		if ps.downstreamClosed {
 			ps.downstreamMu.Unlock()
@@ -1269,8 +1280,12 @@ func newSharedModeServer(
 			slog.String("event", "shared_session.respawn"),
 		)
 		// Publication must not wait on catalog refresh or respawnMu.
-		go refresh(context.Background())
-	}, refresh)
+		go func() {
+			refreshTools(context.Background())
+			refreshResources(context.Background())
+			refreshPrompts(context.Background())
+		}()
+	}, OnToolListChanged: refreshTools, OnResourceListChanged: refreshResources, OnPromptListChanged: refreshPrompts})
 
 	// Discover tools from downstream.
 	toolsResult, err := downstream.ListTools(ctx, nil)
@@ -1291,6 +1306,7 @@ func newSharedModeServer(
 	for _, tool := range toolsResult.Tools {
 		server.AddTool(tool, makeProxyToolHandler(ps, tool.Name))
 	}
+	ps.refreshCatalogs(ctx, downstream, server, true, true)
 
 	logger.Info("shared proxy session established",
 		slog.Int("tools", len(toolsResult.Tools)),
@@ -1361,7 +1377,6 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	for _, tool := range toolsResult.Tools {
 		ps.server.AddTool(tool, makeProxyToolHandler(ps, tool.Name))
 	}
-
 	ps.mu.Lock()
 	oldToolNames := ps.currentTools
 	ps.currentTools = newToolNames
@@ -1385,6 +1400,156 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	ps.logger.Info("tools re-discovered",
 		slog.Int("tools", len(toolsResult.Tools)),
 	)
+}
+
+// refreshCatalogs preserves the previous catalog when discovery fails.
+func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSession, server *mcp.Server, resources, prompts bool) {
+	init := ds.InitializeResult()
+	if init == nil || init.Capabilities == nil {
+		return
+	}
+	if resources && init.Capabilities.Resources != nil {
+		result, err := ds.ListResources(ctx, nil)
+		if err != nil {
+			ps.logger.Warn("failed to list downstream resources", slog.String("error", err.Error()))
+		} else {
+			current := make(map[string]struct{}, len(result.Resources))
+			for _, resource := range result.Resources {
+				current[resource.URI] = struct{}{}
+				server.AddResource(resource, makeProxyResourceHandler(ps, resource.URI))
+			}
+			ps.mu.Lock()
+			old := ps.currentResources
+			ps.currentResources = current
+			ps.mu.Unlock()
+			server.RemoveResources(staleCatalogEntries(old, current)...)
+		}
+		templates, err := ds.ListResourceTemplates(ctx, nil)
+		if err != nil {
+			ps.logger.Warn("failed to list downstream resource templates", slog.String("error", err.Error()))
+		} else {
+			current := make(map[string]struct{}, len(templates.ResourceTemplates))
+			for _, template := range templates.ResourceTemplates {
+				current[template.URITemplate] = struct{}{}
+				server.AddResourceTemplate(template, makeProxyTemplateHandler(ps, template.URITemplate))
+			}
+			ps.mu.Lock()
+			old := ps.currentResourceTemplates
+			ps.currentResourceTemplates = current
+			ps.mu.Unlock()
+			server.RemoveResourceTemplates(staleCatalogEntries(old, current)...)
+		}
+	}
+	if prompts && init.Capabilities.Prompts != nil {
+		result, err := ds.ListPrompts(ctx, nil)
+		if err != nil {
+			ps.logger.Warn("failed to list downstream prompts", slog.String("error", err.Error()))
+		} else {
+			current := make(map[string]struct{}, len(result.Prompts))
+			for _, prompt := range result.Prompts {
+				current[prompt.Name] = struct{}{}
+				server.AddPrompt(prompt, makeProxyPromptHandler(ps, prompt.Name))
+			}
+			ps.mu.Lock()
+			old := ps.currentPrompts
+			ps.currentPrompts = current
+			ps.mu.Unlock()
+			server.RemovePrompts(staleCatalogEntries(old, current)...)
+		}
+	}
+}
+
+func staleCatalogEntries(old, current map[string]struct{}) []string {
+	var stale []string
+	for name := range old {
+		if _, ok := current[name]; !ok {
+			stale = append(stale, name)
+		}
+	}
+	return stale
+}
+
+func (ps *proxySession) handleResourceListChanged(ctx context.Context) {
+	ps.handleCatalogListChanged(ctx, true)
+}
+func (ps *proxySession) handlePromptListChanged(ctx context.Context) {
+	ps.handleCatalogListChanged(ctx, false)
+}
+
+func (ps *proxySession) handleCatalogListChanged(ctx context.Context, resources bool) {
+	if ps.shared {
+		ps.respawnMu.Lock()
+		defer ps.respawnMu.Unlock()
+	}
+	ps.logger.Info("downstream catalog list_changed, re-discovering", slog.Bool("resources", resources))
+	ps.downstreamMu.RLock()
+	ds, closed := ps.downstream, ps.downstreamClosed
+	ps.downstreamMu.RUnlock()
+	if closed || ds == nil {
+		if ps.shared {
+			return
+		}
+		if _, err := ps.respawnDownstream(ctx, "notification_relay"); err != nil {
+			ps.logger.Warn("respawn failed during catalog refresh", slog.String("error", err.Error()))
+		}
+		return
+	}
+	ps.refreshCatalogs(ctx, ds, ps.server, resources, !resources)
+}
+
+func (ps *proxySession) catalogDownstream(ctx context.Context) (*mcp.ClientSession, error) {
+	ds, closed, err := ps.getDownstream(ctx)
+	if err != nil {
+		if isDownstreamClosureError(err) {
+			return nil, fmt.Errorf("catalog downstream: %w", ErrDownstreamUnavailable)
+		}
+		return nil, err
+	}
+	if closed || ds == nil {
+		if !ps.shared {
+			ds, err = ps.respawnDownstream(ctx, "catalog_read_pre_dispatch")
+		}
+		if ps.shared || err != nil || ds == nil {
+			return nil, fmt.Errorf("catalog downstream: %w", ErrDownstreamUnavailable)
+		}
+	}
+	return ds, nil
+}
+
+func makeProxyResourceHandler(ps *proxySession, uri string) mcp.ResourceHandler {
+	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		ctx, cancel := withRequestTimeoutBudget(ctx, ps.requestTimeout)
+		defer cancel()
+		ds, err := ps.catalogDownstream(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result, err := ds.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
+		if isDownstreamClosureError(err) {
+			return nil, fmt.Errorf("read resource %s: %w", uri, ErrDownstreamUnavailable)
+		}
+		return result, err
+	}
+}
+
+func makeProxyTemplateHandler(ps *proxySession, uriTemplate string) mcp.ResourceHandler {
+	return makeProxyResourceHandler(ps, uriTemplate)
+}
+
+func makeProxyPromptHandler(ps *proxySession, name string) mcp.PromptHandler {
+	return func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		ctx, cancel := withRequestTimeoutBudget(ctx, ps.requestTimeout)
+		defer cancel()
+		ds, err := ps.catalogDownstream(ctx)
+		if err != nil {
+			return nil, err
+		}
+		result, err := ds.GetPrompt(ctx, &mcp.GetPromptParams{Name: req.Params.Name, Arguments: req.Params.Arguments})
+		if isDownstreamClosureError(err) {
+			return nil, fmt.Errorf("get prompt %s: %w", name, ErrDownstreamUnavailable)
+		}
+		return result, err
+	}
 }
 
 // handleLoggingMessage relays a logging notification from downstream to upstream.
@@ -1758,6 +1923,7 @@ func (ps *proxySession) respawnDownstream(ctx context.Context, trigger string) (
 	for _, tool := range toolsResult.Tools {
 		ps.server.AddTool(tool, makeProxyToolHandler(ps, tool.Name))
 	}
+	ps.refreshCatalogs(spawnCtx, downstream, ps.server, true, true)
 
 	// Run the survival check, the closeOnce reset, the credit reacquisition,
 	// and the pointer publication inside one closeMu critical section. A

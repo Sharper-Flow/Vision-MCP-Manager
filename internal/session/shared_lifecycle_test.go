@@ -615,7 +615,7 @@ func TestSharedLifecycleSpawnIdentityAndReasons(t *testing.T) {
 		t.Fatalf("invalid first process identity: %d %s", pid, started)
 	}
 	replaced := make(chan *mcp.ClientSession, 4)
-	sm.Subscribe("one", func(ds *mcp.ClientSession) { replaced <- ds }, nil)
+	sm.Subscribe("one", SharedSubscriber{OnRespawn: func(ds *mcp.ClientSession) { replaced <- ds }})
 	sm.mu.RLock()
 	cmd, done := sm.cmd, sm.downstreamDone
 	sm.mu.RUnlock()

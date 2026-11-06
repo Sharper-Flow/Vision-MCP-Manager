@@ -78,8 +78,18 @@ type SharedSessionManager struct {
 }
 
 type sharedSubscriber struct {
-	onRespawn         func(*mcp.ClientSession)
-	onToolListChanged func(context.Context)
+	onRespawn             func(*mcp.ClientSession)
+	onToolListChanged     func(context.Context)
+	onResourceListChanged func(context.Context)
+	onPromptListChanged   func(context.Context)
+}
+
+// SharedSubscriber receives notifications for one upstream session.
+type SharedSubscriber struct {
+	OnRespawn             func(*mcp.ClientSession)
+	OnToolListChanged     func(context.Context)
+	OnResourceListChanged func(context.Context)
+	OnPromptListChanged   func(context.Context)
 }
 
 type sharedSession struct {
@@ -368,6 +378,20 @@ func (sm *SharedSessionManager) spawn(ctx context.Context, reason string) (*mcp.
 			sm.notifySubscribers(func(sub sharedSubscriber) {
 				if sub.onToolListChanged != nil {
 					sub.onToolListChanged(ctx)
+				}
+			})
+		},
+		ResourceListChangedHandler: func(ctx context.Context, _ *mcp.ResourceListChangedRequest) {
+			sm.notifySubscribers(func(sub sharedSubscriber) {
+				if sub.onResourceListChanged != nil {
+					sub.onResourceListChanged(ctx)
+				}
+			})
+		},
+		PromptListChangedHandler: func(ctx context.Context, _ *mcp.PromptListChangedRequest) {
+			sm.notifySubscribers(func(sub sharedSubscriber) {
+				if sub.onPromptListChanged != nil {
+					sub.onPromptListChanged(ctx)
 				}
 			})
 		},
@@ -723,10 +747,10 @@ func (sm *SharedSessionManager) AdmissionStatus() (atCapacity bool, current int,
 }
 
 // Subscribe registers callbacks for downstream replacement and tool-list changes.
-func (sm *SharedSessionManager) Subscribe(sessionID string, onRespawn func(*mcp.ClientSession), onToolListChanged func(context.Context)) {
+func (sm *SharedSessionManager) Subscribe(sessionID string, sub SharedSubscriber) {
 	sm.subMu.Lock()
 	defer sm.subMu.Unlock()
-	sm.subscribers[sessionID] = sharedSubscriber{onRespawn: onRespawn, onToolListChanged: onToolListChanged}
+	sm.subscribers[sessionID] = sharedSubscriber{onRespawn: sub.OnRespawn, onToolListChanged: sub.OnToolListChanged, onResourceListChanged: sub.OnResourceListChanged, onPromptListChanged: sub.OnPromptListChanged}
 }
 
 // Unsubscribe removes the downstream callbacks for the given session ID.
