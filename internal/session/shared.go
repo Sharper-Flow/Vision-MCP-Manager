@@ -74,12 +74,15 @@ type SharedSessionManager struct {
 	healthCancel context.CancelFunc
 
 	subMu       sync.RWMutex
-	subscribers map[string]sharedSubscriber
+	subscribers map[string]SharedSubscriber
 }
 
-type sharedSubscriber struct {
-	onRespawn         func(*mcp.ClientSession)
-	onToolListChanged func(context.Context)
+// SharedSubscriber receives notifications for one upstream session.
+type SharedSubscriber struct {
+	OnRespawn             func(*mcp.ClientSession)
+	OnToolListChanged     func(context.Context)
+	OnResourceListChanged func(context.Context)
+	OnPromptListChanged   func(context.Context)
 }
 
 type sharedSession struct {
@@ -134,7 +137,7 @@ func NewSharedSessionManager(serverName string, cfg *config.ServerConfig, logger
 		logger:           logger.With(slog.String("server", serverName)),
 		upstreamSessions: make(map[string]struct{}),
 		sessions:         make(map[string]*sharedSession),
-		subscribers:      make(map[string]sharedSubscriber),
+		subscribers:      make(map[string]SharedSubscriber),
 		idleTimeout:      idleTimeout,
 		sessionTimeout:   time.Duration(cfg.SessionTimeout),
 		metrics:          m,
@@ -319,9 +322,9 @@ func (sm *SharedSessionManager) startDownstreamLocked(reason string, drain <-cha
 		}
 		sm.mu.Unlock()
 		if err == nil {
-			sm.notifySubscribers(func(sub sharedSubscriber) {
-				if sub.onRespawn != nil {
-					sub.onRespawn(ds)
+			sm.notifySubscribers(func(sub SharedSubscriber) {
+				if sub.OnRespawn != nil {
+					sub.OnRespawn(ds)
 				}
 			})
 		}
@@ -365,9 +368,23 @@ func (sm *SharedSessionManager) spawn(ctx context.Context, reason string) (*mcp.
 		Version: "1.0.0",
 	}, &mcp.ClientOptions{
 		ToolListChangedHandler: func(ctx context.Context, _ *mcp.ToolListChangedRequest) {
-			sm.notifySubscribers(func(sub sharedSubscriber) {
-				if sub.onToolListChanged != nil {
-					sub.onToolListChanged(ctx)
+			sm.notifySubscribers(func(sub SharedSubscriber) {
+				if sub.OnToolListChanged != nil {
+					sub.OnToolListChanged(ctx)
+				}
+			})
+		},
+		ResourceListChangedHandler: func(ctx context.Context, _ *mcp.ResourceListChangedRequest) {
+			sm.notifySubscribers(func(sub SharedSubscriber) {
+				if sub.OnResourceListChanged != nil {
+					sub.OnResourceListChanged(ctx)
+				}
+			})
+		},
+		PromptListChangedHandler: func(ctx context.Context, _ *mcp.PromptListChangedRequest) {
+			sm.notifySubscribers(func(sub SharedSubscriber) {
+				if sub.OnPromptListChanged != nil {
+					sub.OnPromptListChanged(ctx)
 				}
 			})
 		},
@@ -722,11 +739,12 @@ func (sm *SharedSessionManager) AdmissionStatus() (atCapacity bool, current int,
 	return atCapacity, current, max
 }
 
-// Subscribe registers callbacks for downstream replacement and tool-list changes.
-func (sm *SharedSessionManager) Subscribe(sessionID string, onRespawn func(*mcp.ClientSession), onToolListChanged func(context.Context)) {
+// Subscribe registers callbacks for downstream replacement and tool, resource,
+// and prompt list changes.
+func (sm *SharedSessionManager) Subscribe(sessionID string, sub SharedSubscriber) {
 	sm.subMu.Lock()
 	defer sm.subMu.Unlock()
-	sm.subscribers[sessionID] = sharedSubscriber{onRespawn: onRespawn, onToolListChanged: onToolListChanged}
+	sm.subscribers[sessionID] = sub
 }
 
 // Unsubscribe removes the downstream callbacks for the given session ID.
@@ -736,9 +754,9 @@ func (sm *SharedSessionManager) Unsubscribe(sessionID string) {
 	delete(sm.subscribers, sessionID)
 }
 
-func (sm *SharedSessionManager) notifySubscribers(notify func(sharedSubscriber)) {
+func (sm *SharedSessionManager) notifySubscribers(notify func(SharedSubscriber)) {
 	sm.subMu.RLock()
-	subscribers := make([]sharedSubscriber, 0, len(sm.subscribers))
+	subscribers := make([]SharedSubscriber, 0, len(sm.subscribers))
 	for _, sub := range sm.subscribers {
 		subscribers = append(subscribers, sub)
 	}

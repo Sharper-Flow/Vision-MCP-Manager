@@ -221,9 +221,9 @@ func TestSharedManager_RespawnOnCrash(t *testing.T) {
 
 	// Subscribe to respawn notifications
 	respawned := make(chan *mcp.ClientSession, 1)
-	sm.Subscribe("sess-respawn", func(newDs *mcp.ClientSession) {
+	sm.Subscribe("sess-respawn", SharedSubscriber{OnRespawn: func(newDs *mcp.ClientSession) {
 		respawned <- newDs
-	}, nil)
+	}})
 
 	// Crash the subprocess by closing the downstream directly
 	if err := ds1.Close(); err != nil {
@@ -278,9 +278,9 @@ func TestSharedManager_HealthProbe(t *testing.T) {
 
 	// Subscribe to respawn
 	respawned := make(chan *mcp.ClientSession, 1)
-	sm.Subscribe("sess-health", func(newDs *mcp.ClientSession) {
+	sm.Subscribe("sess-health", SharedSubscriber{OnRespawn: func(newDs *mcp.ClientSession) {
 		respawned <- newDs
-	}, nil)
+	}})
 
 	// Kill the subprocess
 	ds := sm.Downstream()
