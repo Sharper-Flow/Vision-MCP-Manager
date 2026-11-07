@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -55,6 +56,18 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     } else if (msg.method === 'resources/list') {
       if (mode === 'hang-resources') return;
       if (mode === 'tools-only') { send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found' } }); return; }
+      if (catalog.paged) {
+        const cursor = msg.params && msg.params.cursor;
+        const half = Math.ceil(catalog.resources.length / 2);
+        if (!cursor) {
+          send({ jsonrpc: '2.0', id: msg.id, result: { resources: catalog.resources.slice(0, half), nextCursor: 'p2' } });
+        } else if (cursor === 'p2') {
+          send({ jsonrpc: '2.0', id: msg.id, result: { resources: catalog.resources.slice(half) } });
+        } else {
+          send({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: 'bad cursor: ' + cursor } });
+        }
+        return;
+      }
       send({ jsonrpc: '2.0', id: msg.id, result: { resources: catalog.resources } });
     } else if (msg.method === 'resources/templates/list') {
       if (mode === 'tools-only') { send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found' } }); return; }
@@ -71,6 +84,18 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       }
     } else if (msg.method === 'prompts/list') {
       if (mode === 'tools-only') { send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found' } }); return; }
+      if (catalog.paged) {
+        const cursor = msg.params && msg.params.cursor;
+        const half = Math.ceil(catalog.prompts.length / 2);
+        if (!cursor) {
+          send({ jsonrpc: '2.0', id: msg.id, result: { prompts: catalog.prompts.slice(0, half), nextCursor: 'p4' } });
+        } else if (cursor === 'p4') {
+          send({ jsonrpc: '2.0', id: msg.id, result: { prompts: catalog.prompts.slice(half) } });
+        } else {
+          send({ jsonrpc: '2.0', id: msg.id, error: { code: -32602, message: 'bad cursor: ' + cursor } });
+        }
+        return;
+      }
       send({ jsonrpc: '2.0', id: msg.id, result: { prompts: catalog.prompts } });
     } else if (msg.method === 'prompts/get') {
       const p = catalog.prompts.find((x) => x.name === msg.params.name);
@@ -110,10 +135,12 @@ type fixturePrompt struct {
 }
 
 type fixtureCatalog struct {
-	Resources  []fixtureResource `json:"resources"`
-	Templates  []fixtureTemplate `json:"templates"`
-	Prompts    []fixturePrompt   `json:"prompts"`
-	StaticText string            `json:"-"`
+	Resources []fixtureResource `json:"resources"`
+	Templates []fixtureTemplate `json:"templates"`
+	Prompts   []fixturePrompt   `json:"prompts"`
+	// Paged makes the fixture serve resources and prompts as two
+	// cursor-linked pages instead of one response.
+	Paged bool `json:"paged,omitempty"`
 }
 
 func catalogV1() fixtureCatalog {
@@ -148,6 +175,26 @@ func catalogV2() fixtureCatalog {
 	v2.Templates = nil
 	v2.Prompts = append(v2.Prompts, fixturePrompt{Name: "greet2", Description: "greet someone else"})
 	return v2
+}
+
+// catalogPaged serves enough resources and prompts to span two cursor-linked
+// pages each when the fixture paginates.
+func catalogPaged() fixtureCatalog {
+	catalog := catalogV1()
+	for i := 0; i < 3; i++ {
+		catalog.Resources = append(catalog.Resources, fixtureResource{
+			URI:      fmt.Sprintf("fixture://paged/%d", i),
+			Name:     fmt.Sprintf("paged%d", i),
+			MimeType: "text/plain",
+			Text:     fmt.Sprintf("paged-content-%d", i),
+		})
+	}
+	catalog.Prompts = append(catalog.Prompts,
+		fixturePrompt{Name: "paged_greet1", Description: "paged greeting"},
+		fixturePrompt{Name: "paged_greet2", Description: "another paged greeting"},
+	)
+	catalog.Paged = true
+	return catalog
 }
 
 func writeFixtureCatalog(t *testing.T, path string, catalog fixtureCatalog) {
@@ -569,6 +616,60 @@ func expectedPrompts(catalog fixtureCatalog) []*mcp.Prompt {
 		out = append(out, &mcp.Prompt{Name: p.Name, Description: p.Description})
 	}
 	return out
+}
+
+func TestProxyFollowsCatalogPagination(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+	writeFixtureCatalog(t, catalogPath, catalogPaged())
+	logger := testLogger(t)
+	mgr := session.NewManager("caps-paged", fixtureServerConfig(t, catalogPath, "full"), logger)
+	defer mgr.CloseAll()
+	server := httptest.NewServer(NewProxyHandler(ProxyConfig{
+		ServerName: "caps-paged", SessionManager: mgr, Logger: logger,
+	}))
+	defer server.Close()
+
+	// The direct reference follows the fixture's cursors through the SDK
+	// client iterators, which is what a complete direct client sees.
+	direct := connectDirectFixture(t, ctx, catalogPath)
+	defer direct.Close()
+	wantResources := make([]*mcp.Resource, 0, 4)
+	for r, err := range direct.Resources(ctx, nil) {
+		if err != nil {
+			t.Fatalf("direct resources iteration: %v", err)
+		}
+		wantResources = append(wantResources, r)
+	}
+	wantPrompts := make([]*mcp.Prompt, 0, 3)
+	for p, err := range direct.Prompts(ctx, nil) {
+		if err != nil {
+			t.Fatalf("direct prompts iteration: %v", err)
+		}
+		wantPrompts = append(wantPrompts, p)
+	}
+	if len(wantResources) < 3 || len(wantPrompts) < 3 {
+		t.Fatalf("fixture did not paginate: %d resources, %d prompts", len(wantResources), len(wantPrompts))
+	}
+
+	through := connectThroughProxy(t, ctx, server.URL, nil, nil)
+	defer through.Close()
+	res, err := through.ListResources(ctx, nil)
+	if err != nil {
+		t.Fatalf("resources/list through proxy: %v", err)
+	}
+	if got, want := sortedResourcesJSON(t, cloneResources(res.Resources)), sortedResourcesJSON(t, cloneResources(wantResources)); got != want {
+		t.Errorf("resources through proxy = %s, want direct (all pages) %s", got, want)
+	}
+	prompts, err := through.ListPrompts(ctx, nil)
+	if err != nil {
+		t.Fatalf("prompts/list through proxy: %v", err)
+	}
+	if got, want := sortedPromptsJSON(t, clonePrompts(prompts.Prompts)), sortedPromptsJSON(t, clonePrompts(wantPrompts)); got != want {
+		t.Errorf("prompts through proxy = %s, want direct (all pages) %s", got, want)
+	}
 }
 
 func TestProxyRefreshesCatalogOnListChanged(t *testing.T) {
