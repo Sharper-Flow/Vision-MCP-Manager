@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/config"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -77,6 +79,8 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       const exact = catalog.resources.find((r) => r.uri === uri);
       if (exact) {
         send({ jsonrpc: '2.0', id: msg.id, result: { contents: [{ uri: exact.uri, mimeType: exact.mimeType, text: exact.text }] } });
+      } else if (mode !== 'tools-only' && uri === 'fixture://unlisted') {
+        send({ jsonrpc: '2.0', id: msg.id, result: { contents: [{ uri, mimeType: 'text/plain', text: 'unlisted-content' }] } });
       } else if (mode !== 'tools-only' && uri.startsWith('fixture://echo/')) {
         send({ jsonrpc: '2.0', id: msg.id, result: { contents: [{ uri, mimeType: 'text/plain', text: 'echo:' + uri.slice('fixture://echo/'.length) }] } });
       } else {
@@ -389,6 +393,85 @@ func fixtureServerConfig(t *testing.T, catalogPath, mode string) *config.ServerC
 	cfg.Args = []string{"-e", capabilityFixtureServerJS}
 	cfg.Env = map[string]string{"CATALOG_PATH": catalogPath, "FIXTURE_MODE": mode}
 	return cfg
+}
+
+func TestProxyReadsUnlistedResourcesLikeDirect(t *testing.T) {
+	skipIfNoNode(t)
+	for _, mode := range []string{"per-session", "shared"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			path := filepath.Join(t.TempDir(), "catalog.json")
+			writeFixtureCatalog(t, path, catalogV1())
+			logger := testLogger(t)
+			var server *httptest.Server
+			if mode == "shared" {
+				sm := session.NewSharedSessionManager("caps-unlisted-shared", fixtureServerConfig(t, path, "full"), logger, 0, nil)
+				defer sm.CloseAll()
+				server = httptest.NewServer(NewProxyHandler(ProxyConfig{ServerName: "caps-unlisted-shared", SharedManager: sm, Logger: logger}))
+			} else {
+				mgr := session.NewManager("caps-unlisted", fixtureServerConfig(t, path, "full"), logger)
+				defer mgr.CloseAll()
+				server = httptest.NewServer(NewProxyHandler(ProxyConfig{ServerName: "caps-unlisted", SessionManager: mgr, Logger: logger}))
+			}
+			defer server.Close()
+			direct := connectDirectFixture(t, ctx, path)
+			defer direct.Close()
+			through := connectThroughProxy(t, ctx, server.URL, nil, nil)
+			defer through.Close()
+
+			directErr := errorOf(t, func() error {
+				_, err := direct.ReadResource(ctx, &mcp.ReadResourceParams{URI: "fixture://nonexistent"})
+				return err
+			})
+			for _, client := range []struct {
+				name string
+				cs   *mcp.ClientSession
+			}{{"direct", direct}, {"proxy", through}} {
+				t.Run(client.name, func(t *testing.T) {
+					listed, err := client.cs.ListResources(ctx, nil)
+					if err != nil {
+						t.Fatalf("resources/list: %v", err)
+					}
+					for _, resource := range listed.Resources {
+						if resource.URI == "fixture://unlisted" {
+							t.Error("unlisted resource appeared in resources/list")
+						}
+					}
+					if _, err := client.cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: "fixture://nonexistent"}); err == nil {
+						t.Error("nonexistent resource read succeeded")
+					} else if got := jsonRPCCode(t, err); got != jsonRPCCode(t, directErr) {
+						t.Errorf("nonexistent resource read code = %d, want direct %d", got, jsonRPCCode(t, directErr))
+					}
+					result, err := client.cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: "fixture://unlisted"})
+					if err != nil {
+						t.Fatalf("unlisted resource read: %v", err)
+					}
+					if len(result.Contents) != 1 || result.Contents[0].Text != "unlisted-content" {
+						t.Errorf("unlisted resource contents = %v, want unlisted-content", result.Contents)
+					}
+				})
+			}
+		})
+	}
+}
+
+func errorOf(t *testing.T, fn func() error) error {
+	t.Helper()
+	err := fn()
+	if err == nil {
+		t.Fatal("expected an error from the direct fixture read")
+	}
+	return err
+}
+
+func jsonRPCCode(t *testing.T, err error) int64 {
+	t.Helper()
+	var rpcErr *jsonrpc.Error
+	if !errors.As(err, &rpcErr) {
+		t.Fatalf("error %v is not a *jsonrpc.Error", err)
+	}
+	return rpcErr.Code
 }
 
 func TestProxyForwardsResourcesAndPrompts_PerSession(t *testing.T) {
