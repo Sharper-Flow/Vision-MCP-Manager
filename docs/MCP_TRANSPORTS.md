@@ -100,11 +100,11 @@ Stateful servers (`stateful: true`) give every upstream MCP session a **dedicate
 1. Client sends `initialize` POST to `:port/mcp`
 2. `StreamableHTTPHandler` invokes the `getServer` callback (runs synchronously before `server.Connect()`)
 3. Inside `getServer`:
-   - A new `mcp.Server` is created, advertising tools (with list-changed) and logging capabilities; resource and prompt capabilities are added automatically when the downstream serves them
+   - A new `mcp.Server` is created, advertising tools (with list-changed) and logging capabilities; resource and prompt capabilities are advertised only when the downstream lists at least one resource, template, or prompt
    - In stateful mode, `session.Manager.SpawnSession()` starts a dedicated subprocess and completes the MCP initialize handshake. In shared mode, `SharedSessionManager` obtains the shared subprocess, starting it if needed
    - `downstream.ListTools()` discovers available tools
    - Each tool is registered on the upstream `mcp.Server` via `Server.AddTool(tool, handler)` with a proxy handler that forwards `CallTool` to the downstream `ClientSession`
-   - When the downstream advertises resources or prompts, Vision lists its resources, resource templates, and prompts and registers each on the upstream `mcp.Server` with a proxy handler that forwards `resources/read` and `prompts/get`
+   - Vision lists and registers resources and templates only when the downstream advertises resources, and prompts only when it advertises prompts. Proxy handlers forward `resources/read` and `prompts/get`
 4. The upstream client can list the registered downstream tools, resources, resource templates, and prompts
 5. Subsequent `tools/call`, `resources/read`, and `prompts/get` requests are proxied to the downstream subprocess
 6. On `DELETE /mcp`, disconnect cleanup, or session timeout, Vision removes the upstream session. Stateful cleanup terminates that session's subprocess. Shared-mode cleanup decrements the shared refcount, closes the upstream session so later requests on its ID receive `404`, and leaves the downstream subprocess healthy for other sessions. Shared sessions expire after `session_timeout` without valid application activity, and expiry waits for zero in-flight calls.
@@ -135,7 +135,7 @@ Managed-http timing derives from these server settings:
 
 ### Notification Relay
 
-The stdio proxy forwards tool listing and calls, tool-list changes, resource and resource-template listing and reads, prompt listing and gets, resource- and prompt-list changes, logging messages, and progress notifications. Resource subscriptions (`resources/subscribe`, `resources/updated`) and completions are not forwarded. A capability is advertised upstream only when the downstream lists at least one item for it.
+The stdio proxy forwards tool listing and calls, tool-list changes, resource and resource-template listing and reads, prompt listing and gets, resource- and prompt-list changes, logging messages, and progress notifications. Resource subscriptions (`resources/subscribe`, `resources/updated`) and completions are not forwarded. A capability is advertised upstream only when the downstream lists at least one item for it. Catalog entries whose URI or URI template is invalid or has no scheme are skipped with a warning, so the upstream list can be shorter than a direct connection's.
 
 Downstream-to-upstream notifications are relayed via the `proxySession` struct:
 

@@ -45,6 +45,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +55,7 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/yosida95/uritemplate/v3"
 )
 
 // ErrDownstreamUnavailable is returned when a tool call or notification relay
@@ -748,7 +751,7 @@ type proxySession struct {
 	// nil when no probe is running.
 	healthProbeCancel context.CancelFunc
 
-	// mu guards upstreamSession, upstreamSessionID, and currentTools.
+	// mu guards upstream session state and the current tool, resource, template, and prompt maps.
 	// InitializedHandler runs concurrently with getServer return.
 	mu                       sync.Mutex
 	upstreamSession          *mcp.ServerSession
@@ -1402,21 +1405,36 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 	)
 }
 
-// refreshCatalogs preserves the previous catalog when discovery fails.
+// refreshCatalogs preserves the previous catalog when discovery fails. Each
+// list call gets its own request-timeout budget so one hanging call cannot
+// starve the catalogs listed after it.
 func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSession, server *mcp.Server, resources, prompts bool) {
+	listCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(ctx, ps.requestTimeout)
+	}
 	init := ds.InitializeResult()
 	if init == nil || init.Capabilities == nil {
 		return
 	}
 	if resources && init.Capabilities.Resources != nil {
+		ctx, cancel := listCtx()
 		result, err := ds.ListResources(ctx, nil)
+		cancel()
 		if err != nil {
 			ps.logger.Warn("failed to list downstream resources", slog.String("error", err.Error()))
 		} else {
 			current := make(map[string]struct{}, len(result.Resources))
 			for _, resource := range result.Resources {
+				parsed, err := url.Parse(resource.URI)
+				if err == nil && parsed.Scheme == "" {
+					err = errors.New("missing URI scheme")
+				}
+				if err != nil {
+					ps.logger.Warn("skipping invalid downstream resource", slog.String("uri", resource.URI), slog.String("error", err.Error()))
+					continue
+				}
 				current[resource.URI] = struct{}{}
-				server.AddResource(resource, makeProxyResourceHandler(ps, resource.URI))
+				server.AddResource(resource, makeProxyResourceHandler(ps))
 			}
 			ps.mu.Lock()
 			old := ps.currentResources
@@ -1424,14 +1442,25 @@ func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSessi
 			ps.mu.Unlock()
 			server.RemoveResources(staleCatalogEntries(old, current)...)
 		}
-		templates, err := ds.ListResourceTemplates(ctx, nil)
+		templatesCtx, templatesCancel := listCtx()
+		templates, err := ds.ListResourceTemplates(templatesCtx, nil)
+		templatesCancel()
 		if err != nil {
 			ps.logger.Warn("failed to list downstream resource templates", slog.String("error", err.Error()))
 		} else {
 			current := make(map[string]struct{}, len(templates.ResourceTemplates))
 			for _, template := range templates.ResourceTemplates {
+				_, err := uritemplate.New(template.URITemplate)
+				prefix, _, _ := strings.Cut(template.URITemplate, "{")
+				if err == nil && !uriTemplateScheme.MatchString(prefix) {
+					err = errors.New("missing URI template scheme")
+				}
+				if err != nil {
+					ps.logger.Warn("skipping invalid downstream resource template", slog.String("uri", template.URITemplate), slog.String("error", err.Error()))
+					continue
+				}
 				current[template.URITemplate] = struct{}{}
-				server.AddResourceTemplate(template, makeProxyTemplateHandler(ps, template.URITemplate))
+				server.AddResourceTemplate(template, makeProxyResourceHandler(ps))
 			}
 			ps.mu.Lock()
 			old := ps.currentResourceTemplates
@@ -1441,7 +1470,9 @@ func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSessi
 		}
 	}
 	if prompts && init.Capabilities.Prompts != nil {
-		result, err := ds.ListPrompts(ctx, nil)
+		promptsCtx, promptsCancel := listCtx()
+		result, err := ds.ListPrompts(promptsCtx, nil)
+		promptsCancel()
 		if err != nil {
 			ps.logger.Warn("failed to list downstream prompts", slog.String("error", err.Error()))
 		} else {
@@ -1458,6 +1489,8 @@ func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSessi
 		}
 	}
 }
+
+var uriTemplateScheme = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
 
 func staleCatalogEntries(old, current map[string]struct{}) []string {
 	var stale []string
@@ -1481,7 +1514,7 @@ func (ps *proxySession) handleCatalogListChanged(ctx context.Context, resources 
 		ps.respawnMu.Lock()
 		defer ps.respawnMu.Unlock()
 	}
-	ps.logger.Info("downstream catalog list_changed, re-discovering", slog.Bool("resources", resources))
+	ps.logger.Debug("downstream catalog list_changed, re-discovering", slog.Bool("resources", resources))
 	ps.downstreamMu.RLock()
 	ds, closed := ps.downstream, ps.downstreamClosed
 	ps.downstreamMu.RUnlock()
@@ -1516,7 +1549,7 @@ func (ps *proxySession) catalogDownstream(ctx context.Context) (*mcp.ClientSessi
 	return ds, nil
 }
 
-func makeProxyResourceHandler(ps *proxySession, uri string) mcp.ResourceHandler {
+func makeProxyResourceHandler(ps *proxySession) mcp.ResourceHandler {
 	return func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
 		ctx, cancel := withRequestTimeoutBudget(ctx, ps.requestTimeout)
 		defer cancel()
@@ -1526,14 +1559,10 @@ func makeProxyResourceHandler(ps *proxySession, uri string) mcp.ResourceHandler 
 		}
 		result, err := ds.ReadResource(ctx, &mcp.ReadResourceParams{URI: req.Params.URI})
 		if isDownstreamClosureError(err) {
-			return nil, fmt.Errorf("read resource %s: %w", uri, ErrDownstreamUnavailable)
+			return nil, fmt.Errorf("read resource %s: %w", req.Params.URI, ErrDownstreamUnavailable)
 		}
 		return result, err
 	}
-}
-
-func makeProxyTemplateHandler(ps *proxySession, uriTemplate string) mcp.ResourceHandler {
-	return makeProxyResourceHandler(ps, uriTemplate)
 }
 
 func makeProxyPromptHandler(ps *proxySession, name string) mcp.PromptHandler {

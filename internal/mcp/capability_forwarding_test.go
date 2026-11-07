@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -52,11 +53,12 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     } else if (msg.method === 'tools/call' && msg.params.name === 'ping') {
       send({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'pong' }] } });
     } else if (msg.method === 'resources/list') {
+      if (mode === 'hang-resources') return;
       if (mode === 'tools-only') { send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found' } }); return; }
       send({ jsonrpc: '2.0', id: msg.id, result: { resources: catalog.resources } });
     } else if (msg.method === 'resources/templates/list') {
       if (mode === 'tools-only') { send({ jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'Method not found' } }); return; }
-      send({ jsonrpc: '2.0', id: msg.id, result: { resourceTemplates: catalog.templates } });
+      send({ jsonrpc: '2.0', id: msg.id, result: { resourceTemplates: catalog.templates || [] } });
     } else if (msg.method === 'resources/read') {
       const uri = msg.params.uri;
       const exact = catalog.resources.find((r) => r.uri === uri);
@@ -143,6 +145,7 @@ func catalogV2() fixtureCatalog {
 		Text:     "extra-content-v2",
 	})
 	v2.Resources[0].Text = "static-content-v2"
+	v2.Templates = nil
 	v2.Prompts = append(v2.Prompts, fixturePrompt{Name: "greet2", Description: "greet someone else"})
 	return v2
 }
@@ -430,6 +433,69 @@ func TestProxyAdvertisesOnlyDownstreamCatalogCapabilities(t *testing.T) {
 	}
 }
 
+func TestProxySkipsInvalidCatalogEntries(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	catalog := catalogV1()
+	catalog.Resources = append(catalog.Resources,
+		fixtureResource{URI: "x://{", Name: "invalid"},
+		fixtureResource{URI: "relative", Name: "no-scheme"},
+	)
+	catalog.Templates = append(catalog.Templates,
+		fixtureTemplate{URITemplate: "x://{bad", Name: "invalid"},
+		fixtureTemplate{URITemplate: "{word}/y", Name: "no-scheme"},
+	)
+	writeFixtureCatalog(t, path, catalog)
+	logger := testLogger(t)
+	mgr := session.NewManager("caps-invalid", fixtureServerConfig(t, path, "full"), logger)
+	defer mgr.CloseAll()
+	server := httptest.NewServer(NewProxyHandler(ProxyConfig{ServerName: "caps-invalid", SessionManager: mgr, Logger: logger}))
+	defer server.Close()
+	cs := connectThroughProxy(t, ctx, server.URL, nil, nil)
+	defer cs.Close()
+	snap := readCatalogSnapshot(t, ctx, cs)
+	if len(snap.Resources) != 1 || len(snap.Templates) != 1 || snap.StaticText != "static-content-v1" || snap.EchoText != "echo:hello" {
+		t.Fatalf("unexpected catalog: %+v", snap)
+	}
+	if _, err := cs.ListTools(ctx, nil); err != nil {
+		t.Fatalf("session did not survive invalid catalog: %v", err)
+	}
+}
+
+func TestCatalogDiscoveryRespectsRequestTimeout(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	writeFixtureCatalog(t, path, catalogV1())
+	logger := testLogger(t)
+	mgr := session.NewManager("caps-timeout", fixtureServerConfig(t, path, "hang-resources"), logger)
+	defer mgr.CloseAll()
+	var ps *proxySession
+	start := time.Now()
+	_, err := newPerSessionServer(ctx, "caps-timeout", mgr, logger,
+		nil, nil, 0, 200*time.Millisecond, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, nil, func(p *proxySession) { ps = p }, nil, nil, nil, nil)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("catalog discovery exceeded request timeout: %v (error: %v)", elapsed, err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The hanging resources/list must not starve the later catalog lists:
+	// each list call has its own request-timeout budget.
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	if len(ps.currentResourceTemplates) == 0 {
+		t.Error("templates not discovered: hanging resources/list starved later catalog lists")
+	}
+	if len(ps.currentPrompts) == 0 {
+		t.Error("prompts not discovered: hanging resources/list starved later catalog lists")
+	}
+}
+
 func awaitCatalogRefresh(t *testing.T, ctx context.Context, cs *mcp.ClientSession, resourceChanged, promptChanged <-chan struct{}, want fixtureCatalog) {
 	t.Helper()
 	wantResources := sortedResourcesJSON(t, cloneResources(expectedResources(want)))
@@ -437,7 +503,7 @@ func awaitCatalogRefresh(t *testing.T, ctx context.Context, cs *mcp.ClientSessio
 	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	gotResources, gotPrompts := false, false
-	for !(gotResources && gotPrompts) {
+	for !gotResources || !gotPrompts {
 		select {
 		case <-resourceChanged:
 			res, err := cs.ListResources(ctx, nil)
@@ -464,6 +530,28 @@ func awaitCatalogRefresh(t *testing.T, ctx context.Context, cs *mcp.ClientSessio
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
 		}
+	}
+	for uri, wantText := range map[string]string{"fixture://extra": "extra-content-v2", "fixture://static": "static-content-v2"} {
+		result, err := cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
+		if err != nil || len(result.Contents) != 1 || result.Contents[0].Text != wantText {
+			t.Fatalf("read %s: result=%v error=%v, want %q", uri, result, err, wantText)
+		}
+	}
+	// The stale-template removal races the SDK's 10ms list-changed debounce
+	// with the second downstream list call, so poll until it settles.
+	templateDeadline := time.Now().Add(5 * time.Second)
+	for {
+		templates, err := cs.ListResourceTemplates(ctx, nil)
+		if err != nil {
+			t.Fatalf("resources/templates/list after refresh: %v", err)
+		}
+		if len(templates.ResourceTemplates) == 0 {
+			return
+		}
+		if time.Now().After(templateDeadline) {
+			t.Fatalf("templates after refresh: %v, want empty", templates.ResourceTemplates)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -514,7 +602,10 @@ func TestProxyRefreshesCatalogOnListChanged(t *testing.T) {
 			defer cs.Close()
 			readCatalogSnapshot(t, ctx, cs) // establish the v1 catalog first
 
-			writeFixtureCatalog(t, catalogPath, catalogV2())
+			invalidV2 := catalogV2()
+			invalidV2.Resources = append(invalidV2.Resources, fixtureResource{URI: "x://{", Name: "invalid"})
+			invalidV2.Templates = append(invalidV2.Templates, fixtureTemplate{URITemplate: "x://{bad", Name: "invalid"})
+			writeFixtureCatalog(t, catalogPath, invalidV2)
 			if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "rotate_catalog"}); err != nil {
 				t.Fatalf("rotate_catalog: %v", err)
 			}
@@ -556,5 +647,40 @@ func TestSharedRespawnRefreshesCatalog(t *testing.T) {
 	if _, err := sm.GetOrCreateSession(ctx, "fixture"); err != nil {
 		t.Fatal(err)
 	}
+	awaitCatalogRefresh(t, ctx, cs, resourceChanged, promptChanged, catalogV2())
+}
+
+func TestPerSessionRespawnRefreshesCatalog(t *testing.T) {
+	skipIfNoNode(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	writeFixtureCatalog(t, path, catalogV1())
+	logger := testLogger(t)
+	mgr := session.NewManager("caps-per-respawn", fixtureServerConfig(t, path, "full"), logger)
+	defer mgr.CloseAll()
+	var ps *proxySession
+	srv, err := newPerSessionServer(ctx, "caps-per-respawn", mgr, logger,
+		nil, nil, 0, 5*time.Second, RetryConfig{}, CircuitBreakerConfig{},
+		nil, nil, nil, func(p *proxySession) { ps = p }, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil))
+	defer server.Close()
+	resourceChanged, promptChanged := make(chan struct{}, 8), make(chan struct{}, 8)
+	cs := connectThroughProxy(t, ctx, server.URL, resourceChanged, promptChanged)
+	defer cs.Close()
+	readCatalogSnapshot(t, ctx, cs)
+	writeFixtureCatalog(t, path, catalogV2())
+	mgr.SetOnSessionRemoved(func(id string) {
+		if ps.downstreamID() == id {
+			ps.closeDownstream("session removed by manager")
+		}
+	})
+	if err := mgr.RemoveSession(ps.downstreamID()); err != nil {
+		t.Fatal(err)
+	}
+	ps.handleResourceListChanged(ctx)
 	awaitCatalogRefresh(t, ctx, cs, resourceChanged, promptChanged, catalogV2())
 }
