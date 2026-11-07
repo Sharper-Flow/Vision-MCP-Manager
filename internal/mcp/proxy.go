@@ -1406,25 +1406,26 @@ func (ps *proxySession) handleToolListChanged(ctx context.Context) {
 }
 
 // refreshCatalogs preserves the previous catalog when discovery fails. Each
-// list call gets its own request-timeout budget so one hanging call cannot
-// starve the catalogs listed after it.
+// catalog is listed page by page, following the downstream's pagination
+// cursor with a fresh request-timeout budget per page, so one hanging page
+// or one long catalog cannot starve the catalogs listed after it.
 func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSession, server *mcp.Server, resources, prompts bool) {
-	listCtx := func() (context.Context, context.CancelFunc) {
-		return context.WithTimeout(ctx, ps.requestTimeout)
-	}
 	init := ds.InitializeResult()
 	if init == nil || init.Capabilities == nil {
 		return
 	}
 	if resources && init.Capabilities.Resources != nil {
-		ctx, cancel := listCtx()
-		result, err := ds.ListResources(ctx, nil)
-		cancel()
-		if err != nil {
-			ps.logger.Warn("failed to list downstream resources", slog.String("error", err.Error()))
-		} else {
-			current := make(map[string]struct{}, len(result.Resources))
-			for _, resource := range result.Resources {
+		// A failed or unbounded listing is logged by listCatalogPages; keep
+		// the previous catalog rather than registering a partial or empty one.
+		if resourceList, ok := listCatalogPages(ctx, ps,
+			func(c context.Context, cursor string) (*mcp.ListResourcesResult, error) {
+				return ds.ListResources(c, &mcp.ListResourcesParams{Cursor: cursor})
+			},
+			func(r *mcp.ListResourcesResult) []*mcp.Resource { return r.Resources },
+			func(r *mcp.ListResourcesResult) string { return r.NextCursor },
+		); ok {
+			current := make(map[string]struct{}, len(resourceList))
+			for _, resource := range resourceList {
 				parsed, err := url.Parse(resource.URI)
 				if err == nil && parsed.Scheme == "" {
 					err = errors.New("missing URI scheme")
@@ -1442,14 +1443,15 @@ func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSessi
 			ps.mu.Unlock()
 			server.RemoveResources(staleCatalogEntries(old, current)...)
 		}
-		templatesCtx, templatesCancel := listCtx()
-		templates, err := ds.ListResourceTemplates(templatesCtx, nil)
-		templatesCancel()
-		if err != nil {
-			ps.logger.Warn("failed to list downstream resource templates", slog.String("error", err.Error()))
-		} else {
-			current := make(map[string]struct{}, len(templates.ResourceTemplates))
-			for _, template := range templates.ResourceTemplates {
+		if templateList, ok := listCatalogPages(ctx, ps,
+			func(c context.Context, cursor string) (*mcp.ListResourceTemplatesResult, error) {
+				return ds.ListResourceTemplates(c, &mcp.ListResourceTemplatesParams{Cursor: cursor})
+			},
+			func(r *mcp.ListResourceTemplatesResult) []*mcp.ResourceTemplate { return r.ResourceTemplates },
+			func(r *mcp.ListResourceTemplatesResult) string { return r.NextCursor },
+		); ok {
+			current := make(map[string]struct{}, len(templateList))
+			for _, template := range templateList {
 				_, err := uritemplate.New(template.URITemplate)
 				prefix, _, _ := strings.Cut(template.URITemplate, "{")
 				if err == nil && !uriTemplateScheme.MatchString(prefix) {
@@ -1470,14 +1472,15 @@ func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSessi
 		}
 	}
 	if prompts && init.Capabilities.Prompts != nil {
-		promptsCtx, promptsCancel := listCtx()
-		result, err := ds.ListPrompts(promptsCtx, nil)
-		promptsCancel()
-		if err != nil {
-			ps.logger.Warn("failed to list downstream prompts", slog.String("error", err.Error()))
-		} else {
-			current := make(map[string]struct{}, len(result.Prompts))
-			for _, prompt := range result.Prompts {
+		if promptList, ok := listCatalogPages(ctx, ps,
+			func(c context.Context, cursor string) (*mcp.ListPromptsResult, error) {
+				return ds.ListPrompts(c, &mcp.ListPromptsParams{Cursor: cursor})
+			},
+			func(r *mcp.ListPromptsResult) []*mcp.Prompt { return r.Prompts },
+			func(r *mcp.ListPromptsResult) string { return r.NextCursor },
+		); ok {
+			current := make(map[string]struct{}, len(promptList))
+			for _, prompt := range promptList {
 				current[prompt.Name] = struct{}{}
 				server.AddPrompt(prompt, makeProxyPromptHandler(ps, prompt.Name))
 			}
@@ -1486,6 +1489,45 @@ func (ps *proxySession) refreshCatalogs(ctx context.Context, ds *mcp.ClientSessi
 			ps.currentPrompts = current
 			ps.mu.Unlock()
 			server.RemovePrompts(staleCatalogEntries(old, current)...)
+		}
+	}
+}
+
+// maxCatalogPages bounds cursor-following so a malformed or hostile
+// downstream cannot loop the proxy through unbounded list pages.
+const maxCatalogPages = 100
+
+// listCatalogPages collects every page of one downstream catalog list,
+// following nextCursor with a fresh request-timeout budget per page. ok is
+// false when a page failed or the page bound was hit; the caller then keeps
+// its previous catalog.
+func listCatalogPages[Result any, Item any](
+	ctx context.Context,
+	ps *proxySession,
+	fetch func(context.Context, string) (*Result, error),
+	itemsOf func(*Result) []Item,
+	nextCursor func(*Result) string,
+) ([]Item, bool) {
+	var items []Item
+	cursor := ""
+	for page := 0; ; page++ {
+		if page >= maxCatalogPages {
+			ps.logger.Warn("downstream catalog pagination exceeded page bound, keeping previous catalog",
+				slog.Int("pages", page),
+			)
+			return nil, false
+		}
+		pageCtx, cancel := context.WithTimeout(ctx, ps.requestTimeout)
+		result, err := fetch(pageCtx, cursor)
+		cancel()
+		if err != nil {
+			ps.logger.Warn("failed to list downstream catalog page", slog.String("error", err.Error()))
+			return nil, false
+		}
+		items = append(items, itemsOf(result)...)
+		cursor = nextCursor(result)
+		if cursor == "" {
+			return items, true
 		}
 	}
 }
