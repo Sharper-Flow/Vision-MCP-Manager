@@ -135,7 +135,7 @@ Managed-http timing derives from these server settings:
 
 ### Notification Relay
 
-The stdio proxy forwards tool listing and calls, tool-list changes, resource and resource-template listing and reads, prompt listing and gets, resource- and prompt-list changes, logging messages, and progress notifications. Resource subscriptions (`resources/subscribe`, `resources/updated`) and completions are not forwarded. A capability is advertised upstream only when the downstream lists at least one item for it. Downstream pagination cursors are followed to the last page. Catalog entries whose URI or URI template is invalid or has no scheme are skipped with a warning, so the upstream list can be shorter than a direct connection's.
+The stdio proxy forwards tool listing and calls, tool-list changes, resource and resource-template listing and reads, prompt listing and gets, resource- and prompt-list changes, logging messages, and progress notifications. Resource subscriptions (`resources/subscribe`, `resources/updated`) and completions are not forwarded. A capability is advertised upstream only when the downstream lists at least one item for it. Downstream pagination cursors are followed to the last page. Catalog entries whose URI or URI template is invalid or has no scheme are skipped with a warning, so the upstream list can be shorter than a direct connection's. Reads of resources the downstream serves without listing, such as `resource_link` targets, are forwarded through Vision as with a direct connection.
 
 Downstream-to-upstream notifications are relayed via the `proxySession` struct:
 

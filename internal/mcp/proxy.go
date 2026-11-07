@@ -54,6 +54,7 @@ import (
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/metrics"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/reachability"
 	"github.com/Sharper-Flow/Vision-MCP-Manager/internal/session"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yosida95/uritemplate/v3"
 )
@@ -1050,6 +1051,7 @@ func newPerSessionServer(
 		},
 	})
 	ps.server = server
+	server.AddReceivingMiddleware(unlistedResourceReadFallback(ps))
 
 	// Build client options with notification relay handlers.
 	clientOpts := &mcp.ClientOptions{
@@ -1218,6 +1220,7 @@ func newSharedModeServer(
 		},
 	})
 	ps.server = server
+	server.AddReceivingMiddleware(unlistedResourceReadFallback(ps))
 
 	// Register the removal owner before the lease exists: the shared manager
 	// exposes the lease to its reaper the moment GetOrCreateSession tracks
@@ -1589,6 +1592,27 @@ func (ps *proxySession) catalogDownstream(ctx context.Context) (*mcp.ClientSessi
 		}
 	}
 	return ds, nil
+}
+
+func isResourceNotFound(err error) bool {
+	var rpcErr *jsonrpc.Error
+	return errors.As(err, &rpcErr) && rpcErr.Code == mcp.CodeResourceNotFound
+}
+
+func unlistedResourceReadFallback(ps *proxySession) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			result, err := next(ctx, method, req)
+			if method != "resources/read" || !isResourceNotFound(err) {
+				return result, err
+			}
+			readReq, ok := req.(*mcp.ReadResourceRequest)
+			if !ok {
+				return result, err
+			}
+			return makeProxyResourceHandler(ps)(ctx, readReq)
+		}
+	}
 }
 
 func makeProxyResourceHandler(ps *proxySession) mcp.ResourceHandler {
