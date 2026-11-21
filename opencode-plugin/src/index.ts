@@ -240,6 +240,7 @@ const visionSetup = async (context: V2Plugin.Context) => {
         name,
         description,
         input: toolInputJsonSchema(schema),
+        options: { codemode: false },
         ...(output ? { output } : {}),
         execute: async (raw: unknown) => {
           const content = await run(schema.parse(raw))

@@ -27,6 +27,9 @@ All development and testing uses local fixtures:
 
 ### Testing Strategy
 
+For the isolated OpenCode 2.3.2 plugin qualification, see
+[`opencode-plugin/README.md`](opencode-plugin/README.md#real-host-v2-qualification).
+
 1. **Unit tests**: Use in-memory configs or `testdata/` fixtures
 2. **Integration tests**: Use temp directories (`t.TempDir()`)
 3. **Manual testing**: Use `--config` flag to specify test config path
