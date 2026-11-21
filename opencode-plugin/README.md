@@ -28,6 +28,41 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 
    The `opencode_mcp_*` tools need no daemon.
 
+## Real-host V2 qualification
+
+Run `VISION_V2_LAB=/path/to/dev/opencode-v2-lab/lab bash opencode-plugin/scripts/e2e-v2-runtime.sh`
+from the repository root. `VISION_V2_LAB` points at the toolbox OpenCode V2
+lab, which installs and hash-pins the 2.3.2 binary and runs it offline in
+bubblewrap. The runner needs Linux, bubblewrap, Python 3, npm and network
+access for npm downloads. Tool-list and MCP-control checks use the lab's
+scripted loopback provider (`--fixture`). Isolation uses the lab's
+`check-isolation` with its negative control, and `snapshot-live` /
+`compare-live` hash comparison of the live install.
+
+A private bwrap sandbox, with the real home hidden and private PID, IPC and
+network namespaces, covers the checks the lab cannot express: the HTTP MCP
+session-expiry probe, the reconnect probe, and a read-only bind of the
+repository plugin directory. It uses the lab's pinned binary unless
+`VISION_V2_BIN` overrides it.
+
+| Variable                   | Effect                                                                                    |
+| -------------------------- | ----------------------------------------------------------------------------------------- |
+| `VISION_V2_LOADER_PROBE=1` | Adds the directory-entry probes.                                                          |
+| `VISION_V2_NEGATIVE=1`     | Runs only the broken-plugin negative control; exits 0 when the tool assertions reject it. |
+| `VISION_V1_BIN`            | Adds OpenCode 1.18.35 checks on the private sandbox.                                      |
+| `VISION_V2_KEEP=1`         | Keeps the fixture and lab instance for inspection.                                        |
+
+Known lab gaps that keep those checks on the private route: an `--exec`
+helper cannot run the pinned binary (`/opencode` is bound only when the run
+executable is `/opencode`), `--fixture` serves only
+`/v1/chat/completions` so no HTTP MCP server can share the sandbox, the
+fixture script cannot select responses by request content, and read-only
+bind sources must be inside the toolbox repository.
+
+On 2.3.2, per-server Code Mode defaults on independently of the environment
+variable described below. The runner reports the environment/config matrix;
+the plugin still reads `OPENCODE_EXPERIMENTAL_CODE_MODE` for registration.
+
 ## Available Tools
 
 The plugin exposes two groups of tools. The distinction matters twice over: the
