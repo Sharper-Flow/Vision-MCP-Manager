@@ -1,26 +1,20 @@
 #!/usr/bin/env bash
 # Real-host qualification runner for the Vision OpenCode plugin.
 #
-# OpenCode 2.3.2 runs exclusively through the AL-124 lab (VISION_V2_LAB,
-# path to dev/opencode-v2-lab/lab): the lab installs and hash-pins the
-# binary, runs it offline in its own sandbox, provides the scripted
-# loopback provider, and owns the isolation checks (check-isolation with
-# its negative control, snapshot-live/compare-live).
-#
-# A private bwrap sandbox covers the checks the lab cannot express today
-# (see the gap list in opencode-plugin/README.md): the AL-46 HTTP
-# session-expiry probe, the reconnect probe, the directory-loader probes,
-# and a read-only bind of the repository plugin directory. Its 2.3.2
-# binary is the lab's pinned artifact unless VISION_V2_BIN overrides it.
-# VISION_V1_BIN adds the opt-in OpenCode 1.18.35 checks on the same
-# private sandbox.
+# OpenCode 2.3.2 runs only inside bwrap: through the OpenCode V2 lab
+# (VISION_V2_LAB) or, for the checks the lab cannot express, a private
+# sandbox with the real home hidden and the network unshared. Usage and
+# lab gaps: opencode-plugin/README.md#real-host-v2-qualification.
 set -Eeuo pipefail
 
 plugin_dir=$(cd "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d /tmp/vision-v2-e2e-XXXXXX)
 lab=${VISION_V2_LAB:-}
 lab_state="${XDG_STATE_HOME:-$HOME/.local/state}/opencode-v2-lab"
-iname="vsn60-$$"
+real_home=$(getent passwd "$(id -un)" | cut -d: -f6)
+real_home=${real_home:-$HOME}
+private_isolation=(--unshare-pid --unshare-ipc --unshare-net --die-with-parent --new-session)
+iname="vision-v2-$$"
 instance_dir="$lab_state/instances/$iname"
 status=0
 
@@ -79,14 +73,17 @@ lab_check() { # LABEL KIND ASSERT_MODE
 # ---------------------------------------------------------------------------
 # Lab-run checks.
 # ---------------------------------------------------------------------------
+# Negative control: the host must still run and send tools, the broken
+# plugin must contribute none, and the ten-tool assertion must reject it.
 if [[ ${VISION_V2_NEGATIVE:-0} == 1 ]]; then
-  lab_check negative-broken broken ten
-  if [[ $status -ne 0 ]]; then
-    ok "negative control: broken plugin failed the assertions as required"
+  lab_check negative-broken broken absent
+  if python3 "$plugin_dir/scripts/e2e-v2/lab-assert.py" negative-broken "$instance_dir/evidence/fixture-requests.jsonl" ten >/dev/null; then
+    printf 'FAIL: ten-tool assertion accepted the broken plugin\n' >&2
+    status=1
   else
-    printf 'FAIL: negative control unexpectedly passed\n' >&2
+    ok "negative control: ten-tool assertion rejects the broken plugin"
   fi
-  exit 1
+  exit "$status"
 fi
 
 "$lab" snapshot-live "$fixture/live-before.json" || fail "snapshot-live failed"
@@ -118,7 +115,7 @@ v2_bin=${VISION_V2_BIN:-$lab_bin}
 [[ -f $v2_bin ]] || fail "no 2.3.2 binary at $v2_bin"
 cp "$v2_bin" "$fixture/opencode"
 npm install --ignore-scripts --prefix "$fixture" --no-save --loglevel=error @ai-sdk/openai-compatible@3.0.94 >"$fixture/provider-install.log" 2>&1 || fail "provider install failed"
-cp "$plugin_dir/scripts/e2e-v2/server.py" "$plugin_dir/scripts/e2e-v2/driver.py" "$fixture/"
+cp "$plugin_dir/scripts/e2e-v2/server.py" "$plugin_dir/scripts/e2e-v2/driver.py" "$plugin_dir/scripts/e2e-v2/probe.py" "$fixture/"
 mkdir "$fixture/repo-plugin"
 v1_bind=()
 if [[ -n ${VISION_V1_BIN:-} ]]; then
@@ -126,11 +123,11 @@ if [[ -n ${VISION_V1_BIN:-} ]]; then
   v1_bind=(--ro-bind "$VISION_V1_BIN" "$fixture/opencode-v1")
 fi
 
-bwrap --unshare-net --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --dir /home --tmpfs /home/jon --dir /tmp --bind "$fixture" "$fixture" --ro-bind "$plugin_dir" "$fixture/repo-plugin" "${v1_bind[@]}" --chdir "$fixture" --clearenv --setenv HOME "$fixture" --setenv FIXTURE "$fixture" --setenv V1_ENABLED "${VISION_V1_BIN:+1}" --setenv LOADER_PROBE "${VISION_V2_LOADER_PROBE:-0}" --setenv PATH /usr/bin:/bin /bin/sh -c 'version=$("$FIXTURE/opencode" --version) && [ "$version" = "opencode v2.3.2" ] || { printf "FAIL: version %s\n" "$version"; exit 1; }; printf "OK: %s\n" "$version"; exec /usr/bin/python3 "$FIXTURE/driver.py"' || status=$?
+bwrap "${private_isolation[@]}" --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs "$real_home" --dir /tmp --bind "$fixture" "$fixture" --ro-bind "$plugin_dir" "$fixture/repo-plugin" "${v1_bind[@]}" --chdir "$fixture" --clearenv --setenv HOME "$fixture" --setenv REAL_HOME "$real_home" --setenv FIXTURE "$fixture" --setenv V1_ENABLED "${VISION_V1_BIN:+1}" --setenv LOADER_PROBE "${VISION_V2_LOADER_PROBE:-0}" --setenv PATH /usr/bin:/bin /bin/sh -c 'version=$("$FIXTURE/opencode" --version) && [ "$version" = "opencode v2.3.2" ] || { printf "FAIL: version %s\n" "$version"; exit 1; }; printf "OK: %s\n" "$version"; exec /usr/bin/python3 "$FIXTURE/driver.py"' || status=$?
 
 # Structural isolation negative control: with the real home bound
 # read-only the same probe must detect exposure.
-if bwrap --unshare-net --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --dir /home --ro-bind "$HOME" /home/jon --ro-bind "$plugin_dir/scripts/e2e-v2/probe.py" /probe.py --clearenv --setenv PATH /usr/bin:/bin /usr/bin/python3 /probe.py >"$fixture/structural-negative.json" 2>&1; then
+if bwrap "${private_isolation[@]}" --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --ro-bind "$real_home" "$real_home" --ro-bind "$plugin_dir/scripts/e2e-v2/probe.py" /probe.py --clearenv --setenv REAL_HOME "$real_home" --setenv PATH /usr/bin:/bin /usr/bin/python3 /probe.py >"$fixture/structural-negative.json" 2>&1; then
   printf 'FAIL: structural negative control unexpectedly passed\n' >&2
   status=1
 else
@@ -138,7 +135,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Live-install hash comparison (replaces mtime listings).
+# Live-install hash comparison.
 # ---------------------------------------------------------------------------
 "$lab" snapshot-live "$fixture/live-after.json" || fail "snapshot-live failed"
 if "$lab" compare-live "$fixture/live-before.json" "$fixture/live-after.json"; then

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Private-sandbox driver for the checks the lab cannot express:
-the AL-46 HTTP session-expiry probe, the reconnect probe, the directory
-loader probes, the read-only repository bind, and the opt-in V1 checks.
-The O2 tool-list and control checks run through the AL-124 lab instead."""
+"""Private-sandbox driver for the checks the OpenCode V2 lab cannot express:
+the HTTP MCP session-expiry probe, the reconnect probe, the directory
+loader probes, the read-only repository bind, and the opt-in V1 checks."""
 
 import json
 import os
@@ -34,9 +33,8 @@ def check(label, condition, detail=""):
 
 
 def structural_check():
-    paths = ["/home/jon/.opencode", "/home/jon/.config/opencode", "/home/jon/.local/share/opencode", "/home/jon/.local/share/opencode/opencode.db"]
-    hidden = all(not os.path.exists(path) or (os.path.isdir(path) and not os.listdir(path)) for path in paths)
-    check("structural live paths hidden", hidden, repr({path: os.path.exists(path) for path in paths}))
+    probe = subprocess.run([sys.executable, root + "/probe.py"], capture_output=True, text=True, timeout=10)
+    check("structural live paths hidden", probe.returncode == 0, probe.stdout.strip())
 
 
 def tool_results(requests):
@@ -151,7 +149,7 @@ try:
         print("RECONNECT result %d: %s" % (index + 1, result), flush=True)
     current = reconnect_code == 0 and len(reconnect_results) >= 3 and "tools.fixture.new_tool" in reconnect_results[2] and "new-tool-ok" in reconnect_results[2]
     print("RECONNECT catalog: " + ("current" if current else "incomplete or stale"), flush=True)
-    _, requests, _ = run("al46", True, True, "al46 probe")
+    _, requests, _ = run("expiry", True, True, "expiry probe")
     results = tool_results(requests)
     for index, result in enumerate(results):
         if index == 4:
@@ -160,17 +158,17 @@ try:
                 result = json.dumps([item for item in found.get("items", []) if item.get("path") == "tools.fixture.new_tool"])
             except (json.JSONDecodeError, AttributeError):
                 pass
-        print("AL46 result %d: %s" % (index + 1, result), flush=True)
-    with open(root + "/al46.log", encoding="utf-8") as inp:
+        print("EXPIRY result %d: %s" % (index + 1, result), flush=True)
+    with open(root + "/expiry.log", encoding="utf-8") as inp:
         log = inp.read()
     reconnected = "mcp session expired, reconnecting" in log and "server=fixture tools=2" in log
-    print("AL46 reconnect observed: " + str(reconnected), flush=True)
+    print("EXPIRY reconnect observed: " + str(reconnected), flush=True)
     if reconnected and len(results) >= 7 and "tools.fixture.new_tool" in results[4]:
         for label, index, expected in (("pre-expiry invalid", 0, '"answer":42'), ("post-expiry valid", 5, '"answer":"new-tool-ok"'), ("post-expiry invalid", 6, '"answer":42')):
             accepted = expected in results[index].replace(" ", "")
-            print("AL46 %s: %s; result=%s" % (label, "accepted" if accepted else "rejected or unrecognized", results[index]), flush=True)
+            print("EXPIRY %s: %s; result=%s" % (label, "accepted" if accepted else "rejected or unrecognized", results[index]), flush=True)
     else:
-        print("AL46: incomplete or stale (see al46.json and mcp.jsonl)", flush=True)
+        print("EXPIRY: incomplete or stale (see expiry.json and mcp.jsonl)", flush=True)
     if os.environ.get("V1_ENABLED") == "1":
         v1env = dict(env)
         v1env.update({"HOME": root + "/v1home", "XDG_CONFIG_HOME": root + "/v1home/config", "XDG_DATA_HOME": root + "/v1home/data", "XDG_CACHE_HOME": root + "/v1home/cache", "XDG_STATE_HOME": root + "/v1home/state"})

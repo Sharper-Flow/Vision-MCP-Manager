@@ -31,22 +31,26 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 ## Real-host V2 qualification
 
 Run `VISION_V2_LAB=/path/to/dev/opencode-v2-lab/lab bash opencode-plugin/scripts/e2e-v2-runtime.sh`
-from the repository root. The runner needs Linux, bubblewrap, Python 3, npm
-and network access for npm downloads. OpenCode 2.3.2 runs only through the
-AL-124 lab, which installs and hash-pins the binary and runs it offline:
-tool-list, MCP-control and negative-control checks use the lab's scripted
-loopback provider (`--fixture`), and isolation uses the lab's
-`check-isolation` (with its negative control) and `snapshot-live` /
-`compare-live` instead of mtime listings.
+from the repository root. `VISION_V2_LAB` points at the toolbox OpenCode V2
+lab, which installs and hash-pins the 2.3.2 binary and runs it offline in
+bubblewrap. The runner needs Linux, bubblewrap, Python 3, npm and network
+access for npm downloads. Tool-list and MCP-control checks use the lab's
+scripted loopback provider (`--fixture`). Isolation uses the lab's
+`check-isolation` with its negative control, and `snapshot-live` /
+`compare-live` hash comparison of the live install.
 
-A private bwrap sandbox covers the checks the lab cannot express, using the
-lab's pinned binary unless `VISION_V2_BIN` overrides it: the AL-46 HTTP
+A private bwrap sandbox, with the real home hidden and private PID, IPC and
+network namespaces, covers the checks the lab cannot express: the HTTP MCP
 session-expiry probe, the reconnect probe, and a read-only bind of the
-repository plugin directory. Set `VISION_V2_LOADER_PROBE=1` to add the
-directory-entry probes. `VISION_V2_NEGATIVE=1` runs the broken-plugin
-negative control (expected to exit nonzero). `VISION_V1_BIN` adds opt-in
-OpenCode 1.18.35 checks on the private sandbox. `VISION_V2_KEEP=1` keeps the
-fixture and lab instance for inspection.
+repository plugin directory. It uses the lab's pinned binary unless
+`VISION_V2_BIN` overrides it.
+
+| Variable                   | Effect                                                                                    |
+| -------------------------- | ----------------------------------------------------------------------------------------- |
+| `VISION_V2_LOADER_PROBE=1` | Adds the directory-entry probes.                                                          |
+| `VISION_V2_NEGATIVE=1`     | Runs only the broken-plugin negative control; exits 0 when the tool assertions reject it. |
+| `VISION_V1_BIN`            | Adds OpenCode 1.18.35 checks on the private sandbox.                                      |
+| `VISION_V2_KEEP=1`         | Keeps the fixture and lab instance for inspection.                                        |
 
 Known lab gaps that keep those checks on the private route: an `--exec`
 helper cannot run the pinned binary (`/opencode` is bound only when the run

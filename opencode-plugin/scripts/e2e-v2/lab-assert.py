@@ -36,6 +36,8 @@ else:
     if mode == "ten":
         expected = CONTROL | DAEMON
         check(label + " ten plugin tools", expected <= names, "missing=" + repr(sorted(expected - names)))
+    elif mode == "absent":
+        check(label + " no plugin tools", not names & (CONTROL | DAEMON), repr(sorted(names & (CONTROL | DAEMON))))
     elif mode == "two":
         check(
             label + " control tools only",

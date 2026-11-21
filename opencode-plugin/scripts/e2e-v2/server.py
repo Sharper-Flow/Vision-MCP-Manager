@@ -54,7 +54,7 @@ class Handler(BaseHTTPRequestHandler):
             out.write(json.dumps(body) + "\n")
         messages = body.get("messages", [])
         user = next((str(m.get("content", "")) for m in reversed(messages) if m.get("role") == "user" and not str(m.get("content", "")).startswith("<system-update>")), "")
-        key = next((s for s in ("control", "al46", "diagnostic", "reconnect") if s in user), "matrix")
+        key = next((s for s in ("control", "expiry", "reconnect") if s in user), "matrix")
         calls = []
         if body.get("tools"):
             n = phase.get(key, 0)
@@ -65,7 +65,7 @@ class Handler(BaseHTTPRequestHandler):
                     ("opencode_mcp_connect", {"name": "fixture"}),
                     ("opencode_mcp_connect", {"name": "not-declared"}),
                 ][n : n + 1]
-            elif key == "al46":
+            elif key == "expiry":
                 calls = [
                     ("execute", {"code": "return await tools.fixture.flip({action: 'invalid'})"}),
                     ("execute", {"code": "return await tools.fixture.flip({})"}),
@@ -81,8 +81,6 @@ class Handler(BaseHTTPRequestHandler):
                     ("opencode_mcp_connect", {"name": "fixture"}),
                     ("execute", {"code": "const catalog = await search({query: 'new_tool'}); const result = await tools.fixture.new_tool({value: 'hello'}); return {catalog, result}"}),
                 ][n : n + 1]
-            elif key == "diagnostic":
-                calls = [("execute", {"code": "return await search({query: 'vision'})"})][n : n + 1]
         tool_calls = [
             {"index": i, "id": "call_%s_%s" % (key, phase.get(key, 0)), "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
             for i, (name, args) in enumerate(calls)
