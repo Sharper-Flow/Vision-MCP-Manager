@@ -49,10 +49,12 @@ def main():
             config["experimental"] = {"full_codemode": True}
     (instance / "home/.config/opencode/opencode.json").write_text(json.dumps(config, indent=2) + "\n")
     (instance / "workspace/fixture.json").write_text(json.dumps(script) + "\n")
-    evidence = instance / "evidence"
-    evidence.mkdir(exist_ok=True)
-    (evidence / "fixture-position.json").write_text('{"position": 0}\n')
-    (evidence / "fixture-requests.jsonl").unlink(missing_ok=True)
+    # The lab keeps each route's cursor and request log in fixture/ across
+    # runs and copies them to evidence/ afterwards; reset both per run.
+    for directory in (instance / "fixture", instance / "evidence"):
+        directory.mkdir(exist_ok=True)
+        (directory / "fixture-position.json").unlink(missing_ok=True)
+        (directory / "fixture-requests.jsonl").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
