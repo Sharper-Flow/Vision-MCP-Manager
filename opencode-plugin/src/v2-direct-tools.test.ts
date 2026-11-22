@@ -36,36 +36,88 @@ it.each([
   for (const tool of tools) expect(tool.options?.codemode, tool.name).toBe(false)
 })
 
-it("updates daemon tools only when the MCP transform captures the new server state", async () => {
-  const server = { disabled: false }
-  let mcpTransform = () => {}
-  let toolTransform = () => {}
-  let tools: string[] = []
+type ServerConfig = { disabled?: boolean }
+type McpEditor = {
+  get: (name: string) => ServerConfig | undefined
+  update: (name: string, edit: (config: ServerConfig) => void) => void
+}
+type RegisteredTool = { name: string; execute: (raw: unknown) => Promise<{ content: string }> }
+
+// Models the 2.3.2 host: every MCP rebuild starts from a fresh copy of the
+// config and replays transforms in registration order; the tool list is
+// rebuilt on read.
+function replayingHost(config: Record<string, ServerConfig>) {
+  const mcpTransforms: ((editor: McpEditor) => void)[] = []
+  const toolTransforms: ((editor: { add: (tool: RegisteredTool) => void }) => void)[] = []
+  let servers = new Map<string, ServerConfig>()
+  const rebuildMcp = () => {
+    servers = new Map(Object.entries(structuredClone(config)))
+    const editor: McpEditor = {
+      get: (name) => servers.get(name),
+      update: (name, edit) => {
+        const current = servers.get(name)
+        if (current) edit(current)
+      },
+    }
+    for (const transform of mcpTransforms) transform(editor)
+  }
+  const registration = { dispose: async () => {} }
   const context = {
     mcp: {
-      transform: async (edit: (editor: unknown) => void) => {
-        mcpTransform = () => edit({ get: () => server })
-        mcpTransform()
+      transform: async (callback: (editor: McpEditor) => void) => {
+        mcpTransforms.push(callback)
+        rebuildMcp()
+        return registration
       },
+      reload: async () => rebuildMcp(),
+      list: async () => ({
+        data: [...servers].map(([name, server]) => ({
+          name,
+          status: { status: server.disabled === true ? "disabled" : "connected" },
+        })),
+      }),
     },
     tool: {
-      transform: async (edit: (editor: unknown) => void) => {
-        toolTransform = () => edit({ add: (tool: { name: string }) => tools.push(tool.name) })
-        toolTransform()
+      transform: async (callback: (typeof toolTransforms)[number]) => {
+        toolTransforms.push(callback)
+        return registration
       },
     },
   }
+  const tools = () => {
+    const added: RegisteredTool[] = []
+    for (const transform of toolTransforms) transform({ add: (tool) => added.push(tool) })
+    return added
+  }
+  return { config, context, tools, rebuildMcp }
+}
 
-  await VisionPlugin.setup(context as never)
-  expect(tools.sort()).toEqual(Object.values(OPENCODE_MCP_TOOL_NAMES).sort())
+const names = (tools: RegisteredTool[]) => tools.map((tool) => tool.name).sort()
+const pluginLocal = Object.values(OPENCODE_MCP_TOOL_NAMES).sort()
+const all = Object.values(VISION_PLUGIN_TOOL_NAMES).sort()
 
-  server.disabled = true
-  tools = []
-  toolTransform()
-  expect(tools.sort()).toEqual(Object.values(OPENCODE_MCP_TOOL_NAMES).sort())
+it("follows the merged vision entry, including edits from later MCP transforms", async () => {
+  const host = replayingHost({ vision: {} })
+  await VisionPlugin.setup(host.context as never)
+  expect(names(host.tools())).toEqual(pluginLocal)
 
-  mcpTransform()
-  tools = []
-  toolTransform()
-  expect(tools.sort()).toEqual(Object.values(VISION_PLUGIN_TOOL_NAMES).sort())
+  const call = async (name: string) => {
+    const tool = host.tools().find((candidate) => candidate.name === name)
+    return JSON.parse((await tool!.execute({ name: "vision" })).content)
+  }
+  expect(await call(OPENCODE_MCP_TOOL_NAMES.mcpDisconnect)).toMatchObject({ success: true })
+  expect(names(host.tools())).toEqual(all)
+
+  expect(await call(OPENCODE_MCP_TOOL_NAMES.mcpConnect)).toMatchObject({ success: true })
+  expect(names(host.tools())).toEqual(pluginLocal)
+})
+
+it("follows a config reload that disables the vision server", async () => {
+  const host = replayingHost({ vision: {} })
+  await VisionPlugin.setup(host.context as never)
+  expect(names(host.tools())).toEqual(pluginLocal)
+
+  host.config.vision = { disabled: true }
+  host.rebuildMcp()
+  expect(names(host.tools())).toEqual(all)
 })

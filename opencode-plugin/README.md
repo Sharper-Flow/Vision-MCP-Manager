@@ -75,9 +75,11 @@ the daemon is not running.
 On OpenCode 2.x, the plugin registers all eight unless an enabled `vision` MCP
 server is declared. The host exposes that server's tools in the catalog or
 directly, depending on its Code Mode setting. A server under another key does
-not suppress plugin tools. The decision follows the `vision` entry at plugin
-setup and when OpenCode reloads its tool list after MCP tool changes. A config
-change that leaves the MCP tool set unchanged may wait until the next reload.
+not suppress plugin tools. The decision reads the merged `vision` entry,
+including edits by `opencode_mcp_connect`, `opencode_mcp_disconnect` and other
+plugins. It takes effect when OpenCode rebuilds its tool list after MCP tool
+changes; a change that leaves the MCP tool set unchanged may wait until the
+next rebuild.
 
 On OpenCode 1.x, the plugin omits all eight when
 `OPENCODE_EXPERIMENTAL_CODE_MODE=true`; the `vision` MCP server supplies them

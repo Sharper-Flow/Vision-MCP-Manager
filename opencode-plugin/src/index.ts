@@ -220,10 +220,14 @@ async function resolveInitPath(directory: string, explicitPath?: string): Promis
 const VISION_PLUGIN_ID = "vision-plugin"
 
 const visionSetup = async (context: V2Plugin.Context) => {
-  let visionServerEnabled = false
+  // The host replays MCP transforms in registration order on every rebuild, so
+  // this callback runs before transforms registered later, including
+  // opencode_mcp_connect and opencode_mcp_disconnect. Keeping the editor and
+  // reading it at tool-registration time sees the merged `vision` entry of the
+  // latest rebuild; each rebuild makes a fresh state that later ones never edit.
+  let readVisionServer: () => { disabled?: boolean } | undefined = () => undefined
   await context.mcp.transform((editor) => {
-    const server = editor.get("vision")
-    visionServerEnabled = server !== undefined && server.disabled !== true
+    readVisionServer = () => editor.get("vision")
   })
 
   // Tool registration. The zod schema stays the internal parse layer — the
@@ -252,8 +256,11 @@ const visionSetup = async (context: V2Plugin.Context) => {
       })
     }
 
-    // Disconnecting vision hands daemon access to the plugin tools.
-    if (!visionServerEnabled) {
+    // An enabled `vision` MCP server already exposes these eight, in the Code
+    // Mode catalog or directly. Register them only when that server is absent
+    // or disabled, so the session has exactly one daemon path.
+    const visionServer = readVisionServer()
+    if (visionServer === undefined || visionServer.disabled === true) {
       register(
         VISION_PLUGIN_TOOL_NAMES.list,
         "List all registered MCP servers with their current effective status (running/starting/stopped/error)",
