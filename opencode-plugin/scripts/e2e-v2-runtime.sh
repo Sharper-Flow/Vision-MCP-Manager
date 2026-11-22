@@ -92,6 +92,7 @@ lab_check installed-root off ten
 lab_check vision-declared vision-declared two
 lab_check vision-direct vision-direct two
 lab_check vision-disabled vision-disabled ten
+lab_check vision-handoff vision-handoff handoff
 lab_check env-only env-only ten
 lab_check server-direct server-direct server-direct
 lab_check control-off control-off control

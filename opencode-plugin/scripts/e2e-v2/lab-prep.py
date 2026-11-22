@@ -12,6 +12,10 @@ CONTROL_SCRIPT = [
     {"content": "DONE"},
 ]
 DONE_SCRIPT = [{"content": "DONE"}]
+HANDOFF_SCRIPT = [
+    {"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "opencode_mcp_disconnect", "arguments": "{\"name\": \"vision\"}"}}]},
+    {"content": "DONE"},
+]
 
 
 def main():
@@ -34,13 +38,15 @@ def main():
     script = DONE_SCRIPT
     if kind == "broken":
         config["plugins"] = [{"package": "/lab/workspace/broken"}]
-    elif kind in ("vision-declared", "vision-direct", "vision-disabled"):
+    elif kind in ("vision-declared", "vision-direct", "vision-disabled", "vision-handoff"):
         vision = {"type": "local", "command": ["/usr/bin/python3", "/lab/workspace/mcp-stdio.py"]}
         if kind == "vision-direct":
             vision["codemode"] = False
         elif kind == "vision-disabled":
             vision["disabled"] = True
         config["mcp"]["servers"]["vision"] = vision
+        if kind == "vision-handoff":
+            script = HANDOFF_SCRIPT
     elif kind == "server-direct":
         config["mcp"]["servers"]["fixture"]["codemode"] = False
     elif kind in ("control-off", "control-on"):
