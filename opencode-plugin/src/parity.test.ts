@@ -84,9 +84,7 @@ interface RecordedV2Tool {
   description: string
 }
 
-async function registerV2Tools(codeMode: boolean): Promise<Record<string, RecordedV2Tool>> {
-  vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
-
+async function registerV2Tools(visionDeclared: boolean): Promise<Record<string, RecordedV2Tool>> {
   const added: Record<string, RecordedV2Tool> = {}
   const context = {
     location: { directory: "/tmp/project" },
@@ -107,7 +105,10 @@ async function registerV2Tools(codeMode: boolean): Promise<Record<string, Record
       },
     },
     mcp: {
-      transform: async () => ({ dispose: async () => {} }),
+      transform: async (callback: (editor: unknown) => void) => {
+        callback({ get: (name: string) => (name === "vision" && visionDeclared ? {} : undefined) })
+        return { dispose: async () => {} }
+      },
       reload: async () => {},
       list: async () => ({ location: { directory: "/tmp/project" }, data: [] }),
     },
@@ -136,7 +137,7 @@ describe("V1 ↔ V2 registration parity", () => {
   })
 
   it.each([false, true])(
-    "registers the same tool names in both loaders (Code Mode %s)",
+    "registers the same names with V1 Code Mode and V2 vision declaration both %s",
     async (codeMode) => {
       const v1 = await registerV1Tools(codeMode)
       const v2 = await registerV2Tools(codeMode)

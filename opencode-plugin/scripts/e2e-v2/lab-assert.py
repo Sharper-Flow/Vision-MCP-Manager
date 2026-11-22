@@ -44,6 +44,29 @@ else:
             CONTROL <= names and not names & DAEMON,
             repr(sorted(name for name in names if str(name).startswith("vision_") or str(name).startswith("opencode_mcp_"))),
         )
+        if label == "vision-direct":
+            check(label + " direct server tool", "vision_flip" in names)
+    elif mode == "handoff":
+        for index, body in enumerate(bodies, 1):
+            observed = sorted(tool.get("function", {}).get("name", "") for tool in body.get("tools", []))
+            print(f"{label} request {index} tools: {observed!r}")
+        check(label + " initial control tools only", CONTROL <= names and not names & DAEMON, repr(sorted(names & (CONTROL | DAEMON))))
+        after = None
+        result = {}
+        for body in bodies:
+            for message in body.get("messages", []):
+                if message.get("role") == "tool" and message.get("tool_call_id") == "call-1":
+                    try:
+                        result = json.loads(message.get("content", ""))
+                    except (ValueError, TypeError):
+                        result = {}
+                    after = body
+                    break
+            if after is not None:
+                break
+        check(label + " disconnect", result.get("success") is True and result.get("status") == "disabled", repr(result))
+        after_names = {tool.get("function", {}).get("name") for tool in after.get("tools", [])} if after else set()
+        check(label + " post-disconnect daemon tools", DAEMON <= after_names, "missing=" + repr(sorted(DAEMON - after_names)))
     elif mode == "server-direct":
         check(label + " per-server codemode off", "fixture_flip" in names, repr(sorted(name for name in names if str(name).startswith("fixture"))))
     elif mode == "control":

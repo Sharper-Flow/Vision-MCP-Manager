@@ -12,6 +12,10 @@ CONTROL_SCRIPT = [
     {"content": "DONE"},
 ]
 DONE_SCRIPT = [{"content": "DONE"}]
+HANDOFF_SCRIPT = [
+    {"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "opencode_mcp_disconnect", "arguments": "{\"name\": \"vision\"}"}}]},
+    {"content": "DONE"},
+]
 
 
 def main():
@@ -34,22 +38,29 @@ def main():
     script = DONE_SCRIPT
     if kind == "broken":
         config["plugins"] = [{"package": "/lab/workspace/broken"}]
-    elif kind == "on":
-        config["experimental"] = {"full_codemode": True}
+    elif kind in ("vision-declared", "vision-direct", "vision-disabled", "vision-handoff"):
+        vision = {"type": "local", "command": ["/usr/bin/python3", "/lab/workspace/mcp-stdio.py"]}
+        if kind == "vision-direct":
+            vision["codemode"] = False
+        elif kind == "vision-disabled":
+            vision["disabled"] = True
+        config["mcp"]["servers"]["vision"] = vision
+        if kind == "vision-handoff":
+            script = HANDOFF_SCRIPT
     elif kind == "server-direct":
         config["mcp"]["servers"]["fixture"]["codemode"] = False
     elif kind in ("control-off", "control-on"):
         script = CONTROL_SCRIPT
         if kind == "control-on":
             config["experimental"] = {"full_codemode": True}
-    else:
-        kind = "off"
     (instance / "home/.config/opencode/opencode.json").write_text(json.dumps(config, indent=2) + "\n")
     (instance / "workspace/fixture.json").write_text(json.dumps(script) + "\n")
-    evidence = instance / "evidence"
-    evidence.mkdir(exist_ok=True)
-    (evidence / "fixture-position.json").write_text('{"position": 0}\n')
-    (evidence / "fixture-requests.jsonl").unlink(missing_ok=True)
+    # The lab keeps each route's cursor and request log in fixture/ across
+    # runs and copies them to evidence/ afterwards; reset both per run.
+    for directory in (instance / "fixture", instance / "evidence"):
+        directory.mkdir(exist_ok=True)
+        (directory / "fixture-position.json").unlink(missing_ok=True)
+        (directory / "fixture-requests.jsonl").unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

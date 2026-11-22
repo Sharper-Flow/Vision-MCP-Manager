@@ -220,10 +220,15 @@ async function resolveInitPath(directory: string, explicitPath?: string): Promis
 const VISION_PLUGIN_ID = "vision-plugin"
 
 const visionSetup = async (context: V2Plugin.Context) => {
-  // Code Mode is read once at setup time, matching the V1 factory-time read.
-  // The pairing invariant from the V1 registration applies unchanged: the
-  // `vision` mcp block entry is load-bearing for Code Mode sessions.
-  const codeMode = process.env.OPENCODE_EXPERIMENTAL_CODE_MODE === "true"
+  // The host replays MCP transforms in registration order on every rebuild, so
+  // this callback runs before transforms registered later, including
+  // opencode_mcp_connect and opencode_mcp_disconnect. Keeping the editor and
+  // reading it at tool-registration time sees the merged `vision` entry of the
+  // latest rebuild; each rebuild makes a fresh state that later ones never edit.
+  let readVisionServer: () => { disabled?: boolean } | undefined = () => undefined
+  await context.mcp.transform((editor) => {
+    readVisionServer = () => editor.get("vision")
+  })
 
   // Tool registration. The zod schema stays the internal parse layer — the
   // JSON Schema given to the host only advertises the input shape, and every
@@ -251,11 +256,11 @@ const visionSetup = async (context: V2Plugin.Context) => {
       })
     }
 
-    // Daemon-proxy tools — registered ONLY when Code Mode is off. Same
-    // reasoning as the V1 registration: under Code Mode these eight are already
-    // reachable as `tools.vision.*` from the `vision` MCP server, and
-    // plugin-registered schemas get no Code Mode collapse.
-    if (!codeMode) {
+    // An enabled `vision` MCP server already exposes these eight, in the Code
+    // Mode catalog or directly. Register them only when that server is absent
+    // or disabled, so the session has exactly one daemon path.
+    const visionServer = readVisionServer()
+    if (visionServer === undefined || visionServer.disabled === true) {
       register(
         VISION_PLUGIN_TOOL_NAMES.list,
         "List all registered MCP servers with their current effective status (running/starting/stopped/error)",
@@ -317,7 +322,7 @@ const visionSetup = async (context: V2Plugin.Context) => {
       )
     }
 
-    // Plugin-local tools — registered in BOTH Code Mode states. They have no
+    // Plugin-local tools are always registered. They have no
     // Code Mode catalog equivalent and are the in-band recovery path when the
     // `vision` MCP server is declared but disconnected.
     register(
