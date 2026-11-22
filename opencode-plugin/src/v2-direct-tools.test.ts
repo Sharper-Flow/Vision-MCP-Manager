@@ -35,3 +35,37 @@ it.each([
   )
   for (const tool of tools) expect(tool.options?.codemode, tool.name).toBe(false)
 })
+
+it("updates daemon tools only when the MCP transform captures the new server state", async () => {
+  const server = { disabled: false }
+  let mcpTransform = () => {}
+  let toolTransform = () => {}
+  let tools: string[] = []
+  const context = {
+    mcp: {
+      transform: async (edit: (editor: unknown) => void) => {
+        mcpTransform = () => edit({ get: () => server })
+        mcpTransform()
+      },
+    },
+    tool: {
+      transform: async (edit: (editor: unknown) => void) => {
+        toolTransform = () => edit({ add: (tool: { name: string }) => tools.push(tool.name) })
+        toolTransform()
+      },
+    },
+  }
+
+  await VisionPlugin.setup(context as never)
+  expect(tools.sort()).toEqual(Object.values(OPENCODE_MCP_TOOL_NAMES).sort())
+
+  server.disabled = true
+  tools = []
+  toolTransform()
+  expect(tools.sort()).toEqual(Object.values(OPENCODE_MCP_TOOL_NAMES).sort())
+
+  mcpTransform()
+  tools = []
+  toolTransform()
+  expect(tools.sort()).toEqual(Object.values(VISION_PLUGIN_TOOL_NAMES).sort())
+})

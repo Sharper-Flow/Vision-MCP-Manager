@@ -220,9 +220,10 @@ async function resolveInitPath(directory: string, explicitPath?: string): Promis
 const VISION_PLUGIN_ID = "vision-plugin"
 
 const visionSetup = async (context: V2Plugin.Context) => {
-  let vision: { disabled?: boolean } | undefined
+  let visionServerEnabled = false
   await context.mcp.transform((editor) => {
-    vision = editor.get("vision")
+    const server = editor.get("vision")
+    visionServerEnabled = server !== undefined && server.disabled !== true
   })
 
   // Tool registration. The zod schema stays the internal parse layer — the
@@ -251,9 +252,8 @@ const visionSetup = async (context: V2Plugin.Context) => {
       })
     }
 
-    // An enabled vision server already exposes its tools in the catalog or
-    // directly, so register daemon proxies only when it is absent or disabled.
-    if (vision === undefined || vision.disabled === true) {
+    // Disconnecting vision hands daemon access to the plugin tools.
+    if (!visionServerEnabled) {
       register(
         VISION_PLUGIN_TOOL_NAMES.list,
         "List all registered MCP servers with their current effective status (running/starting/stopped/error)",

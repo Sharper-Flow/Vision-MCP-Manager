@@ -75,7 +75,9 @@ the daemon is not running.
 On OpenCode 2.x, the plugin registers all eight unless an enabled `vision` MCP
 server is declared. The host exposes that server's tools in the catalog or
 directly, depending on its Code Mode setting. A server under another key does
-not suppress plugin tools.
+not suppress plugin tools. The decision follows the `vision` entry at plugin
+setup and when OpenCode reloads its tool list after MCP tool changes. A config
+change that leaves the MCP tool set unchanged may wait until the next reload.
 
 On OpenCode 1.x, the plugin omits all eight when
 `OPENCODE_EXPERIMENTAL_CODE_MODE=true`; the `vision` MCP server supplies them
@@ -144,8 +146,9 @@ Consequences worth stating plainly:
 
 - Keep the `vision` entry for 1.x Code Mode sessions; without it, daemon tools
   are unavailable. On 2.x, an absent or disabled entry enables plugin tools.
-- If an enabled `vision` server fails to connect, `opencode_mcp_connect` is the
-  recovery path; daemon tools remain unavailable until the server connects.
+- On 1.x, `opencode_mcp_connect` can reconnect a failed `vision` server. On 2.x,
+  it re-enables a disabled server; if an enabled server fails, daemon tools are
+  absent until it connects. Fix the connection or restart OpenCode.
 - If the Vision daemon itself is down, both paths fail regardless. The pairing
   changes nothing for that case.
 
@@ -168,9 +171,9 @@ Vision Plugin (this package)
       └── opencode_mcp_* tools ─► opencode's own MCP registry
           [both modes]              (in-process, via the injected plugin client)
 
-Under Code Mode the daemon path is reached instead as:
+Through a declared `vision` MCP server the daemon path is:
 
-OpenCode Session ──► tools.vision.*() ──► `vision` MCP server ──► Vision Daemon
+OpenCode Session ──► tools.vision.*() or vision_vision_*() ──► `vision` MCP server ──► Vision Daemon
 ```
 
 The `vision_*` path is a thin client over the Admin MCP. The `opencode_mcp_*`
