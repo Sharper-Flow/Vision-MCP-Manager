@@ -44,6 +44,8 @@ else:
             CONTROL <= names and not names & DAEMON,
             repr(sorted(name for name in names if str(name).startswith("vision_") or str(name).startswith("opencode_mcp_"))),
         )
+        if label == "vision-direct":
+            check(label + " direct server tool", "vision_flip" in names)
     elif mode == "server-direct":
         check(label + " per-server codemode off", "fixture_flip" in names, repr(sorted(name for name in names if str(name).startswith("fixture"))))
     elif mode == "control":

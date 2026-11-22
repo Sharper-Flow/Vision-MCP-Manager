@@ -34,16 +34,19 @@ def main():
     script = DONE_SCRIPT
     if kind == "broken":
         config["plugins"] = [{"package": "/lab/workspace/broken"}]
-    elif kind == "on":
-        config["experimental"] = {"full_codemode": True}
+    elif kind in ("vision-declared", "vision-direct", "vision-disabled"):
+        vision = {"type": "local", "command": ["/usr/bin/python3", "/lab/workspace/mcp-stdio.py"]}
+        if kind == "vision-direct":
+            vision["codemode"] = False
+        elif kind == "vision-disabled":
+            vision["disabled"] = True
+        config["mcp"]["servers"]["vision"] = vision
     elif kind == "server-direct":
         config["mcp"]["servers"]["fixture"]["codemode"] = False
     elif kind in ("control-off", "control-on"):
         script = CONTROL_SCRIPT
         if kind == "control-on":
             config["experimental"] = {"full_codemode": True}
-    else:
-        kind = "off"
     (instance / "home/.config/opencode/opencode.json").write_text(json.dumps(config, indent=2) + "\n")
     (instance / "workspace/fixture.json").write_text(json.dumps(script) + "\n")
     evidence = instance / "evidence"

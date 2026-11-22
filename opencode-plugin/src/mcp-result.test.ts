@@ -364,6 +364,12 @@ describe("validated Vision proxy results", () => {
         > = {}
         await plugin.setup({
           location: { directory: "/tmp/project" },
+          mcp: {
+            transform: async (callback: (editor: unknown) => void) => {
+              callback({ get: () => undefined })
+              return { dispose: async () => {} }
+            },
+          },
           tool: {
             transform: async (callback: (editor: unknown) => void) => {
               callback({

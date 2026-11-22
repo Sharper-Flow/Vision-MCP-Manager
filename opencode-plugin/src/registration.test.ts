@@ -410,11 +410,9 @@ interface V2SetupFixture {
 }
 
 async function runV2Setup(
-  codeMode: boolean,
+  visionDeclared: boolean,
   overrides?: { mcp?: FakeV2Mcp }
 ): Promise<V2SetupFixture> {
-  vi.stubEnv("OPENCODE_EXPERIMENTAL_CODE_MODE", codeMode ? "true" : "false")
-
   const added: Record<string, RecordedV2Tool> = {}
 
   const editor = {
@@ -436,7 +434,7 @@ async function runV2Setup(
         return { dispose: async () => {} }
       },
     },
-    mcp: overrides?.mcp ?? fakeV2Mcp({}, "connected"),
+    mcp: overrides?.mcp ?? fakeV2Mcp(visionDeclared ? { vision: {} } : {}, "connected"),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any
 
@@ -467,7 +465,7 @@ describe("V2 setup registration", () => {
     expect(fixture.sessionHook).not.toHaveBeenCalled()
   })
 
-  it("registers exactly the declared tool names with JSON Schema inputs (Code Mode OFF)", async () => {
+  it("registers exactly the declared tool names with JSON Schema inputs without a vision server", async () => {
     const fixture = await runV2Setup(false)
     const registered = Object.keys(fixture.added)
 
@@ -485,14 +483,14 @@ describe("V2 setup registration", () => {
     }
   })
 
-  it("registers only the plugin-local tools under Code Mode ON (V2)", async () => {
+  it("registers only the plugin-local tools with an enabled vision server (V2)", async () => {
     const fixture = await runV2Setup(true)
     const registered = Object.keys(fixture.added)
 
     expect(new Set(registered)).toEqual(new Set(pluginLocalNames))
     expect(
       registered.filter((name) => daemonNames.includes(name)),
-      "daemon-proxy tools are reachable as tools.vision.* under Code Mode"
+      "daemon-proxy tools are reachable through the vision MCP server"
     ).toEqual([])
   })
 

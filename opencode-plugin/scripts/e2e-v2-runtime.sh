@@ -62,7 +62,7 @@ lab_check() { # LABEL KIND ASSERT_MODE
   local label=$1 kind=$2 mode=$3 rc=0
   python3 "$plugin_dir/scripts/e2e-v2/lab-prep.py" "$instance_dir" "$kind"
   local env_args=()
-  [[ $kind == *on ]] && env_args=(--env OPENCODE_EXPERIMENTAL_CODE_MODE=true)
+  [[ $kind == env-only ]] && env_args=(--env OPENCODE_EXPERIMENTAL_CODE_MODE=true)
   "$lab" run "$iname" --timeout 150 --label "$label" --fixture "$instance_dir/workspace/fixture.json" "${env_args[@]}" \
     -- run --title "$label" --model stub/m "qualification probe" \
     >"$fixture/lab-$label.out" 2>"$fixture/lab-$label.err" || rc=$?
@@ -89,7 +89,10 @@ fi
 "$lab" snapshot-live "$fixture/live-before.json" || fail "snapshot-live failed"
 
 lab_check installed-root off ten
-lab_check codemode-env-on on two
+lab_check vision-declared vision-declared two
+lab_check vision-direct vision-direct two
+lab_check vision-disabled vision-disabled ten
+lab_check env-only env-only ten
 lab_check server-direct server-direct server-direct
 lab_check control-off control-off control
 lab_check control-on control-on control
