@@ -32,8 +32,10 @@ OpenCode plugin that enables AI agents to discover and configure MCP servers thr
 
 Run `VISION_V2_LAB=/path/to/dev/opencode-v2-lab/lab bash opencode-plugin/scripts/e2e-v2-runtime.sh`
 from the repository root. `VISION_V2_LAB` points at the toolbox OpenCode V2
-lab, which installs and hash-pins the 2.3.2 binary and runs it offline in
-bubblewrap. The runner needs Linux, bubblewrap, Python 3, npm and network
+lab, which installs and hash-pins the OpenCode binary and runs it offline in
+bubblewrap. The qualified host version is the exact `@opencode/plugin` pin in
+`package.json`, currently 2.4.1; the runner fails unless the lab is pinned to
+that version. The runner needs Linux, bubblewrap, Python 3, npm and network
 access for npm downloads. Tool-list and MCP-control checks use the lab's
 scripted loopback provider (`--fixture`). Isolation uses the lab's
 `check-isolation` with its negative control, and `snapshot-live` /

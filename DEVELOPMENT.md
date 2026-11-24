@@ -27,7 +27,7 @@ All development and testing uses local fixtures:
 
 ### Testing Strategy
 
-For the isolated OpenCode 2.3.2 plugin qualification, see
+For the isolated OpenCode 2.4.1 plugin qualification, see
 [`opencode-plugin/README.md`](opencode-plugin/README.md#real-host-v2-qualification).
 
 1. **Unit tests**: Use in-memory configs or `testdata/` fixtures

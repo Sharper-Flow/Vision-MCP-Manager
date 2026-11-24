@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Real-host qualification runner for the Vision OpenCode plugin.
 #
-# OpenCode 2.3.2 runs only inside bwrap: through the OpenCode V2 lab
+# The OpenCode host version pinned by package.json's @opencode/plugin runs
+# only inside bwrap: through the OpenCode V2 lab
 # (VISION_V2_LAB) or, for the checks the lab cannot express, a private
 # sandbox with the real home hidden and the network unshared. Usage and
 # lab gaps: opencode-plugin/README.md#real-host-v2-qualification.
@@ -33,12 +34,20 @@ trap cleanup EXIT
 for command in bwrap npm python3; do command -v "$command" >/dev/null || fail "missing $command"; done
 [[ -n $lab && -x $lab ]] || fail "VISION_V2_LAB must point at the executable dev/opencode-v2-lab/lab"
 
+# The qualified host version is the plugin's exact @opencode/plugin pin.
+host_version=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["dependencies"]["@opencode/plugin"])' "$plugin_dir/package.json")
+[[ $host_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "@opencode/plugin pin '$host_version' is not an exact version"
+expected_version="opencode v$host_version"
+
 # ---------------------------------------------------------------------------
-# Lab artifact: pinned 2.3.2 binary, installed once and hash-verified.
+# Lab artifact: binary at the pinned host version, installed once and
+# hash-verified.
 # ---------------------------------------------------------------------------
 if [[ ! -f $lab_state/artifact.json ]]; then
   "$lab" install || fail "lab install failed"
 fi
+artifact_version=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version_output"])' "$lab_state/artifact.json")
+[[ $artifact_version == "$expected_version" ]] || fail "lab artifact is '$artifact_version', plugin pin requires '$expected_version'; pin the lab to $host_version"
 artifact_sha=$(python3 -c 'import json;print(json.load(open("'"$lab_state"'/artifact.json"))["executable_sha256"])')
 artifact_commit=$(python3 -c 'import json;print(json.load(open("'"$lab_state"'/artifact.json"))["source_commit"])')
 lab_bin="$lab_state/artifact/node_modules/@opencode/cli-linux-x64/bin/opencode"
@@ -116,7 +125,7 @@ fi
 # Private sandbox: checks the lab cannot express.
 # ---------------------------------------------------------------------------
 v2_bin=${VISION_V2_BIN:-$lab_bin}
-[[ -f $v2_bin ]] || fail "no 2.3.2 binary at $v2_bin"
+[[ -f $v2_bin ]] || fail "no OpenCode binary at $v2_bin"
 cp "$v2_bin" "$fixture/opencode"
 npm install --ignore-scripts --prefix "$fixture" --no-save --loglevel=error @ai-sdk/openai-compatible@3.0.94 >"$fixture/provider-install.log" 2>&1 || fail "provider install failed"
 cp "$plugin_dir/scripts/e2e-v2/server.py" "$plugin_dir/scripts/e2e-v2/driver.py" "$plugin_dir/scripts/e2e-v2/probe.py" "$fixture/"
@@ -127,7 +136,7 @@ if [[ -n ${VISION_V1_BIN:-} ]]; then
   v1_bind=(--ro-bind "$VISION_V1_BIN" "$fixture/opencode-v1")
 fi
 
-bwrap "${private_isolation[@]}" --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs "$real_home" --dir /tmp --bind "$fixture" "$fixture" --ro-bind "$plugin_dir" "$fixture/repo-plugin" "${v1_bind[@]}" --chdir "$fixture" --clearenv --setenv HOME "$fixture" --setenv REAL_HOME "$real_home" --setenv FIXTURE "$fixture" --setenv V1_ENABLED "${VISION_V1_BIN:+1}" --setenv LOADER_PROBE "${VISION_V2_LOADER_PROBE:-0}" --setenv PATH /usr/bin:/bin /bin/sh -c 'version=$("$FIXTURE/opencode" --version) && [ "$version" = "opencode v2.3.2" ] || { printf "FAIL: version %s\n" "$version"; exit 1; }; printf "OK: %s\n" "$version"; exec /usr/bin/python3 "$FIXTURE/driver.py"' || status=$?
+bwrap "${private_isolation[@]}" --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev --tmpfs "$real_home" --dir /tmp --bind "$fixture" "$fixture" --ro-bind "$plugin_dir" "$fixture/repo-plugin" "${v1_bind[@]}" --chdir "$fixture" --clearenv --setenv HOME "$fixture" --setenv REAL_HOME "$real_home" --setenv FIXTURE "$fixture" --setenv EXPECTED_VERSION "$expected_version" --setenv V1_ENABLED "${VISION_V1_BIN:+1}" --setenv LOADER_PROBE "${VISION_V2_LOADER_PROBE:-0}" --setenv PATH /usr/bin:/bin /bin/sh -c 'version=$("$FIXTURE/opencode" --version) && [ "$version" = "$EXPECTED_VERSION" ] || { printf "FAIL: version %s, expected %s\n" "$version" "$EXPECTED_VERSION"; exit 1; }; printf "OK: %s\n" "$version"; exec /usr/bin/python3 "$FIXTURE/driver.py"' || status=$?
 
 # Structural isolation negative control: with the real home bound
 # read-only the same probe must detect exposure.
