@@ -61,7 +61,7 @@ executable is `/opencode`), `--fixture` serves only
 fixture script cannot select responses by request content, and read-only
 bind sources must be inside the toolbox repository.
 
-On 2.3.2, per-server Code Mode defaults on independently of the environment
+On 2.4.1, per-server Code Mode defaults on independently of the environment
 variable described below. The runner checks the server and environment matrix.
 
 ## Available Tools
