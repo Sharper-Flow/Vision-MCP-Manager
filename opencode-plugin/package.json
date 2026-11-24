@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@opencode-ai/plugin": "^1.18.16",
-    "@opencode/plugin": "2.3.2",
+    "@opencode/plugin": "2.4.1",
     "zod": "4.1.8"
   },
   "devDependencies": {

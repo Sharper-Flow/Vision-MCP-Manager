@@ -43,7 +43,7 @@ type McpEditor = {
 }
 type RegisteredTool = { name: string; execute: (raw: unknown) => Promise<{ content: string }> }
 
-// Models the 2.3.2 host: every MCP rebuild starts from a fresh copy of the
+// Models the 2.4.1 host: every MCP rebuild starts from a fresh copy of the
 // config and replays transforms in registration order; the tool list is
 // rebuilt on read.
 function replayingHost(config: Record<string, ServerConfig>) {
