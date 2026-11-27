@@ -26,6 +26,19 @@ func newTestRegistry() (*Registry, *supervisor.Supervisor) {
 	return reg, sup
 }
 
+func restartTracked(ctx context.Context, reg *Registry, name string) error {
+	reservation, err := reg.ReserveLifecycle(name)
+	if err != nil {
+		return err
+	}
+	defer reservation.Release()
+	if err := reg.WaitLifecycle(ctx, name); err != nil {
+		return err
+	}
+	_, err = reservation.Restart(ctx, ctx, true, nil)
+	return err
+}
+
 func TestRegistry_Add(t *testing.T) {
 	reg, _ := newTestRegistry()
 
@@ -1014,7 +1027,7 @@ func TestRegistry_TrackedRestart_WaitsForOwnHandlers(t *testing.T) {
 	})
 
 	result := make(chan error, 1)
-	go func() { result <- reg.RestartTracked(context.Background(), "restart") }()
+	go func() { result <- restartTracked(context.Background(), reg, "restart") }()
 	select {
 	case <-stopEntered:
 	case <-time.After(5 * time.Second):
@@ -1124,7 +1137,7 @@ func TestRegistry_TrackedRestart_ReportsHandlerTimeout(t *testing.T) {
 			<-release
 		}
 	})
-	if err := reg.RestartTracked(context.Background(), "restart"); !errors.Is(err, ErrLifecycleHandlerTimeout) {
+	if err := restartTracked(context.Background(), reg, "restart"); !errors.Is(err, ErrLifecycleHandlerTimeout) {
 		t.Fatalf("restart error = %v, want handler timeout", err)
 	}
 	if err := reg.WaitLifecycle(context.Background(), "restart"); !errors.Is(err, ErrLifecycleHandlerTimeout) {
@@ -1151,7 +1164,7 @@ func TestRegistry_TrackedRestart_CancelledAfterMutationStillEnqueuesEvent(t *tes
 			close(started)
 		}
 	})
-	if err := reg.RestartTracked(ctx, "restart"); !errors.Is(err, context.Canceled) {
+	if err := restartTracked(ctx, reg, "restart"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("restart error = %v, want cancellation", err)
 	}
 	select {
@@ -1172,7 +1185,7 @@ func TestRegistry_TrackedRestart_CancelledBeforeMutationLeavesServer(t *testing.
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := reg.RestartTracked(ctx, "restart"); !errors.Is(err, context.Canceled) {
+	if err := restartTracked(ctx, reg, "restart"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("restart error = %v, want cancellation", err)
 	}
 	if state := reg.Get("restart").State; state != StateRunning {
@@ -1314,7 +1327,7 @@ func TestRegistry_LifecycleAfterClose(t *testing.T) {
 	if err := reg.WaitLifecycle(context.Background(), "restart"); !errors.Is(err, ErrRegistryClosed) {
 		t.Fatalf("marker error = %v, want registry closed", err)
 	}
-	if err := reg.RestartTracked(context.Background(), "restart"); !errors.Is(err, ErrRegistryClosed) {
+	if err := restartTracked(context.Background(), reg, "restart"); !errors.Is(err, ErrRegistryClosed) {
 		t.Fatalf("restart error = %v, want registry closed", err)
 	}
 }

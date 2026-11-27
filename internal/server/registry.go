@@ -701,22 +701,6 @@ func (r *Registry) Restart(name string) error {
 	return err
 }
 
-// RestartTracked waits for the stop and start handlers belonging to this restart.
-// An error or cancellation can leave the server stopped or started; it does not
-// undo lifecycle work already performed or cancel a running handler.
-func (r *Registry) RestartTracked(ctx context.Context, name string) error {
-	l, err := r.ReserveLifecycle(name)
-	if err != nil {
-		return err
-	}
-	defer l.Release()
-	if err := r.WaitLifecycle(ctx, name); err != nil {
-		return err
-	}
-	_, err = l.Restart(ctx, ctx, true, nil)
-	return err
-}
-
 // RequiredStartupError is returned by StartAll when one or more servers
 // with Autostart=true AND Required=true failed to start. Callers can
 // differentiate this from advisory best-effort errors via errors.As so
