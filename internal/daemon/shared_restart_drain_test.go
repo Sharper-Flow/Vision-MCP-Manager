@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,15 +62,68 @@ func (w *restartDrainWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
+// restartDrainScenario selects what one run of the shared-restart harness
+// adds to a targeted restart while a call's reply is blocked at the response
+// writer.
+type restartDrainScenario struct {
+	timedOut       bool // drain deadline of 500ms
+	concurrentStop bool // ordinary Stop attempted during the drain
+	betweenGates   bool // stop handler held after it removed the old gate
+	cancelDrain    bool // daemon shutdown signalled during the drain
+	checkShutdown  bool // daemon Stop instead of a restart
+}
+
 func TestTargetedRestartDrainsSharedStdioCall(t *testing.T) {
-	testSharedRestartDrain(t, false)
+	testSharedRestartDrain(t, restartDrainScenario{})
 }
 
 func TestSharedRestartDrainReceiptTimeout(t *testing.T) {
-	testSharedRestartDrain(t, true)
+	testSharedRestartDrain(t, restartDrainScenario{timedOut: true})
 }
 
-func testSharedRestartDrain(t *testing.T, timedOut bool) {
+func TestSharedRestartRejectsConcurrentStop(t *testing.T) {
+	testSharedRestartDrain(t, restartDrainScenario{concurrentStop: true})
+}
+
+func TestSharedRestartRejectsRestartBetweenGates(t *testing.T) {
+	testSharedRestartDrain(t, restartDrainScenario{betweenGates: true})
+}
+
+func TestSharedRestartShutdownBeforeCutoverReopensGate(t *testing.T) {
+	testSharedRestartDrain(t, restartDrainScenario{cancelDrain: true})
+}
+
+func TestShutdownKeepsDaemonContextUntilServerStop(t *testing.T) {
+	testSharedRestartDrain(t, restartDrainScenario{checkShutdown: true})
+}
+
+func TestSharedRestartRejectsMissingRunningProxy(t *testing.T) {
+	registry := server.NewRegistry(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer registry.Close()
+	if err := registry.Add("held", &config.ServerConfig{Command: "node"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Start("held"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.WaitLifecycle(context.Background(), "held"); err != nil {
+		t.Fatal(err)
+	}
+	var events atomic.Int32
+	registry.SetEventHandler(func(server.ServerEvent) { events.Add(1) })
+	d := &Daemon{registry: registry, restartCtx: context.Background()}
+	if _, err := d.restartServer(context.Background(), "held"); err == nil {
+		t.Fatal("restart succeeded without a running shared proxy")
+	}
+	if state := registry.Get("held").State; state != server.StateRunning {
+		t.Fatalf("state = %s, want running", state)
+	}
+	if count := events.Load(); count != 0 {
+		t.Fatalf("rejected restart emitted %d lifecycle events", count)
+	}
+}
+
+func testSharedRestartDrain(t *testing.T, scenario restartDrainScenario) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not available")
 	}
@@ -104,15 +159,29 @@ func testSharedRestartDrain(t *testing.T, timedOut bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if timedOut {
+	if scenario.timedOut {
 		d.sharedRestartDrainTimeout = 500 * time.Millisecond
 	}
 	d.adminServer = nil
 	d.probeManager.Close()
 	d.probeManager = nil
 	started := make(chan struct{}, 2)
+	stopped := make(chan struct{})
+	releaseStop := make(chan struct{})
+	shutdownContext := make(chan error, 2)
+	var holdStop sync.Once
 	d.registry.SetEventHandler(func(event server.ServerEvent) {
 		d.handleServerEvent(event)
+		if scenario.checkShutdown && event.Name == "held" && event.Type == server.EventServerStopped {
+			shutdownContext <- d.ctx.Err()
+			shutdownContext <- d.restartCtx.Err()
+		}
+		if scenario.betweenGates && event.Name == "held" && event.Type == server.EventServerStopped {
+			holdStop.Do(func() {
+				close(stopped)
+				<-releaseStop
+			})
+		}
 		if event.Name == "held" && event.Type == server.EventServerStarted {
 			started <- struct{}{}
 		}
@@ -129,6 +198,28 @@ func testSharedRestartDrain(t *testing.T, timedOut bool) {
 	listener := d.portManager.Get("held")
 	if listener == nil {
 		t.Fatal("daemon did not create shared proxy")
+	}
+	if scenario.checkShutdown {
+		if err := d.Stop(5 * time.Second); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case err := <-shutdownContext:
+			if err != nil {
+				t.Fatalf("daemon context cancelled before stop handler: %v", err)
+			}
+		default:
+			t.Fatal("shutdown did not deliver stop handler")
+		}
+		select {
+		case err := <-shutdownContext:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("restart cancellation at stop handler = %v, want cancelled", err)
+			}
+		default:
+			t.Fatal("shutdown did not report the restart cancellation")
+		}
+		return
 	}
 	proxy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -160,7 +251,11 @@ func testSharedRestartDrain(t *testing.T, timedOut bool) {
 	var receipt *admin.RestartDrain
 	restartStarted := false
 	released := false
+	stopReleased := false
 	defer func() {
+		if !stopReleased {
+			close(releaseStop)
+		}
 		if !released {
 			close(releaseWrite)
 		}
@@ -250,7 +345,61 @@ func testSharedRestartDrain(t *testing.T, timedOut bool) {
 		default:
 		}
 	}
-	if timedOut {
+	if scenario.concurrentStop {
+		if err := d.registry.Stop("held"); !errors.Is(err, server.ErrLifecycleBusy) {
+			t.Fatalf("concurrent stop during drain = %v, want busy", err)
+		}
+	}
+	if scenario.cancelDrain {
+		oldGate, ok := d.sharedRestartGates.Load("held")
+		if !ok {
+			t.Fatal("shared proxy gate missing before shutdown")
+		}
+		d.restartCancel()
+		select {
+		case <-restartComplete:
+			if !errors.Is(restartErr, context.Canceled) {
+				t.Fatalf("restart error = %v, want cancellation", restartErr)
+			}
+		case <-ctx.Done():
+			t.Fatal("restart did not release reservation after shutdown")
+		}
+		currentGate, ok := d.sharedRestartGates.Load("held")
+		if !ok || currentGate != oldGate {
+			t.Fatal("precommit shutdown replaced the proxy gate")
+		}
+		if state := d.registry.Get("held").State; state != server.StateRunning {
+			t.Fatalf("state after abandoned restart = %s, want running", state)
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+proxy.Addr().String()+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":45,"method":"tools/call","params":{"name":"held"}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Accept", "application/json, text/event-stream")
+		request.Header.Set("Mcp-Session-Id", "admission-probe")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || (response.StatusCode == http.StatusServiceUnavailable && bytes.Contains(body, []byte(`"reason":"restart_in_progress"`))) {
+			t.Fatalf("gate did not reopen: status=%d body=%q error=%v", response.StatusCode, body, err)
+		}
+		close(releaseWrite)
+		released = true
+		select {
+		case outcome := <-callDone:
+			if outcome.err != nil || outcome.result == nil || outcome.result.IsError {
+				t.Fatalf("held call failed after precommit shutdown: %+v", outcome)
+			}
+		case <-ctx.Done():
+			t.Fatal("held call did not complete after precommit shutdown")
+		}
+		return
+	}
+	if scenario.timedOut {
 		select {
 		case <-restartComplete:
 			if restartErr != nil {
@@ -266,6 +415,31 @@ func testSharedRestartDrain(t *testing.T, timedOut bool) {
 	}
 	close(releaseWrite)
 	released = true
+	if scenario.betweenGates {
+		select {
+		case <-stopped:
+		case <-ctx.Done():
+			t.Fatal("stop handler did not reach between-gates interval")
+		}
+		if _, ok := d.sharedRestartGates.Load("held"); ok {
+			t.Fatal("old proxy gate still present in between-gates interval")
+		}
+		secondDone := make(chan error, 1)
+		go func() {
+			_, err := d.restartServer(ctx, "held")
+			secondDone <- err
+		}()
+		select {
+		case err := <-secondDone:
+			if !errors.Is(err, server.ErrLifecycleBusy) {
+				t.Fatalf("second restart between proxy generations = %v, want busy", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("second restart did not promptly refuse between proxy generations")
+		}
+		close(releaseStop)
+		stopReleased = true
+	}
 	select {
 	case err := <-serveDone:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -299,5 +473,13 @@ func testSharedRestartDrain(t *testing.T, timedOut bool) {
 		}
 	case <-ctx.Done():
 		t.Fatal("targeted restart did not complete")
+	}
+	if scenario.betweenGates {
+		if _, ok := d.sharedRestartGates.Load("held"); !ok {
+			t.Fatal("replacement proxy published no restart gate")
+		}
+		if state := d.registry.Get("held").State; state != server.StateRunning {
+			t.Fatalf("state after restart = %s, want running", state)
+		}
 	}
 }

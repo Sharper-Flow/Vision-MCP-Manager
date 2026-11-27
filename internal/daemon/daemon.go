@@ -48,6 +48,13 @@ type Daemon struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	// restartCtx ends when the daemon begins stopping, before servers are
+	// stopped. Only a targeted restart observes it: before its stop commits
+	// the restart abandons and reopens admission; after the commit it is the
+	// only cancellation the cutover still honours.
+	restartCtx    context.Context
+	restartCancel context.CancelFunc
+
 	// State
 	mu      sync.RWMutex
 	running bool
@@ -119,6 +126,7 @@ func New(cfg Config) (*Daemon, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	restartCtx, restartCancel := context.WithCancel(context.Background())
 
 	env := make(map[string]string)
 	for _, value := range os.Environ() {
@@ -129,16 +137,19 @@ func New(cfg Config) (*Daemon, error) {
 	root, err := ownership.RuntimeRoot(cfg.OwnershipRoot, env, os.Getuid(), os.TempDir())
 	if err != nil {
 		cancel()
+		restartCancel()
 		return nil, fmt.Errorf("resolve ownership root: %w", err)
 	}
 	store, err := ownership.NewStore(root)
 	if err != nil {
 		cancel()
+		restartCancel()
 		return nil, fmt.Errorf("create ownership store: %w", err)
 	}
 	daemonID, err := ownership.GenerateDaemonID()
 	if err != nil {
 		cancel()
+		restartCancel()
 		return nil, fmt.Errorf("generate daemon identity: %w", err)
 	}
 	reader := ownership.NewLinuxProcReader("")
@@ -181,6 +192,8 @@ func New(cfg Config) (*Daemon, error) {
 		logger:                           cfg.Logger,
 		ctx:                              ctx,
 		cancel:                           cancel,
+		restartCtx:                       restartCtx,
+		restartCancel:                    restartCancel,
 		serverMetrics:                    make(map[string]*metrics.ServerMetrics),
 		daemonMetrics:                    daemonMetrics,
 		managedGateways:                  make(map[string]*mcp.ManagedHTTPGateway),
@@ -306,6 +319,7 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 	d.mu.Unlock()
 
 	d.logger.Info("stopping Vision daemon")
+	d.restartCancel()
 
 	// Create timeout context for shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

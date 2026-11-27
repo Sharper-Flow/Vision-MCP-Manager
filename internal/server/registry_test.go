@@ -1180,6 +1180,134 @@ func TestRegistry_TrackedRestart_CancelledBeforeMutationLeavesServer(t *testing.
 	}
 }
 
+func TestRegistry_ReservationRestart_CancelledBeforeCommitSkipsCommit(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+	if err := reg.Add("shared", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Start("shared"); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := reg.ReserveLifecycle("shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation.Release()
+
+	precommit, cancel := context.WithCancel(context.Background())
+	cancel()
+	commits := 0
+	committed, err := reservation.Restart(precommit, context.Background(), true, func() { commits++ })
+	if !errors.Is(err, context.Canceled) || committed || commits != 0 {
+		t.Fatalf("cancelled restart committed=%v commits=%d err=%v", committed, commits, err)
+	}
+	if state := reg.Get("shared").State; state != StateRunning {
+		t.Fatalf("state after cancelled restart = %s, want running", state)
+	}
+
+	committed, err = reservation.Restart(context.Background(), context.Background(), true, func() { commits++ })
+	if err != nil || !committed || commits != 1 {
+		t.Fatalf("restart committed=%v commits=%d err=%v", committed, commits, err)
+	}
+	if state := reg.Get("shared").State; state != StateRunning {
+		t.Fatalf("state after restart = %s, want running", state)
+	}
+}
+
+type reservationOutcome struct {
+	committed bool
+	err       error
+}
+
+// newBlockedStopReservation returns a reserved running stdio server whose
+// stop handler signals entered and then blocks until release is called. A
+// restart whose stop handler is running has already committed.
+func newBlockedStopReservation(t *testing.T) (*Registry, *LifecycleReservation, <-chan struct{}, func()) {
+	t.Helper()
+	reg, _ := newTestRegistry()
+	t.Cleanup(reg.Close)
+	if err := reg.Add("shared", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Start("shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.WaitLifecycle(context.Background(), "shared"); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Type == EventServerStopped {
+			close(entered)
+			<-release
+		}
+	})
+	reservation, err := reg.ReserveLifecycle("shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg, reservation, entered, func() { releaseOnce.Do(func() { close(release) }) }
+}
+
+func TestRegistry_ReservationRestart_RequestEndAfterCommitStillStarts(t *testing.T) {
+	reg, reservation, entered, release := newBlockedStopReservation(t)
+	precommit, endRequest := context.WithCancel(context.Background())
+	commits := 0
+	outcome := make(chan reservationOutcome, 1)
+	go func() {
+		committed, err := reservation.Restart(precommit, context.Background(), true, func() { commits++ })
+		outcome <- reservationOutcome{committed: committed, err: err}
+	}()
+	<-entered
+	endRequest()
+	release()
+	select {
+	case got := <-outcome:
+		if !got.committed || got.err != nil || commits != 1 {
+			t.Fatalf("restart committed=%v commits=%d err=%v", got.committed, commits, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not finish after its stop handler returned")
+	}
+	if state := reg.Get("shared").State; state != StateRunning {
+		t.Fatalf("state after restart = %s, want running", state)
+	}
+}
+
+func TestRegistry_ReservationRestart_ShutdownAfterCommitDoesNotStart(t *testing.T) {
+	reg, reservation, entered, release := newBlockedStopReservation(t)
+	lifetime, shutdown := context.WithCancel(context.Background())
+	commits := 0
+	outcome := make(chan reservationOutcome, 1)
+	go func() {
+		committed, err := reservation.Restart(context.Background(), lifetime, true, func() { commits++ })
+		outcome <- reservationOutcome{committed: committed, err: err}
+	}()
+	<-entered
+	select {
+	case got := <-outcome:
+		t.Fatalf("restart returned while its stop handler was blocked: %+v", got)
+	default:
+	}
+	shutdown()
+	select {
+	case got := <-outcome:
+		if !got.committed || !errors.Is(got.err, context.Canceled) || commits != 1 {
+			t.Fatalf("restart committed=%v commits=%d err=%v", got.committed, commits, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not end the committed restart")
+	}
+	release()
+	if state := reg.Get("shared").State; state != StateStopped {
+		t.Fatalf("state after shutdown = %s, want stopped", state)
+	}
+}
+
 func TestRegistry_LifecycleAfterClose(t *testing.T) {
 	reg, _ := newTestRegistry()
 	reg.Close()
