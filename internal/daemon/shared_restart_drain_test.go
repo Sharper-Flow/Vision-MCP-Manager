@@ -123,6 +123,106 @@ func TestSharedRestartRejectsMissingRunningProxy(t *testing.T) {
 	}
 }
 
+type restartBindFailureLog struct {
+	failed chan struct{}
+	once   sync.Once
+}
+
+func (l *restartBindFailureLog) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("streamable MCP listener error")) &&
+		bytes.Contains(p, []byte("server=held")) &&
+		bytes.Contains(p, []byte("address already in use")) {
+		l.once.Do(func() { close(l.failed) })
+	}
+	return len(p), nil
+}
+
+func TestSharedRestartRecoversListenerBindFailure(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	port := occupied.Addr().(*net.TCPAddr).Port
+	path := filepath.Join(dir, "servers.yaml")
+	data := fmt.Sprintf("servers:\n  held:\n    command: node\n    args: ['-e', %q]\n    port: %d\n    autostart: true\n", restartDrainFixture, config.MinPort)
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	log := &restartBindFailureLog{failed: make(chan struct{})}
+	d, err := New(Config{ConfigPath: path, OwnershipRoot: filepath.Join(dir, "ownership"), Logger: slog.New(slog.NewTextHandler(log, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The YAML port must pass config validation; the test owns this ephemeral port.
+	d.cfg.Servers["held"].Port = port
+	d.adminServer = nil
+	d.probeManager.Close()
+	d.probeManager = nil
+	if err := d.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer d.Stop(5 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := d.registry.WaitLifecycle(ctx, "held"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-log.failed:
+	case <-ctx.Done():
+		t.Fatal("listener did not report its bind failure")
+	}
+	oldGate, ok := d.sharedRestartGates.Load("held")
+	if !ok || d.portManager.Get("held") == nil {
+		t.Fatal("failed bind did not retain the registered listener and gate")
+	}
+	if err := occupied.Close(); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := d.restartServer(ctx, "held")
+	if err != nil {
+		t.Fatalf("restart after bind failure: %v", err)
+	}
+	if receipt == nil || receipt.Outcome != "drained" || receipt.TimeoutMS <= 0 || len(receipt.RemainingRequests) != 0 {
+		t.Fatalf("invalid drain receipt: %+v", receipt)
+	}
+	freshGate, ok := d.sharedRestartGates.Load("held")
+	if !ok || freshGate == oldGate {
+		t.Fatal("restart did not publish a replacement gate")
+	}
+	replacement := d.portManager.Get("held")
+	if replacement == nil {
+		t.Fatal("restart did not register a replacement listener")
+	}
+
+	// Serve the replacement on a listener the test already owns, so no probe
+	// can reach a different process if the configured port is claimed.
+	witness, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer witness.Close()
+	go replacement.Server.Serve(witness)
+	client := mcp.NewClient(&mcp.Implementation{Name: "restart-test", Version: "1"}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: "http://" + witness.Addr().String() + "/mcp"}, nil)
+	if err != nil {
+		t.Fatalf("connect to replacement proxy: %v", err)
+	}
+	defer session.Close()
+	result, err := session.ListTools(ctx, nil)
+	if err != nil || result == nil || len(result.Tools) != 1 || result.Tools[0].Name != "held" {
+		t.Fatalf("replacement proxy tools = %+v, %v", result, err)
+	}
+}
+
 func testSharedRestartDrain(t *testing.T, scenario restartDrainScenario) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not available")
