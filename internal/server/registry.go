@@ -17,10 +17,13 @@ import (
 
 // Errors returned by Registry operations.
 var (
-	ErrServerExists     = errors.New("server already exists")
-	ErrServerNotFound   = errors.New("server not found")
-	ErrServerRunning    = errors.New("server is running")
-	ErrServerNotRunning = errors.New("server is not running")
+	ErrServerExists            = errors.New("server already exists")
+	ErrServerNotFound          = errors.New("server not found")
+	ErrServerRunning           = errors.New("server is running")
+	ErrServerNotRunning        = errors.New("server is not running")
+	ErrLifecycleHandlerTimeout = errors.New("lifecycle event handler timed out")
+	ErrRegistryClosed          = errors.New("registry is closed")
+	ErrLifecycleBusy           = errors.New("server lifecycle operation in progress")
 )
 
 // ServerEventType indicates the type of server lifecycle event.
@@ -50,6 +53,12 @@ type ServerEvent struct {
 // which the handler is abandoned and ordering is no longer guaranteed for it.
 type ServerEventHandler func(event ServerEvent)
 
+type lifecycleWork struct {
+	event *ServerEvent
+	name  string
+	ack   chan error
+}
+
 const (
 	// eventQueueCapacity bounds the lifecycle event queue. Events are produced
 	// at server start/stop cadence, so this is far above steady-state depth; it
@@ -74,10 +83,11 @@ type Registry struct {
 	eventHandler  ServerEventHandler
 	startupBlocks map[string]error
 	startupGuard  func(string) error
+	reservations  map[string]chan struct{}
 
 	// Lifecycle events are delivered through a single queue drained by one
 	// goroutine, so handlers observe events in the order they occurred.
-	eventQueue chan ServerEvent
+	eventQueue chan lifecycleWork
 	stopCh     chan struct{}
 	drainDone  chan struct{}
 	closeOnce  sync.Once
@@ -103,7 +113,8 @@ func NewRegistry(sup *supervisor.Supervisor, logger *slog.Logger) *Registry {
 		servers:        make(map[string]*ManagedServer),
 		logger:         logger,
 		startupBlocks:  make(map[string]error),
-		eventQueue:     make(chan ServerEvent, eventQueueCapacity),
+		reservations:   make(map[string]chan struct{}),
+		eventQueue:     make(chan lifecycleWork, eventQueueCapacity),
 		stopCh:         make(chan struct{}),
 		drainDone:      make(chan struct{}),
 		handlerTimeout: eventHandlerTimeout,
@@ -112,22 +123,145 @@ func NewRegistry(sup *supervisor.Supervisor, logger *slog.Logger) *Registry {
 	return r
 }
 
+// LifecycleReservation excludes same-name registry mutations until Release.
+type LifecycleReservation struct {
+	registry *Registry
+	name     string
+	done     chan struct{}
+}
+
+// reserveLifecycle takes the name's reservation. When another operation
+// holds it, it returns that holder's release channel instead.
+func (r *Registry) reserveLifecycle(name string) (*LifecycleReservation, <-chan struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if done := r.reservations[name]; done != nil {
+		return nil, done
+	}
+	done := make(chan struct{})
+	r.reservations[name] = done
+	return &LifecycleReservation{registry: r, name: name, done: done}, nil
+}
+
+// ReserveLifecycle takes the name's lifecycle reservation, or returns
+// ErrLifecycleBusy while another operation holds it.
+func (r *Registry) ReserveLifecycle(name string) (*LifecycleReservation, error) {
+	reservation, held := r.reserveLifecycle(name)
+	if held != nil {
+		return nil, fmt.Errorf("%w: %s", ErrLifecycleBusy, name)
+	}
+	return reservation, nil
+}
+
+// reserveLifecycleWait takes the name's reservation, waiting behind a holder
+// until ctx ends. Shutdown uses it so it never leaves a server behind a
+// restart it has already told to abandon.
+func (r *Registry) reserveLifecycleWait(ctx context.Context, name string) (*LifecycleReservation, error) {
+	for {
+		reservation, held := r.reserveLifecycle(name)
+		if held == nil {
+			return reservation, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-held:
+		}
+	}
+}
+
+func (l *LifecycleReservation) Release() {
+	r := l.registry
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.reservations[l.name] == l.done {
+		close(l.done)
+		delete(r.reservations, l.name)
+	}
+}
+
+// Snapshot returns the configured identity and state while mutations are excluded.
+func (l *LifecycleReservation) Snapshot() (*config.ServerConfig, State, error) {
+	r := l.registry
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	srv := r.servers[l.name]
+	if srv == nil {
+		return nil, "", fmt.Errorf("%w: %s", ErrServerNotFound, l.name)
+	}
+	return srv.Config, srv.State, nil
+}
+
+// Restart stops and starts the reserved server. commit, when given, runs once
+// under the registry lock at the stop's commit point, after the last check of
+// precommit; committed reports whether it ran. After the commit only lifetime
+// can cancel the remaining work. commit must not call the registry.
+func (l *LifecycleReservation) Restart(precommit, lifetime context.Context, tracked bool, commit func()) (bool, error) {
+	r := l.registry
+	committed := false
+	err := r.stopWithCommit(precommit, lifetime, l.name, tracked, func() {
+		committed = true
+		if commit != nil {
+			commit()
+		}
+	})
+	if err != nil {
+		return committed, err
+	}
+	if err := lifetime.Err(); err != nil {
+		return committed, err
+	}
+	return committed, r.start(lifetime, l.name, tracked)
+}
+
 // drainEvents delivers queued lifecycle events one at a time, in arrival order.
 // A single drain goroutine is what makes ordering observable to handlers.
 func (r *Registry) drainEvents() {
 	defer close(r.drainDone)
+	abandoned := make(map[string][]<-chan struct{})
+	active := func(name string) bool {
+		pending := abandoned[name][:0]
+		for _, done := range abandoned[name] {
+			select {
+			case <-done:
+			default:
+				pending = append(pending, done)
+			}
+		}
+		if len(pending) == 0 {
+			delete(abandoned, name)
+			return false
+		}
+		abandoned[name] = pending
+		return true
+	}
+	deliver := func(work lifecycleWork) {
+		var err error
+		if work.ack != nil && active(work.name) {
+			err = fmt.Errorf("%w: %s", ErrLifecycleHandlerTimeout, work.name)
+		}
+		if work.event != nil {
+			if done := r.deliverEvent(*work.event); done != nil {
+				abandoned[work.event.Name] = append(abandoned[work.event.Name], done)
+				err = fmt.Errorf("%w: %s", ErrLifecycleHandlerTimeout, work.event.Name)
+			}
+		}
+		if work.ack != nil {
+			work.ack <- err
+		}
+	}
 
 	for {
 		select {
-		case event := <-r.eventQueue:
-			r.deliverEvent(event)
+		case work := <-r.eventQueue:
+			deliver(work)
 		case <-r.stopCh:
 			// Deliver whatever is already queued before shutting down, so a
 			// pending Stop event is never lost at teardown.
 			for {
 				select {
-				case event := <-r.eventQueue:
-					r.deliverEvent(event)
+				case work := <-r.eventQueue:
+					deliver(work)
 				default:
 					return
 				}
@@ -140,13 +274,15 @@ func (r *Registry) drainEvents() {
 // eventHandlerTimeout. On timeout the handler is abandoned (Go cannot cancel a
 // running function) and delivery continues, trading strict serialization for
 // liveness — a wedged handler degrades ordering rather than halting the daemon.
-func (r *Registry) deliverEvent(event ServerEvent) {
+// It returns the abandoned handler's completion channel, or nil when the
+// handler returned in time.
+func (r *Registry) deliverEvent(event ServerEvent) <-chan struct{} {
 	r.mu.RLock()
 	handler := r.eventHandler
 	r.mu.RUnlock()
 
 	if handler == nil {
-		return
+		return nil
 	}
 
 	done := make(chan struct{})
@@ -165,11 +301,13 @@ func (r *Registry) deliverEvent(event ServerEvent) {
 
 	select {
 	case <-done:
+		return nil
 	case <-timer.C:
 		r.logger.Error("server lifecycle event handler timed out; continuing delivery",
 			slog.String("name", event.Name),
 			slog.Duration("timeout", timeout),
 		)
+		return done
 	}
 }
 
@@ -220,7 +358,7 @@ func (r *Registry) SetEventHandler(handler ServerEventHandler) {
 // Progress is guaranteed because delivery is bounded by handlerTimeout.
 func (r *Registry) fireEvent(event ServerEvent) {
 	select {
-	case r.eventQueue <- event:
+	case r.eventQueue <- lifecycleWork{event: &event}:
 	case <-r.stopCh:
 		// Registry is shutting down; drop rather than block a caller forever.
 		r.logger.Debug("dropping lifecycle event after registry close",
@@ -229,9 +367,63 @@ func (r *Registry) fireEvent(event ServerEvent) {
 	}
 }
 
+// WaitLifecycle waits for work already enqueued before its ordered marker and
+// rejects a still-running timed-out handler for name. It does not cover
+// operations that have not enqueued their events. Cancellation leaves enqueued
+// work unchanged.
+func (r *Registry) WaitLifecycle(ctx context.Context, name string) error {
+	return r.awaitLifecycle(ctx, lifecycleWork{name: name})
+}
+
+// awaitLifecycle enqueues work and waits for its delivery. A marker honours
+// cancellation until enqueued. An event records a state change already made,
+// so cancellation must not suppress it.
+func (r *Registry) awaitLifecycle(ctx context.Context, work lifecycleWork) error {
+	enqueueCancel := ctx.Done()
+	if work.event != nil {
+		enqueueCancel = nil
+	} else if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-r.stopCh:
+		return ErrRegistryClosed
+	default:
+	}
+	work.ack = make(chan error, 1)
+	select {
+	case <-enqueueCancel:
+		return ctx.Err()
+	case <-r.stopCh:
+		return ErrRegistryClosed
+	case r.eventQueue <- work:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.stopCh:
+		return ErrRegistryClosed
+	case err := <-work.ack:
+		return err
+	}
+}
+
+func (r *Registry) emitLifecycle(ctx context.Context, event ServerEvent, tracked bool) error {
+	if tracked {
+		return r.awaitLifecycle(ctx, lifecycleWork{event: &event, name: event.Name})
+	}
+	r.fireEvent(event)
+	return nil
+}
+
 // Add registers a new server configuration.
 // The server is not started automatically; call Start() to start it.
 func (r *Registry) Add(name string, cfg *config.ServerConfig) error {
+	l, err := r.ReserveLifecycle(name)
+	if err != nil {
+		return err
+	}
+	defer l.Release()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -258,6 +450,11 @@ func (r *Registry) Add(name string, cfg *config.ServerConfig) error {
 
 // Remove unregisters a server. The server must be stopped first.
 func (r *Registry) Remove(name string) error {
+	l, err := r.ReserveLifecycle(name)
+	if err != nil {
+		return err
+	}
+	defer l.Release()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -326,6 +523,15 @@ func (r *Registry) Count() int {
 
 // Start begins running a server.
 func (r *Registry) Start(name string) error {
+	l, err := r.ReserveLifecycle(name)
+	if err != nil {
+		return err
+	}
+	defer l.Release()
+	return r.start(context.Background(), name, false)
+}
+
+func (r *Registry) start(ctx context.Context, name string, tracked bool) error {
 	r.mu.Lock()
 	srv, exists := r.servers[name]
 	if !exists {
@@ -379,13 +585,11 @@ func (r *Registry) Start(name string) error {
 			slog.Int("port", srv.Config.Port),
 		)
 
-		r.fireEvent(ServerEvent{
+		return r.emitLifecycle(ctx, ServerEvent{
 			Type:   EventServerStarted,
 			Name:   name,
 			Server: srv,
-		})
-
-		return nil
+		}, tracked)
 	}
 
 	// Non-stdio transports use the supervisor normally
@@ -409,21 +613,28 @@ func (r *Registry) Start(name string) error {
 	)
 
 	// Fire event after successful start (outside lock)
-	r.fireEvent(ServerEvent{
+	return r.emitLifecycle(ctx, ServerEvent{
 		Type:   EventServerStarted,
 		Name:   name,
 		Server: srv,
-	})
-
-	return nil
+	}, tracked)
 }
 
 // Stop halts a running server.
 func (r *Registry) Stop(name string) error {
-	return r.stop(context.Background(), name)
+	l, err := r.ReserveLifecycle(name)
+	if err != nil {
+		return err
+	}
+	defer l.Release()
+	return r.stop(context.Background(), name, false)
 }
 
-func (r *Registry) stop(ctx context.Context, name string) error {
+func (r *Registry) stop(ctx context.Context, name string, tracked bool) error {
+	return r.stopWithCommit(ctx, ctx, name, tracked, nil)
+}
+
+func (r *Registry) stopWithCommit(precommit, ctx context.Context, name string, tracked bool, commit func()) error {
 	r.mu.Lock()
 	srv, exists := r.servers[name]
 	if !exists {
@@ -436,6 +647,16 @@ func (r *Registry) stop(ctx context.Context, name string) error {
 		return nil // Already stopped, not an error
 	}
 
+	// The commit's cancellation check shares this lock hold with the state
+	// change below: a cancellation observed here precedes the commit, and one
+	// not observed here follows it.
+	if commit != nil {
+		if err := precommit.Err(); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+		commit()
+	}
 	srv.State = StateStopping
 	r.mu.Unlock()
 
@@ -462,21 +683,22 @@ func (r *Registry) stop(ctx context.Context, name string) error {
 	)
 
 	// Fire event after successful stop (outside lock)
-	r.fireEvent(ServerEvent{
+	return r.emitLifecycle(ctx, ServerEvent{
 		Type:   EventServerStopped,
 		Name:   name,
 		Server: srv,
-	})
-
-	return nil
+	}, tracked)
 }
 
 // Restart stops and starts a server.
 func (r *Registry) Restart(name string) error {
-	if err := r.Stop(name); err != nil {
+	l, err := r.ReserveLifecycle(name)
+	if err != nil {
 		return err
 	}
-	return r.Start(name)
+	defer l.Release()
+	_, err = l.Restart(context.Background(), context.Background(), false, nil)
+	return err
 }
 
 // RequiredStartupError is returned by StartAll when one or more servers
@@ -572,7 +794,14 @@ func (r *Registry) StopAll(ctx context.Context) error {
 		default:
 		}
 
-		if err := r.stop(ctx, name); err != nil {
+		l, err := r.reserveLifecycleWait(ctx, name)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		err = r.stop(ctx, name, false)
+		l.Release()
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}

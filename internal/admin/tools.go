@@ -77,7 +77,7 @@ func (s *Server) getTools() []Tool {
 		},
 		{
 			Name:        "vision_restart",
-			Description: "Restart a configured MCP server in-place, preserving its port assignment.",
+			Description: "Restart a configured MCP server in-place, preserving its port assignment. Shared targets may include a drain receipt.",
 			InputSchema: InputSchema{
 				Type: "object",
 				Properties: map[string]Property{
@@ -571,15 +571,25 @@ func (s *Server) toolRemove(ctx context.Context, args json.RawMessage) (*ToolCal
 	return jsonToolResult(response)
 }
 
+// RestartDrain reports the bounded drain of requests for a shared target.
+// Outcome is "drained" or "timed_out". TimeoutMS must be positive.
+// RemainingRequests contains opaque request IDs; it must be empty when drained.
+type RestartDrain struct {
+	Outcome           string   `json:"outcome" jsonschema:"drained or timed_out"`
+	TimeoutMS         int64    `json:"timeout_ms" jsonschema:"Positive drain timeout in milliseconds"`
+	RemainingRequests []uint64 `json:"remaining_requests" jsonschema:"Opaque IDs of requests remaining when the drain ended"`
+}
+
 // RestartResponse is the response for vision_restart.
 type RestartResponse struct {
-	Success         bool    `json:"success"`
-	Name            string  `json:"name"`
-	Status          string  `json:"status,omitempty"`
-	EffectiveReason *string `json:"effective_reason,omitempty"`
-	ProcessState    string  `json:"process_state,omitempty"`
-	Port            *int    `json:"port,omitempty"`
-	Error           *string `json:"error,omitempty"`
+	Success         bool          `json:"success"`
+	Name            string        `json:"name"`
+	Status          string        `json:"status,omitempty"`
+	EffectiveReason *string       `json:"effective_reason,omitempty"`
+	ProcessState    string        `json:"process_state,omitempty"`
+	Port            *int          `json:"port,omitempty"`
+	Error           *string       `json:"error,omitempty"`
+	Drain           *RestartDrain `json:"drain,omitempty"`
 	ReachabilityDetails
 }
 
@@ -611,10 +621,22 @@ func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCa
 		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg})
 	}
 
-	if err := s.registry.Restart(params.Name); err != nil {
-		errMsg := fmt.Sprintf("Failed to restart server: %s", err.Error())
+	var drain *RestartDrain
+	var restartErr error
+	if s.restartServer != nil {
+		drain, restartErr = s.restartServer(ctx, params.Name)
+	} else {
+		restartErr = s.registry.Restart(params.Name)
+	}
+	if drain != nil && drain.RemainingRequests == nil {
+		copy := *drain
+		copy.RemainingRequests = []uint64{}
+		drain = &copy
+	}
+	if restartErr != nil {
+		errMsg := fmt.Sprintf("Failed to restart server: %s", restartErr.Error())
 		errMsg = scrubSecrets(errMsg)
-		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg})
+		return jsonToolResult(RestartResponse{Success: false, Name: params.Name, Error: &errMsg, Drain: drain})
 	}
 
 	srv = s.registry.Get(params.Name)
@@ -629,6 +651,7 @@ func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCa
 			Status:              effective.Status,
 			ProcessState:        string(status.State),
 			Port:                &port,
+			Drain:               drain,
 			ReachabilityDetails: effective.Reachability,
 		}
 		if effective.Reason != "" {
@@ -642,7 +665,7 @@ func (s *Server) toolRestart(ctx context.Context, args json.RawMessage) (*ToolCa
 		return jsonToolResult(response)
 	}
 
-	return jsonToolResult(RestartResponse{Success: true, Name: params.Name, Status: "stopped"})
+	return jsonToolResult(RestartResponse{Success: true, Name: params.Name, Status: "stopped", Drain: drain})
 }
 
 // InitResponse is the response for vision_init.

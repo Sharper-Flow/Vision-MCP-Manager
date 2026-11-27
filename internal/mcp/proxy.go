@@ -210,6 +210,12 @@ type ProxyConfig struct {
 	// DaemonMetrics records daemon-wide tool call and forwarding failure
 	// counters. Optional; nil = no daemon-wide counting.
 	DaemonMetrics *metrics.DaemonMetrics
+
+	// SharedRestartGate drains application requests across a targeted restart
+	// of the shared downstream. Optional, and read only when SharedManager is
+	// set: the daemon injects the gate it drains, and a proxy built without one
+	// gets a private gate. A gate set without SharedManager is ignored.
+	SharedRestartGate *SharedRestartGate
 }
 
 // hasExactlyOneManagerSource reports whether exactly one of SessionManager,
@@ -251,6 +257,16 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	logger := cfg.Logger.With(slog.String("component", "proxy"), slog.String("server", cfg.ServerName))
 	sharedTools := newSharedToolCoordinator(logger, cfg.SharedReadOnlyTools, cfg.SharedResultCacheTTL, cfg.SharedResultCacheSize)
 	inFlightLimiter := newInFlightLimiter(cfg.MaxInFlightRequests)
+	// Only a shared proxy restarts under one listener with requests in flight.
+	// A per-session manager restarts inside its own proxy session and never
+	// consults a gate.
+	var restartGate *SharedRestartGate
+	if cfg.SharedManager != nil {
+		restartGate = cfg.SharedRestartGate
+		if restartGate == nil {
+			restartGate = NewSharedRestartGate()
+		}
+	}
 
 	type sessionIndex struct {
 		mu           sync.RWMutex
@@ -404,6 +420,7 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 				)
 				return nil
 			}
+			srv.AddReceivingMiddleware(sharedRestartCutover(restartGate))
 			return srv
 		}
 
@@ -516,13 +533,27 @@ func NewProxyHandler(cfg ProxyConfig) http.Handler {
 	}, nil)
 
 	outerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" {
+		headerless := r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == ""
+		if headerless {
 			// The SDK's server factory allocates a downstream lease even for
 			// messages it later rejects. Only initialize may create a session.
 			if !isInitializeRequest(r) {
 				http.Error(w, "Mcp-Session-Id is required; send initialize without a session ID to start a new session", http.StatusBadRequest)
 				return
 			}
+		}
+		if restartGate != nil {
+			release, err := restartGate.admit(r)
+			if err != nil {
+				writeSharedAdmissionFailure(w, r, err)
+				return
+			}
+			// Held until this handler returns: after the SDK wrote the
+			// response or the caller is gone.
+			defer release()
+		}
+
+		if headerless {
 			var admission AdmissionStatuser
 			if cfg.Selector != nil {
 				admission = cfg.Selector
@@ -637,11 +668,16 @@ func writeSharedAdmissionFailure(w http.ResponseWriter, r *http.Request, err err
 	if errors.Is(err, session.ErrSharedClosed) {
 		kind, message, retryable = "closed", "shared session manager is closed", false
 	}
+	if errors.Is(err, ErrSharedRestartClosed) {
+		kind, message = "restarting", "shared downstream is restarting; retry admission"
+	}
 	reason := "startup_failed"
 	if errors.Is(err, context.DeadlineExceeded) {
 		reason = "deadline_exceeded"
 	} else if errors.Is(err, context.Canceled) {
 		reason = "context_canceled"
+	} else if errors.Is(err, ErrSharedRestartClosed) {
+		reason = "restart_in_progress"
 	} else if !retryable {
 		reason = "closed"
 	}

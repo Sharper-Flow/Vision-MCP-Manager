@@ -26,6 +26,19 @@ func newTestRegistry() (*Registry, *supervisor.Supervisor) {
 	return reg, sup
 }
 
+func restartTracked(ctx context.Context, reg *Registry, name string) error {
+	reservation, err := reg.ReserveLifecycle(name)
+	if err != nil {
+		return err
+	}
+	defer reservation.Release()
+	if err := reg.WaitLifecycle(ctx, name); err != nil {
+		return err
+	}
+	_, err = reservation.Restart(ctx, ctx, true, nil)
+	return err
+}
+
 func TestRegistry_Add(t *testing.T) {
 	reg, _ := newTestRegistry()
 
@@ -973,6 +986,350 @@ func TestRegistry_Restart_EventOrderingAlternates(t *testing.T) {
 		t.Fatalf("Stop() error: %v", err)
 	}
 	expectEvent(restarts, EventServerStopped)
+}
+
+func TestRegistry_TrackedRestart_WaitsForOwnHandlers(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+
+	if err := reg.Add("restart", &config.ServerConfig{Command: "sleep", Args: []string{"60"}}); err != nil {
+		t.Fatal(err)
+	}
+	initialStart := make(chan struct{})
+	reg.SetEventHandler(func(ServerEvent) { close(initialStart) })
+	if err := reg.Start("restart"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-initialStart:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial start handler did not run")
+	}
+
+	stopEntered := make(chan struct{})
+	startEntered := make(chan struct{})
+	startFinished := make(chan struct{})
+	releaseStop := make(chan struct{})
+	releaseStart := make(chan struct{})
+	var stopOnce, startOnce sync.Once
+	defer stopOnce.Do(func() { close(releaseStop) })
+	defer startOnce.Do(func() { close(releaseStart) })
+	reg.SetEventHandler(func(event ServerEvent) {
+		switch event.Type {
+		case EventServerStopped:
+			close(stopEntered)
+			<-releaseStop
+		case EventServerStarted:
+			close(startEntered)
+			<-releaseStart
+			close(startFinished)
+		}
+	})
+
+	result := make(chan error, 1)
+	go func() { result <- restartTracked(context.Background(), reg, "restart") }()
+	select {
+	case <-stopEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart stop handler did not run")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("restart returned while its stop handler was blocked: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	select {
+	case <-startEntered:
+		t.Fatal("start handler ran before the stop handler completed")
+	default:
+	}
+	stopOnce.Do(func() { close(releaseStop) })
+	select {
+	case <-startEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart start handler did not run")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("restart returned while its start handler was blocked: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	startOnce.Do(func() { close(releaseStart) })
+	select {
+	case <-startFinished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart start handler did not finish")
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("restart: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not return after its handlers finished")
+	}
+}
+
+func TestRegistry_LifecycleMarkerAndTimeoutIsolation(t *testing.T) {
+	reg, _ := newTestRegistry()
+	reg.handlerTimeout = 100 * time.Millisecond
+	defer reg.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Name == "blocked" {
+			close(entered)
+			<-release
+			close(finished)
+		}
+	})
+	reg.fireEvent(ServerEvent{Name: "blocked"})
+	<-entered
+	result := make(chan error, 1)
+	go func() { result <- reg.WaitLifecycle(context.Background(), "blocked") }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrLifecycleHandlerTimeout) {
+			t.Fatalf("marker error = %v, want handler timeout", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("marker did not report timed-out handler")
+	}
+	if err := reg.WaitLifecycle(context.Background(), "other"); err != nil {
+		t.Fatalf("unrelated target marker: %v", err)
+	}
+	once.Do(func() { close(release) })
+	<-finished
+	// The handler's return, not its final action, establishes the boundary.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := reg.WaitLifecycle(context.Background(), "blocked")
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrLifecycleHandlerTimeout) || time.Now().After(deadline) {
+			t.Fatalf("marker after handler return: %v", err)
+		}
+	}
+}
+
+func TestRegistry_TrackedRestart_ReportsHandlerTimeout(t *testing.T) {
+	reg, _ := newTestRegistry()
+	reg.handlerTimeout = 100 * time.Millisecond
+	defer reg.Close()
+	if err := reg.Add("restart", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Start("restart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.WaitLifecycle(context.Background(), "restart"); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Type == EventServerStopped {
+			<-release
+		}
+	})
+	if err := restartTracked(context.Background(), reg, "restart"); !errors.Is(err, ErrLifecycleHandlerTimeout) {
+		t.Fatalf("restart error = %v, want handler timeout", err)
+	}
+	if err := reg.WaitLifecycle(context.Background(), "restart"); !errors.Is(err, ErrLifecycleHandlerTimeout) {
+		t.Fatalf("marker error = %v, want handler timeout", err)
+	}
+}
+
+func TestRegistry_TrackedRestart_CancelledAfterMutationStillEnqueuesEvent(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+	if err := reg.Add("restart", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	reg.BlockStartup("restart", errors.New("retry"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg.SetStartupGuard(func(string) error {
+		cancel()
+		return nil
+	})
+	started := make(chan struct{})
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Type == EventServerStarted {
+			close(started)
+		}
+	})
+	if err := restartTracked(ctx, reg, "restart"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("restart error = %v, want cancellation", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("committed start event was not delivered")
+	}
+}
+
+func TestRegistry_TrackedRestart_CancelledBeforeMutationLeavesServer(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+	if err := reg.Add("restart", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Start("restart"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := restartTracked(ctx, reg, "restart"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("restart error = %v, want cancellation", err)
+	}
+	if state := reg.Get("restart").State; state != StateRunning {
+		t.Fatalf("state = %s, want running", state)
+	}
+}
+
+func TestRegistry_ReservationRestart_CancelledBeforeCommitSkipsCommit(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+	if err := reg.Add("shared", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Start("shared"); err != nil {
+		t.Fatal(err)
+	}
+	reservation, err := reg.ReserveLifecycle("shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reservation.Release()
+
+	precommit, cancel := context.WithCancel(context.Background())
+	cancel()
+	commits := 0
+	committed, err := reservation.Restart(precommit, context.Background(), true, func() { commits++ })
+	if !errors.Is(err, context.Canceled) || committed || commits != 0 {
+		t.Fatalf("cancelled restart committed=%v commits=%d err=%v", committed, commits, err)
+	}
+	if state := reg.Get("shared").State; state != StateRunning {
+		t.Fatalf("state after cancelled restart = %s, want running", state)
+	}
+
+	committed, err = reservation.Restart(context.Background(), context.Background(), true, func() { commits++ })
+	if err != nil || !committed || commits != 1 {
+		t.Fatalf("restart committed=%v commits=%d err=%v", committed, commits, err)
+	}
+	if state := reg.Get("shared").State; state != StateRunning {
+		t.Fatalf("state after restart = %s, want running", state)
+	}
+}
+
+type reservationOutcome struct {
+	committed bool
+	err       error
+}
+
+// newBlockedStopReservation returns a reserved running stdio server whose
+// stop handler signals entered and then blocks until release is called. A
+// restart whose stop handler is running has already committed.
+func newBlockedStopReservation(t *testing.T) (*Registry, *LifecycleReservation, <-chan struct{}, func()) {
+	t.Helper()
+	reg, _ := newTestRegistry()
+	t.Cleanup(reg.Close)
+	if err := reg.Add("shared", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Start("shared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.WaitLifecycle(context.Background(), "shared"); err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Type == EventServerStopped {
+			close(entered)
+			<-release
+		}
+	})
+	reservation, err := reg.ReserveLifecycle("shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg, reservation, entered, func() { releaseOnce.Do(func() { close(release) }) }
+}
+
+func TestRegistry_ReservationRestart_RequestEndAfterCommitStillStarts(t *testing.T) {
+	reg, reservation, entered, release := newBlockedStopReservation(t)
+	precommit, endRequest := context.WithCancel(context.Background())
+	commits := 0
+	outcome := make(chan reservationOutcome, 1)
+	go func() {
+		committed, err := reservation.Restart(precommit, context.Background(), true, func() { commits++ })
+		outcome <- reservationOutcome{committed: committed, err: err}
+	}()
+	<-entered
+	endRequest()
+	release()
+	select {
+	case got := <-outcome:
+		if !got.committed || got.err != nil || commits != 1 {
+			t.Fatalf("restart committed=%v commits=%d err=%v", got.committed, commits, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not finish after its stop handler returned")
+	}
+	if state := reg.Get("shared").State; state != StateRunning {
+		t.Fatalf("state after restart = %s, want running", state)
+	}
+}
+
+func TestRegistry_ReservationRestart_ShutdownAfterCommitDoesNotStart(t *testing.T) {
+	reg, reservation, entered, release := newBlockedStopReservation(t)
+	lifetime, shutdown := context.WithCancel(context.Background())
+	commits := 0
+	outcome := make(chan reservationOutcome, 1)
+	go func() {
+		committed, err := reservation.Restart(context.Background(), lifetime, true, func() { commits++ })
+		outcome <- reservationOutcome{committed: committed, err: err}
+	}()
+	<-entered
+	select {
+	case got := <-outcome:
+		t.Fatalf("restart returned while its stop handler was blocked: %+v", got)
+	default:
+	}
+	shutdown()
+	select {
+	case got := <-outcome:
+		if !got.committed || !errors.Is(got.err, context.Canceled) || commits != 1 {
+			t.Fatalf("restart committed=%v commits=%d err=%v", got.committed, commits, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not end the committed restart")
+	}
+	release()
+	if state := reg.Get("shared").State; state != StateStopped {
+		t.Fatalf("state after shutdown = %s, want stopped", state)
+	}
+}
+
+func TestRegistry_LifecycleAfterClose(t *testing.T) {
+	reg, _ := newTestRegistry()
+	reg.Close()
+	if err := reg.WaitLifecycle(context.Background(), "restart"); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("marker error = %v, want registry closed", err)
+	}
+	if err := restartTracked(context.Background(), reg, "restart"); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("restart error = %v, want registry closed", err)
+	}
 }
 
 // TestRegistry_Close_DrainsPendingEvents verifies Close is a real teardown

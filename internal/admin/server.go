@@ -25,6 +25,7 @@ const DefaultPort = 6275
 // Server is the Admin MCP server that provides management tools.
 type Server struct {
 	registry                 *server.Registry
+	restartServer            func(context.Context, string) (*RestartDrain, error)
 	instructions             *config.Instructions
 	daemonConfig             *config.Config // Mutable reference for persisting changes
 	configPath               string         // Path to servers.yaml
@@ -47,7 +48,11 @@ type Server struct {
 
 // Config configures the Admin MCP server.
 type Config struct {
-	Registry                 *server.Registry
+	Registry *server.Registry
+	// RestartServer performs the restart and returns a receipt only for a shared
+	// target whose drain completed or timed out. It may return a receipt with an
+	// error. When nil, vision_restart uses Registry.Restart.
+	RestartServer            func(context.Context, string) (*RestartDrain, error)
 	Instructions             *config.Instructions
 	DaemonConfig             *config.Config // Mutable reference for persisting changes
 	ConfigPath               string         // Path to servers.yaml for config persistence
@@ -83,6 +88,7 @@ func NewServer(cfg Config) *Server {
 
 	return &Server{
 		registry:                 cfg.Registry,
+		restartServer:            cfg.RestartServer,
 		instructions:             inst,
 		daemonConfig:             cfg.DaemonConfig,
 		configPath:               cfg.ConfigPath,
