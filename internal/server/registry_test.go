@@ -975,6 +975,222 @@ func TestRegistry_Restart_EventOrderingAlternates(t *testing.T) {
 	expectEvent(restarts, EventServerStopped)
 }
 
+func TestRegistry_TrackedRestart_WaitsForOwnHandlers(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+
+	if err := reg.Add("restart", &config.ServerConfig{Command: "sleep", Args: []string{"60"}}); err != nil {
+		t.Fatal(err)
+	}
+	initialStart := make(chan struct{})
+	reg.SetEventHandler(func(ServerEvent) { close(initialStart) })
+	if err := reg.Start("restart"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-initialStart:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial start handler did not run")
+	}
+
+	stopEntered := make(chan struct{})
+	startEntered := make(chan struct{})
+	startFinished := make(chan struct{})
+	releaseStop := make(chan struct{})
+	releaseStart := make(chan struct{})
+	var stopOnce, startOnce sync.Once
+	defer stopOnce.Do(func() { close(releaseStop) })
+	defer startOnce.Do(func() { close(releaseStart) })
+	reg.SetEventHandler(func(event ServerEvent) {
+		switch event.Type {
+		case EventServerStopped:
+			close(stopEntered)
+			<-releaseStop
+		case EventServerStarted:
+			close(startEntered)
+			<-releaseStart
+			close(startFinished)
+		}
+	})
+
+	result := make(chan error, 1)
+	go func() { result <- reg.RestartTracked(context.Background(), "restart") }()
+	select {
+	case <-stopEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart stop handler did not run")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("restart returned while its stop handler was blocked: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	select {
+	case <-startEntered:
+		t.Fatal("start handler ran before the stop handler completed")
+	default:
+	}
+	stopOnce.Do(func() { close(releaseStop) })
+	select {
+	case <-startEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart start handler did not run")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("restart returned while its start handler was blocked: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	startOnce.Do(func() { close(releaseStart) })
+	select {
+	case <-startFinished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart start handler did not finish")
+	}
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("restart: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart did not return after its handlers finished")
+	}
+}
+
+func TestRegistry_LifecycleMarkerAndTimeoutIsolation(t *testing.T) {
+	reg, _ := newTestRegistry()
+	reg.handlerTimeout = 100 * time.Millisecond
+	defer reg.Close()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Name == "blocked" {
+			close(entered)
+			<-release
+			close(finished)
+		}
+	})
+	reg.fireEvent(ServerEvent{Name: "blocked"})
+	<-entered
+	result := make(chan error, 1)
+	go func() { result <- reg.WaitLifecycle(context.Background(), "blocked") }()
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrLifecycleHandlerTimeout) {
+			t.Fatalf("marker error = %v, want handler timeout", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("marker did not report timed-out handler")
+	}
+	if err := reg.WaitLifecycle(context.Background(), "other"); err != nil {
+		t.Fatalf("unrelated target marker: %v", err)
+	}
+	once.Do(func() { close(release) })
+	<-finished
+	// The handler's return, not its final action, establishes the boundary.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := reg.WaitLifecycle(context.Background(), "blocked")
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrLifecycleHandlerTimeout) || time.Now().After(deadline) {
+			t.Fatalf("marker after handler return: %v", err)
+		}
+	}
+}
+
+func TestRegistry_TrackedRestart_ReportsHandlerTimeout(t *testing.T) {
+	reg, _ := newTestRegistry()
+	reg.handlerTimeout = 100 * time.Millisecond
+	defer reg.Close()
+	if err := reg.Add("restart", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Start("restart"); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.WaitLifecycle(context.Background(), "restart"); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	defer close(release)
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Type == EventServerStopped {
+			<-release
+		}
+	})
+	if err := reg.RestartTracked(context.Background(), "restart"); !errors.Is(err, ErrLifecycleHandlerTimeout) {
+		t.Fatalf("restart error = %v, want handler timeout", err)
+	}
+	if err := reg.WaitLifecycle(context.Background(), "restart"); !errors.Is(err, ErrLifecycleHandlerTimeout) {
+		t.Fatalf("marker error = %v, want handler timeout", err)
+	}
+}
+
+func TestRegistry_TrackedRestart_CancelledAfterMutationStillEnqueuesEvent(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+	if err := reg.Add("restart", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	reg.BlockStartup("restart", errors.New("retry"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg.SetStartupGuard(func(string) error {
+		cancel()
+		return nil
+	})
+	started := make(chan struct{})
+	reg.SetEventHandler(func(event ServerEvent) {
+		if event.Type == EventServerStarted {
+			close(started)
+		}
+	})
+	if err := reg.RestartTracked(ctx, "restart"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("restart error = %v, want cancellation", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("committed start event was not delivered")
+	}
+}
+
+func TestRegistry_TrackedRestart_CancelledBeforeMutationLeavesServer(t *testing.T) {
+	reg, _ := newTestRegistry()
+	defer reg.Close()
+	if err := reg.Add("restart", &config.ServerConfig{Command: "sleep"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Start("restart"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := reg.RestartTracked(ctx, "restart"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("restart error = %v, want cancellation", err)
+	}
+	if state := reg.Get("restart").State; state != StateRunning {
+		t.Fatalf("state = %s, want running", state)
+	}
+}
+
+func TestRegistry_LifecycleAfterClose(t *testing.T) {
+	reg, _ := newTestRegistry()
+	reg.Close()
+	if err := reg.WaitLifecycle(context.Background(), "restart"); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("marker error = %v, want registry closed", err)
+	}
+	if err := reg.RestartTracked(context.Background(), "restart"); !errors.Is(err, ErrRegistryClosed) {
+		t.Fatalf("restart error = %v, want registry closed", err)
+	}
+}
+
 // TestRegistry_Close_DrainsPendingEvents verifies Close is a real teardown
 // boundary: queued events are delivered before it returns, and the drain
 // goroutine does not outlive the registry.

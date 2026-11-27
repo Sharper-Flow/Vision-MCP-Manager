@@ -55,6 +55,9 @@ type Daemon struct {
 	// Proxy setup deduplication (prevents race between handleServerEvent and setupHTTPProxies)
 	proxySetupInProgress sync.Map
 
+	sharedRestartGates        sync.Map
+	sharedRestartDrainTimeout time.Duration
+
 	// Per-server session metrics, keyed by server name.
 	serverMetrics   map[string]*metrics.ServerMetrics
 	serverMetricsMu sync.RWMutex
@@ -154,7 +157,11 @@ func New(cfg Config) (*Daemon, error) {
 	daemonMetrics := metrics.NewDaemonMetrics()
 
 	// Create Admin MCP server (primary management interface)
+	var d *Daemon
 	adminSrv := admin.NewServer(admin.Config{
+		RestartServer: func(ctx context.Context, name string) (*admin.RestartDrain, error) {
+			return d.restartServer(ctx, name)
+		},
 		Registry:     reg,
 		Instructions: instructions,
 		DaemonConfig: visionCfg,
@@ -164,7 +171,7 @@ func New(cfg Config) (*Daemon, error) {
 		Metrics:      daemonMetrics,
 	})
 
-	d := &Daemon{
+	d = &Daemon{
 		cfg:                              visionCfg,
 		configPath:                       cfg.ConfigPath,
 		supervisor:                       sup,
@@ -180,6 +187,7 @@ func New(cfg Config) (*Daemon, error) {
 		managedBackends:                  make(map[string]*supervisor.BackendCoordinator),
 		managedCancels:                   make(map[string]context.CancelFunc),
 		managedHTTPDrainWarningThreshold: defaultManagedHTTPDrainWarningThreshold,
+		sharedRestartDrainTimeout:        defaultSharedRestartDrainTimeout,
 		ownershipStore:                   store,
 		reconciler:                       reconciler,
 		daemonID:                         daemonID,
@@ -958,6 +966,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		sharedMgr.StartHealthProbe(d.ctx)
 
 		proxyCfg.SharedManager = sharedMgr
+		proxyCfg.SharedRestartGate = mcp.NewSharedRestartGate()
 		proxyCfg.DisconnectGracePeriod = srv.Config.ResolvedDisconnectGracePeriod()
 		closer = sharedMgr
 
@@ -987,6 +996,7 @@ func (d *Daemon) setupProxyForServer(srv *server.ManagedServer) error {
 		return setupErr
 	}
 	if sharedMgr != nil {
+		d.sharedRestartGates.Store(srv.Name, proxyCfg.SharedRestartGate)
 		sharedMgr.StartReaper(d.ctx, srv.Config.SessionTimeout.Duration()/2)
 	}
 	d.serverMetricsMu.Lock()
@@ -1239,6 +1249,7 @@ func waitForManagedHTTPBackend(ctx context.Context, target *url.URL) error {
 
 // teardownProxyForServer removes the HTTP proxy for a server.
 func (d *Daemon) teardownProxyForServer(name string) {
+	d.sharedRestartGates.Delete(name)
 	if err := d.portManager.Remove(name); err != nil {
 		d.logger.Debug("failed to remove proxy for server",
 			slog.String("server", name),
